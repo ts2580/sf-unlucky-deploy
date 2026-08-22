@@ -16,12 +16,13 @@ describe('Apex test plan', () => {
     const root = await fixtureRoot(temporaryDirectories, {
       'classes/Order_Test.cls': 'public class Order_Test {}',
       'classes/Account_Test.cls': 'public class Account_Test {}',
+      'classes/Legacy_test.cls': 'public class Legacy_test {}',
       'classes/OrderService.cls': 'public class OrderService {}',
     });
 
     await expect(selectApexTestPlan(root)).resolves.toEqual({
       level: 'RunSpecifiedTests',
-      tests: ['Account_Test', 'Order_Test'],
+      tests: ['Account_Test', 'Legacy_test', 'Order_Test'],
       selection: 'suffix',
     });
   });

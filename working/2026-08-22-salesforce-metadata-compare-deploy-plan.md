@@ -444,12 +444,14 @@ org에서 생성한 manifest는 검토 후 비교·배포에 사용하며, manag
 ### Phase 4. 실제 org 최소 검증
 
 - [ ] 두 org 인증 별칭 준비
-- [ ] 작은 manifest로 비교
-- [ ] local → org dry-run
-- [ ] org → org dry-run
-- [ ] 구조화된 diff와 실제 메타데이터 대조
+- [x] 작은 manifest로 비교
+- [x] local → org dry-run
+- [x] org → org dry-run 실행 경로 확인
+- [x] 구조화된 diff와 실제 메타데이터 대조
 
 완료 조건: 실제 org에서 유무·내용 차이와 배포 검증 결과가 재현된다.
+
+진행 기록(2026-08-22): 연결된 `stdOrg`(API 67.0)에서 ApexClass 5개를 같은 org끼리 비교해 동일 5건을 확인했다. 임시 로컬 Apex와 `_Test` 클래스를 target 기준 `ADDED` 2건으로 비교했고, `RunSpecifiedTests` 1건·실패 0건·커버리지 100%로 check-only 배포에 성공했다. 배포 후 Tooling API 조회 결과 임시 클래스는 0건이었다. org → org check-only도 소문자 `_test` 클래스(`Oauth2_test`) 자동 선택까지 확인했으며, 배포 대상 기존 클래스 4개의 테스트 커버리지 0% 때문에 Salesforce 검증 단계에서 거부됐다. 독립된 두 org 간 검증은 두 번째 별칭이 없어 남아 있다.
 
 ### Phase 5. 저장소 정리
 
@@ -460,7 +462,7 @@ org에서 생성한 manifest는 검토 후 비교·배포에 사용하며, manag
 
 완료 조건: 새 환경에서 설치·테스트·비교 명령을 문서만 보고 재현할 수 있다.
 
-진행 기록(2026-08-22): 실제 Salesforce CLI local ↔ local 변환·비교, mock org 비교·배포, Playwright 데스크톱·모바일 렌더링 검증 완료. 실제 org 검증과 CI 원격 실행 결과는 아직 대기 중이다.
+진행 기록(2026-08-22): 실제 Salesforce CLI local ↔ local 변환·비교, mock org 비교·배포, Playwright 데스크톱·모바일 렌더링을 검증했다. `stdOrg` 실제 메타데이터 비교와 local → org check-only 배포도 검증했으며, GitHub Actions의 canary와 main 실행도 통과했다. 독립된 두 org 간 검증만 두 번째 인증 별칭을 기다리고 있다.
 
 ## 13. 첫 버전에서 제외할 범위
 

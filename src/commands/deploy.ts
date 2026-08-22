@@ -63,11 +63,11 @@ export async function runDeployCommand(
   const targetAlias = normalizeTargetAlias(options.to);
   const targetSource = parseSourceSpec(`org:${targetAlias}`, cwd);
   const context = await createRunContext(cwd, options.reportDir, 'deploy');
-  await writeRunMetadata(context, 'deploy', source, targetSource.displayName, manifestPath);
+  await writeRunMetadata(context, 'deploy', targetSource, source.displayName, manifestPath);
 
-  const [sourceSnapshot, targetSnapshot] = await Promise.all([
+  const [targetSnapshot, sourceSnapshot] = await Promise.all([
     createSnapshot({
-      source,
+      source: targetSource,
       manifestPath,
       outputDir: context.leftSnapshotDirectory,
       commandProjectPath: cwd,
@@ -75,7 +75,7 @@ export async function runDeployCommand(
       waitMinutes: options.wait ?? 60,
     }),
     createSnapshot({
-      source: targetSource,
+      source,
       manifestPath,
       outputDir: context.rightSnapshotDirectory,
       commandProjectPath: cwd,
@@ -84,9 +84,14 @@ export async function runDeployCommand(
     }),
   ]);
 
-  const comparison = await compareSnapshots(sourceSnapshot, targetSnapshot, {
+  const comparison = await compareSnapshots(targetSnapshot, sourceSnapshot, {
     strict: options.strict ?? false,
   });
+  if (comparison.summary.removed > 0) {
+    comparison.warnings.push(
+      'REMOVED는 target에만 존재하는 차이이며 destructive manifest 없이는 실제로 삭제되지 않습니다.',
+    );
+  }
   const testPlan = await selectApexTestPlan(
     sourceSnapshot.packageRoot,
     options.testLevel ?? 'auto',
@@ -151,7 +156,6 @@ function buildDeployArgs(
     targetAlias,
     '--metadata-dir',
     metadataDirectory,
-    '--single-package',
     '--wait',
     String(options.wait ?? 60),
     '--test-level',

@@ -19,7 +19,7 @@ export class ProcessSfClient implements SfClient {
     if (result.exitCode !== 0) {
       throw new SfudError(
         'SF_COMMAND_FAILED',
-        `Salesforce CLI 명령이 실패했습니다 (${describeCommand(finalArgs)}): ${describeFailure(result.stdout, result.stderr)}`,
+        `Salesforce CLI 명령이 실패했습니다 (${describeCommand(finalArgs)}): ${extractSfFailureMessage(result.stdout, result.stderr)}`,
       );
     }
 
@@ -28,7 +28,7 @@ export class ProcessSfClient implements SfClient {
       if (typeof parsed.status === 'number' && parsed.status !== 0) {
         throw new SfudError(
           'SF_COMMAND_FAILED',
-          `Salesforce CLI가 실패 상태를 반환했습니다 (${describeCommand(finalArgs)}): ${redactSensitiveText(parsed.message ?? '상세 메시지 없음')}`,
+          `Salesforce CLI가 실패 상태를 반환했습니다 (${describeCommand(finalArgs)}): ${extractSfFailureMessage(result.stdout, result.stderr)}`,
         );
       }
       return parsed;
@@ -129,22 +129,41 @@ function describeCommand(args: readonly string[]): string {
   return `sf ${args.filter((argument) => argument !== '--json').slice(0, 4).join(' ')}`;
 }
 
-function describeFailure(stdout: string, stderr: string): string {
-  let jsonMessage = '';
+export function extractSfFailureMessage(stdout: string, stderr: string): string {
+  const messages: string[] = [];
   try {
-    const parsed = JSON.parse(stdout) as { message?: unknown; name?: unknown };
-    if (typeof parsed.message === 'string') {
-      jsonMessage = parsed.message;
-    } else if (typeof parsed.name === 'string') {
-      jsonMessage = parsed.name;
-    }
+    collectFailureMessages(JSON.parse(stdout) as unknown, messages);
   } catch {
-    jsonMessage = stdout;
+    messages.push(stdout);
   }
 
-  const details = [jsonMessage, stderr]
+  const details = [...messages, stderr]
     .map(redactSensitiveText)
     .filter((value) => value.length > 0)
     .filter((value, index, values) => values.indexOf(value) === index);
   return details.join(' | ') || '상세 메시지 없음';
+}
+
+function collectFailureMessages(value: unknown, messages: string[], key = ''): void {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectFailureMessages(entry, messages, key);
+    }
+    return;
+  }
+  if (typeof value === 'object' && value !== null) {
+    for (const [childKey, child] of Object.entries(value)) {
+      collectFailureMessages(child, messages, childKey);
+    }
+    return;
+  }
+
+  if (
+    typeof value === 'string' &&
+    /^(?:message|name|problem|errorMessage|status)$/iu.test(key) &&
+    value.length > 0 &&
+    value !== 'Succeeded'
+  ) {
+    messages.push(value);
+  }
 }

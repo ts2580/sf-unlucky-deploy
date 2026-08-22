@@ -176,6 +176,8 @@ npm run dev -- deploy \
 5. `--execute`가 있을 때 payload SHA-256 재확인
 6. dry-run에 사용한 동일 payload 실제 배포
 
+배포 전 차이는 `target → desired source` 방향으로 표시한다. `ADDED`는 source에서 target에 추가할 항목이다. `REMOVED`는 target에만 존재하는 항목이지만 destructive manifest를 사용하지 않으므로 자동 삭제되지 않는다.
+
 dry-run 성공 후 실제 배포하려면 다음처럼 실행한다.
 
 ```bash
@@ -193,7 +195,7 @@ npm run dev -- deploy \
 기본 `--test-level`은 `auto`다.
 
 1. `--tests`로 지정한 클래스가 있으면 해당 클래스 사용
-2. 지정하지 않았다면 staging의 `classes/*_Test.cls` 자동 선택
+2. 지정하지 않았다면 staging의 `classes/*_Test.cls` 자동 선택(접미자 대소문자 무시)
 3. 하나 이상 발견하면 `RunSpecifiedTests`로 전달
 4. 발견하지 못하면 `RunLocalTests`로 fallback
 

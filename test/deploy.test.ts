@@ -33,6 +33,7 @@ describe('deploy command', () => {
     const deployCalls = client.calls.filter((call) => call.args.includes('deploy'));
     expect(deployCalls).toHaveLength(1);
     expect(deployCalls[0]?.args).toContain('--dry-run');
+    expect(deployCalls[0]?.args).not.toContain('--single-package');
     expect(deployCalls[0]?.args).toEqual(
       expect.arrayContaining(['--test-level', 'RunSpecifiedTests', '--tests', 'Hello_Test']),
     );
@@ -45,6 +46,26 @@ describe('deploy command', () => {
     await expect(readFile(path.join(fixture.runDirectory, 'logs', 'dry-run.json'), 'utf8')).resolves.not.toContain(
       'must-not-leak',
     );
+  });
+
+  it('배포 비교는 target에서 desired source 방향으로 추가 항목을 표시한다', async () => {
+    const fixture = await createDeployFixture(temporaryDirectories);
+    const client = new DeployFixtureSfClient(false, null);
+
+    const result = await runDeployCommand(
+      {
+        from: `local:${fixture.projectPath}`,
+        to: 'target',
+        manifest: fixture.manifestPath,
+        reportDir: fixture.runDirectory,
+        dryRun: true,
+        color: false,
+      },
+      { cwd: fixture.projectPath, sfClient: client, stdout: () => undefined },
+    );
+
+    expect(result.comparison.summary).toMatchObject({ added: 2, removed: 0 });
+    expect(result.comparison.components.map((component) => component.status)).toEqual(['ADDED', 'ADDED']);
   });
 
   it('--execute면 dry-run 성공 후 동일 payload를 실제 배포한다', async () => {
@@ -139,7 +160,7 @@ class DeployFixtureSfClient implements SfClient {
 
   public constructor(
     private readonly mutateAfterDryRun = false,
-    private readonly targetValue = 'target',
+    private readonly targetValue: string | null = 'target',
   ) {}
 
   public async runJson(args: readonly string[], options: SfRunOptions): Promise<unknown> {
@@ -157,7 +178,12 @@ class DeployFixtureSfClient implements SfClient {
   }
 }
 
-async function writeSnapshot(outputDirectory: string, value: string): Promise<void> {
+async function writeSnapshot(outputDirectory: string, value: string | null): Promise<void> {
+  if (value === null) {
+    await writeFixtureFiles(outputDirectory, { 'package.xml': '<Package/>\n' });
+    return;
+  }
+
   await writeFixtureFiles(outputDirectory, {
     'package.xml': '<Package/>\n',
     'classes/Hello.cls': `public class Hello { String value = '${value}'; }\n`,

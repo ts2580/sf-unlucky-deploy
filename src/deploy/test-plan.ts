@@ -60,7 +60,7 @@ export async function selectApexTestPlan(
 
 export async function discoverSuffixTests(packageRoot: string): Promise<string[]> {
   return (await listFiles(packageRoot))
-    .filter((relativePath) => /^classes\/[^/]+_Test\.cls$/u.test(relativePath))
+    .filter((relativePath) => /^classes\/[^/]+_Test\.cls$/iu.test(relativePath))
     .map((relativePath) => path.posix.basename(relativePath, '.cls'))
     .sort((left, right) => left.localeCompare(right));
 }

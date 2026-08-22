@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { redactSensitiveText, sanitizeSfOutput } from '../src/salesforce/sf-client.js';
+import {
+  extractSfFailureMessage,
+  redactSensitiveText,
+  sanitizeSfOutput,
+} from '../src/salesforce/sf-client.js';
 
 describe('Salesforce CLI output sanitization', () => {
   it('중첩된 인증 필드와 auth URL을 제거한다', () => {
@@ -29,5 +33,19 @@ describe('Salesforce CLI output sanitization', () => {
     expect(redactSensitiveText('failed: force://client:secret@example.com')).toBe(
       'failed: force://[REDACTED]',
     );
+  });
+
+  it('Metadata API component failure의 실제 원인을 추출한다', () => {
+    const stdout = JSON.stringify({
+      status: 1,
+      result: {
+        status: 'Failed',
+        details: {
+          componentFailures: [{ problem: 'No package.xml found', problemType: 'Error' }],
+        },
+      },
+    });
+
+    expect(extractSfFailureMessage(stdout, '')).toBe('Failed | No package.xml found');
   });
 });
