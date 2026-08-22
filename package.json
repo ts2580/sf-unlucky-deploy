@@ -1,0 +1,30 @@
+{
+  "name": "sf-unlucky-deploy",
+  "version": "0.1.0",
+  "description": "Salesforce 메타데이터를 비교하고 안전하게 검증·배포하는 CLI",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "sfud": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc --project tsconfig.build.json",
+    "check": "tsc --project tsconfig.json && vitest run && tsc --project tsconfig.build.json",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --project tsconfig.json"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "commander": "^15.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}

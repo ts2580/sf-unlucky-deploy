@@ -1,0 +1,20 @@
+# Node.js
+node_modules/
+dist/
+coverage/
+*.log
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Salesforce CLI and sf-unlucky-deploy runtime files
+.sf/
+.sfdx/
+.sfud/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
