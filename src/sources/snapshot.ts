@@ -1,0 +1,108 @@
+import { mkdir } from 'node:fs/promises';
+import path from 'node:path';
+
+import { SfudError } from '../core/errors.js';
+import {
+  ensureEmptyDirectory,
+  findPackageRoot,
+  pathExists,
+  sha256Directory,
+  sha256File,
+  writeJson,
+} from '../core/files.js';
+import type { SfClient } from '../salesforce/sf-client.js';
+import type { SourceSpec } from './source-spec.js';
+
+export interface SnapshotOptions {
+  source: SourceSpec;
+  manifestPath: string;
+  outputDir: string;
+  commandProjectPath: string;
+  sfClient: SfClient;
+  waitMinutes?: number;
+}
+
+export interface MetadataSnapshot {
+  source: SourceSpec;
+  packageRoot: string;
+  manifestPath: string;
+  manifestSha256: string;
+  payloadSha256: string;
+  createdAt: string;
+}
+
+export async function createSnapshot(options: SnapshotOptions): Promise<MetadataSnapshot> {
+  const manifestPath = path.resolve(options.manifestPath);
+  await validateInputs(options.source, manifestPath);
+  await ensureEmptyDirectory(options.outputDir);
+
+  const rawDir = path.join(options.outputDir, 'raw');
+  await mkdir(rawDir, { recursive: true });
+
+  if (options.source.kind === 'org') {
+    await options.sfClient.runJson(
+      [
+        'project',
+        'retrieve',
+        'start',
+        '--target-org',
+        options.source.alias,
+        '--manifest',
+        manifestPath,
+        '--target-metadata-dir',
+        rawDir,
+        '--unzip',
+        '--single-package',
+        '--wait',
+        String(options.waitMinutes ?? 60),
+      ],
+      { cwd: options.commandProjectPath },
+    );
+  } else {
+    await options.sfClient.runJson(
+      [
+        'project',
+        'convert',
+        'source',
+        '--manifest',
+        manifestPath,
+        '--output-dir',
+        rawDir,
+        '--package-name',
+        'sfud',
+      ],
+      { cwd: options.source.projectPath },
+    );
+  }
+
+  const packageRoot = await findPackageRoot(rawDir);
+  const snapshot: MetadataSnapshot = {
+    source: options.source,
+    packageRoot,
+    manifestPath,
+    manifestSha256: await sha256File(manifestPath),
+    payloadSha256: await sha256Directory(packageRoot),
+    createdAt: new Date().toISOString(),
+  };
+
+  await writeJson(path.join(options.outputDir, 'snapshot.json'), snapshot);
+  return snapshot;
+}
+
+async function validateInputs(source: SourceSpec, manifestPath: string): Promise<void> {
+  if (!(await pathExists(manifestPath))) {
+    throw new SfudError('INVALID_ARGUMENT', `manifest 파일을 찾을 수 없습니다: ${manifestPath}`);
+  }
+
+  if (source.kind === 'local') {
+    if (!(await pathExists(source.projectPath))) {
+      throw new SfudError('INVALID_SOURCE', `로컬 프로젝트를 찾을 수 없습니다: ${source.projectPath}`);
+    }
+    if (!(await pathExists(path.join(source.projectPath, 'sfdx-project.json')))) {
+      throw new SfudError(
+        'INVALID_SOURCE',
+        `sfdx-project.json이 없는 로컬 경로입니다: ${source.projectPath}`,
+      );
+    }
+  }
+}

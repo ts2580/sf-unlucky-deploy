@@ -1,0 +1,16 @@
+# Local tooling
+node_modules/**
+dist/**
+coverage/**
+.sfud/**
+working/**
+test/**
+
+# Local environment
+.env
+.env.*
+
+# Operating systems and editors
+.DS_Store
+.idea/**
+.vscode/**

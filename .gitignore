@@ -13,6 +13,8 @@ coverage/
 .sf/
 .sfdx/
 .sfud/
+playwright-report/
+test-results/
 
 # Editors and operating systems
 .idea/

@@ -1,0 +1,38 @@
+name: 검증
+
+on:
+  push:
+    branches:
+      - main
+      - canary
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 소스 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Node.js 설정
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: 의존성 설치
+        run: npm ci
+
+      - name: 타입·단위 테스트·빌드
+        run: npm run check
+
+      - name: Playwright Chromium 설치
+        run: npx playwright install --with-deps chromium
+
+      - name: HTML 리포트 E2E 테스트
+        run: npm run test:e2e

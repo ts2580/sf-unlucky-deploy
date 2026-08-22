@@ -222,19 +222,22 @@ Profile과 PermissionSet은 manifest에 포함된 다른 메타데이터 범위�
 │   ├── summary.md
 │   ├── summary.json
 │   ├── content.diff
+│   ├── report.html
 │   └── checksums.json
 └── logs/
-    ├── left-snapshot.json
-    └── right-snapshot.json
+    ├── test-plan.json
+    ├── dry-run.json
+    └── deploy.json
 ```
 
 - `summary.md`: 사람이 읽는 변경 요약과 상세
 - `summary.json`: CI와 후속 자동화가 사용하는 구조화된 결과
 - `content.diff`: 전체 unified diff
+- `report.html`: 브라우저에서 확인하는 self-contained 상세 리포트
 - `checksums.json`: manifest와 staging payload의 무결성
 - `run.json`: 실행 시각, 소스 종류, org 별칭, CLI/API 버전, 옵션
 
-로그는 Salesforce CLI의 민감 필드를 저장하기 전에 allowlist 방식으로 정제한다.
+로그는 Salesforce CLI의 민감 키와 인증 URL을 제거한 뒤 저장한다.
 
 ## 6. 배포 흐름
 
@@ -396,45 +399,45 @@ org에서 생성한 manifest는 검토 후 비교·배포에 사용하며, manag
 
 ### Phase 0. 프로젝트 골격
 
-- [ ] Salesforce DX 프로젝트 생성
+- [x] Salesforce DX 프로젝트 생성
 - [x] TypeScript CLI 골격 생성
 - [x] `.sfud/` 및 인증 관련 파일 ignore
-- [ ] 공통 manifest 작성
+- [x] 공통 manifest 작성
 - [x] 기본 테스트 실행 환경 구성
 
 완료 조건: `sfud --help`와 테스트 명령이 로컬에서 성공한다.
 
-진행 기록(2026-08-22): TypeScript CLI 도움말, 타입 검사, 단위 테스트 2개 및 빌드 성공. Salesforce DX 프로젝트와 manifest는 다음 작업으로 남아 있다.
+진행 기록(2026-08-22): API 67.0 Salesforce DX 골격, TypeScript CLI, 공통 manifest와 테스트 실행 환경 구성 완료.
 
 ### Phase 1. 공통 snapshot
 
-- [ ] `org:<alias>` 파서와 org snapshot 구현
-- [ ] `local:<path>` 파서와 local snapshot 구현
-- [ ] staging root 정규화
-- [ ] manifest 및 payload 체크섬 기록
-- [ ] 민감 정보가 없는 실행 메타데이터 저장
+- [x] `org:<alias>` 파서와 org snapshot 구현
+- [x] `local:<path>` 파서와 local snapshot 구현
+- [x] staging root 정규화
+- [x] manifest 및 payload 체크섬 기록
+- [x] 민감 정보가 없는 실행 메타데이터 저장
 
 완료 조건: mock org와 fixture local이 비교 가능한 동일 디렉터리 형식으로 생성된다.
 
 ### Phase 2. 상세 비교
 
-- [ ] 컴포넌트 유무 분류
-- [ ] XML 구조 비교와 경로별 이전값·새값
-- [ ] 텍스트 unified diff
-- [ ] 바이너리 체크섬 비교
-- [ ] 번들 단위 집계
-- [ ] terminal, Markdown, JSON 리포트
+- [x] 컴포넌트 유무 분류
+- [x] XML 구조 비교와 경로별 이전값·새값
+- [x] 텍스트 unified diff
+- [x] 바이너리 체크섬 비교
+- [x] 번들 단위 집계
+- [x] terminal, Markdown, JSON, HTML 리포트
 
 완료 조건: 유무와 내용 차이가 fixture 기대 결과와 정확히 일치한다.
 
 ### Phase 3. 검증·배포
 
-- [ ] org → org staging 배포
-- [ ] local → org staging 배포
-- [ ] 기본 dry-run 및 명시적 `--execute`
-- [ ] test-level 전달
-- [ ] 비교 payload와 배포 payload의 체크섬 검증
-- [ ] 배포 결과 리포트
+- [x] org → org staging 배포
+- [x] local → org staging 배포
+- [x] 기본/명시적 `--dry-run` 및 명시적 `--execute`
+- [x] `*_Test.cls` 자동 선택 및 test-level 전달
+- [x] 비교 payload와 배포 payload의 체크섬 검증
+- [x] 배포 결과 리포트
 
 완료 조건: mock 환경에서 dry-run 실패가 실제 배포를 막고, 승인된 동일 payload만 배포된다.
 
@@ -450,12 +453,14 @@ org에서 생성한 manifest는 검토 후 비교·배포에 사용하며, manag
 
 ### Phase 5. 저장소 정리
 
-- [ ] README 사용법 작성
-- [ ] CI에서 unit/fixture 통합 테스트 실행
-- [ ] 예정 원격을 `origin`으로 등록
-- [ ] 사용자 확인 후 초기 커밋 및 push
+- [x] README 사용법 작성
+- [x] CI에서 unit/fixture 및 Playwright 테스트 구성
+- [x] 예정 원격을 `origin`으로 등록
+- [x] 사용자 확인 후 초기 커밋 및 push
 
 완료 조건: 새 환경에서 설치·테스트·비교 명령을 문서만 보고 재현할 수 있다.
+
+진행 기록(2026-08-22): 실제 Salesforce CLI local ↔ local 변환·비교, mock org 비교·배포, Playwright 데스크톱·모바일 렌더링 검증 완료. 실제 org 검증과 CI 원격 실행 결과는 아직 대기 중이다.
 
 ## 13. 첫 버전에서 제외할 범위
 
