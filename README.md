@@ -64,6 +64,18 @@ npm run build
 node dist/cli.js --help
 ```
 
+### GitHub Release 패키지 설치
+
+GitHub Release에서 버전별 `.tgz`와 `SHA256SUMS`를 내려받아 설치할 수 있다. npm registry에는 발행하지 않는다.
+
+```bash
+sha256sum --check SHA256SUMS
+npm install --global --allow-scripts=sqlite3 ./sf-unlucky-deploy-0.1.0.tgz
+sfud --version
+```
+
+`sqlite3` native binding 설치 스크립트만 명시적으로 허용한다. Release는 `package.json`과 같은 버전의 annotated tag가 최신 `main` 커밋을 정확히 가리킬 때만 발행한다.
+
 아래 예시의 `sfud`는 빌드된 CLI를 뜻한다. 개발 중에는 `sfud` 대신 `npm run dev --`를 앞에 사용하면 된다.
 
 ## 메타데이터 비교
