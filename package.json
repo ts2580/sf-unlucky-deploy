@@ -15,7 +15,7 @@
     "dev": "tsx src/cli.ts",
     "dev:ui": "vite --config ui/vite.config.ts",
     "test": "vitest run",
-    "test:e2e": "playwright test",
+    "test:e2e": "node scripts/run-playwright.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --project tsconfig.json && tsc --project tsconfig.ui.json && tsc --project tsconfig.e2e.json",
     "verify": "npm run check && npm run test:e2e"
