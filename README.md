@@ -2,7 +2,11 @@
 
 Salesforce org와 로컬 Salesforce DX 프로젝트의 메타데이터를 같은 형식으로 스냅샷화하고, 유무와 내용 차이를 확인한 뒤 검증·배포하는 TypeScript CLI다.
 
-> 현재 상태: 비교·리포트·dry-run/배포 핵심 구현 완료. fixture와 mock org 검증은 통과했으며 실제 org 검증은 인증 별칭이 준비된 뒤 진행한다.
+> 현재 상태: 비교·리포트·dry-run/배포 핵심 구현 완료. fixture, mock org와 실제 `aladin → stdOrg` check-only 검증을 통과했다.
+
+## 아이디어의 출발점
+
+이 프로젝트의 아이디어는 Aladin 프로젝트의 [classDeploy Lightning Web Component](https://github.com/ts2580/Aladin/tree/main/force-app/main/default/lwc/classDeploy)에서 시작했다. Salesforce 클래스 배포 경험을 org와 로컬 프로젝트 전반의 메타데이터 비교·검증·배포 흐름으로 확장한다.
 
 ## 제공 기능
 
@@ -16,6 +20,8 @@ Salesforce org와 로컬 Salesforce DX 프로젝트의 메타데이터를 같은
 - staging payload 체크섬 고정 및 변경 시 배포 차단
 - `*_Test.cls` 자동 선택과 Apex test level 전달
 - Salesforce CLI 결과의 인증 토큰 로그 제거
+- SQLite 기반 사용자·역할·승인·배포 상태·감사 로그 영구 저장
+- 단일 배포 큐와 재시작 후 `RECONCILE_REQUIRED` 복구 상태
 
 세부 설계와 진행 상태는 [작업 계획](./working/2026-08-22-salesforce-metadata-compare-deploy-plan.md)에서 관리한다.
 
@@ -251,6 +257,74 @@ manifest/permissions.xml
 
 diff 결과만으로 destructive deployment를 자동 생성하거나 실행하지 않는다.
 
+## 웹 UI와 SQLite 상태 저장소
+
+웹 UI는 사용자·권한·배포 승인·작업 상태와 감사 로그를 SQLite에 저장한다. 기본 위치는 현재 프로젝트의 `.sfud/sfud.db`다. 비교 리포트와 원본 실행 결과는 기존 `.sfud/runs` 파일 구조를 유지하며 데이터베이스에는 인덱스와 무결성 정보만 기록한다.
+
+```bash
+npm run build
+node dist/cli.js ui --no-open
+```
+
+셀프 호스팅에서는 영속 volume의 디렉터리를 명시한다.
+
+```bash
+node dist/cli.js ui \
+  --host 0.0.0.0 \
+  --allow-remote \
+  --project /srv/salesforce/project-a \
+  --project /srv/salesforce/project-b \
+  --data-dir /var/lib/sfud \
+  --no-open
+```
+
+`--project`는 반복해서 지정할 수 있으며 웹 API는 이 allowlist 밖의 로컬 경로와 manifest를 거부한다. 옵션을 생략하면 서버를 시작한 현재 Salesforce DX 프로젝트만 허용한다. `SFUD_DATA_DIR` 환경변수로도 저장 위치를 지정할 수 있다. 데이터 디렉터리는 `0700`, DB 파일은 `0600` 권한으로 제한하며 다음 설정을 적용한다.
+
+```text
+foreign_keys = ON
+journal_mode = WAL
+busy_timeout = 5000ms
+```
+
+사용자가 없으면 서버 시작 로그에 일회용 `최초 관리자 설정 코드`가 표시된다. 웹 화면에서 이 코드와 이메일, 표시 이름, 12자 이상의 비밀번호를 입력해 첫 `ADMIN` 계정을 만든다. 자동화된 설치에서는 환경변수로 코드를 고정할 수 있다.
+
+```bash
+SFUD_BOOTSTRAP_TOKEN="충분히-긴-일회용-설정-코드" \
+node dist/cli.js ui --no-open
+```
+
+최초 관리자가 생성되면 해당 코드는 더 이상 사용할 수 없다. 비밀번호는 `scrypt`로 해시하고 세션·CSRF 토큰은 SHA-256 해시만 SQLite에 저장한다. 세션 쿠키는 `HttpOnly`, `SameSite=Strict`이며 HTTPS reverse proxy에서는 `Secure` 속성도 적용된다. Nginx 등 reverse proxy는 원래 `Host`와 `X-Forwarded-Proto` 헤더를 전달해야 한다.
+
+```nginx
+proxy_set_header Host $host;
+proxy_set_header X-Forwarded-Proto $scheme;
+```
+
+인증된 사용자만 배포 작업 이력 API에 접근할 수 있고, 로그아웃을 포함한 상태 변경 요청은 동일 출처와 CSRF 토큰을 모두 검증한다. OIDC는 셀프 호스팅 로컬 계정과 병행할 수 있는 후속 인증 공급자로 추가한다.
+
+### 웹 비교 실행
+
+`OPERATOR`, `DEPLOYER`, `ADMIN` 사용자는 웹의 **새 비교** 화면에서 연결된 Salesforce org와 허용된 로컬 프로젝트를 LEFT/RIGHT로 선택할 수 있다. 서버는 `sf org list --json` 결과에서 별칭, 표시 이름, edition, 연결 상태만 추출하며 토큰·client ID·키 경로·로컬 절대 경로를 API에 반환하지 않는다.
+
+비교 요청은 SQLite에 먼저 `QUEUED` 상태로 기록한 뒤 별도 단일 큐에서 기존 `runCompareCommand` 코어를 실행한다. 브라우저는 작업 상태를 polling하고 완료되면 추가·삭제·변경·동일 요약과 컴포넌트별 파일 diff를 표시한다. 서버가 재시작되면 실행 중이던 비교는 `PROCESS_INTERRUPTED` 실패로 남겨 원인 없이 사라지지 않게 한다.
+
+### 웹 dry-run
+
+**새 배포** 화면은 허용된 source, target org, manifest와 Apex 테스트 수준을 받아 항상 Salesforce `--dry-run` check-only만 실행한다. `OPERATOR`, `DEPLOYER`, `ADMIN` 역할이 실행할 수 있으며 `VIEWER`는 이력만 조회한다.
+
+작업은 SQLite의 `QUEUED → DRY_RUN_RUNNING → APPROVAL_PENDING | FAILED | RECONCILE_REQUIRED` 상태를 사용한다. snapshot과 비교가 끝난 실제 staging payload SHA-256, 비교 결과, 자동 또는 명시적으로 선택된 Apex 테스트, 정제된 Salesforce 결과를 함께 저장한다. 준비 전 요청 지문은 API에서 payload checksum으로 노출하지 않으며 `prepared=1`인 성공 작업만 다음 실제 배포 승인 단계로 넘길 수 있다.
+
+실제 `aladin → stdOrg` 검증에서는 독립 Apex 클래스 1개가 `checkOnly: true`, `status: Succeeded`, `executed: false`로 완료됐다. 의존성이 빠진 LWC manifest는 Salesforce 오류를 `FAILED`로 정확히 기록했으며 실제 반영은 발생하지 않았다.
+
+배포 작업은 한 번에 하나만 실행하고 다음 상태를 영구 기록한다.
+
+```text
+dry-run: QUEUED → DRY_RUN_RUNNING → APPROVAL_PENDING | FAILED | RECONCILE_REQUIRED
+deploy:  QUEUED → DEPLOYING → SUCCEEDED | FAILED | RECONCILE_REQUIRED
+```
+
+실제 배포 승인은 성공한 dry-run, 동일한 payload SHA-256, 동일한 target org, `DEPLOYER` 또는 `ADMIN` 역할과 `실제 배포` 확인 문구를 모두 요구한다. Salesforce access token과 auth URL은 SQLite에도 저장하지 않는다.
+
 ## 개발 명령
 
 | 명령 | 설명 |
@@ -284,4 +358,4 @@ feat/* 또는 fix/* → canary → main
 - 실제 Salesforce CLI 기반 local ↔ local source 변환·비교
 - Playwright Chromium 기반 데스크톱·모바일 HTML 렌더링
 
-실제 org ↔ org retrieve와 실제 target dry-run은 org 인증 별칭이 준비된 뒤 검증한다.
+실제 org 전체 범위 검증은 배포 대상과 manifest를 명시적으로 정한 뒤 수행한다. 저장소 검증에서는 작은 단일 컴포넌트 check-only만 실행한다.
