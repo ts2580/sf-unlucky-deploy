@@ -88,7 +88,7 @@ async function runProcess(
     child.on('close', (exitCode) => {
       clearTimeout(timeout);
       if (timedOut) {
-        reject(new SfudError('SF_COMMAND_FAILED', 'Salesforce CLI 명령이 제한 시간을 초과했습니다.'));
+        reject(new SfudError('SF_COMMAND_TIMEOUT', 'Salesforce CLI 명령이 제한 시간을 초과했습니다.'));
         return;
       }
       resolve({
@@ -142,6 +142,13 @@ export function extractSfFailureMessage(stdout: string, stderr: string): string 
     .filter((value) => value.length > 0)
     .filter((value, index, values) => values.indexOf(value) === index);
   return details.join(' | ') || '상세 메시지 없음';
+}
+
+export function isAmbiguousSalesforceFailure(error: unknown): boolean {
+  if (error instanceof SfudError && error.code === 'SF_COMMAND_TIMEOUT') return true;
+  if (!(error instanceof Error)) return false;
+  return /(?:ETIMEDOUT|ECONNRESET|ECONNABORTED|EAI_AGAIN|ENOTFOUND|socket hang up|fetch failed|network error|connection (?:was )?(?:reset|closed|lost)|request (?:timed out|aborted))/iu
+    .test(error.message);
 }
 
 function collectFailureMessages(value: unknown, messages: string[], key = ''): void {

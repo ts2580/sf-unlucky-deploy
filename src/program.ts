@@ -7,6 +7,11 @@ import {
 } from './commands/deploy.js';
 import { SfudError } from './core/errors.js';
 import type { RequestedTestLevel } from './deploy/test-plan.js';
+import {
+  DEFAULT_UI_HOST,
+  DEFAULT_UI_PORT,
+  startWebUi,
+} from './web/server/start.js';
 
 export const CLI_VERSION = '0.1.0';
 
@@ -71,7 +76,43 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
       await runDeployCommand(options as Parameters<typeof runDeployCommand>[0], dependencies);
     });
 
+  program
+    .command('ui')
+    .description('로컬 웹 UI를 시작합니다.')
+    .option('--host <host>', 'bind 주소', DEFAULT_UI_HOST)
+    .option(
+      '--port <port>',
+      'bind 포트',
+      parsePort,
+    )
+    .option('--project <path>', '허용할 Salesforce DX 프로젝트 경로 (반복 가능)', collectOption, [])
+    .option('--data-dir <path>', 'SQLite와 실행 상태를 저장할 디렉터리')
+    .option('--no-open', '시작 후 브라우저를 열지 않음')
+    .option('--allow-remote', 'loopback 외 주소 bind 허용')
+    .action(async (options) => {
+      const dataDirectory = options.dataDir as string | undefined;
+      const projectPaths = options.project as string[];
+      const port = options.port as number | undefined;
+      await startWebUi({
+        host: options.host as string,
+        port: port ?? parsePort(process.env.SFUD_UI_PORT ?? String(DEFAULT_UI_PORT)),
+        allowRemote: options.allowRemote === true,
+        open: options.open !== false,
+        logger: false,
+        ...(dataDirectory === undefined ? {} : { dataDirectory }),
+        ...(projectPaths.length === 0 ? {} : { projectPaths }),
+      });
+    });
+
   return program;
+}
+
+function parsePort(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65_535) {
+    throw new Error('포트는 1부터 65535 사이의 정수여야 합니다.');
+  }
+  return parsed;
 }
 
 function parsePositiveInteger(value: string): number {
@@ -80,4 +121,8 @@ function parsePositiveInteger(value: string): number {
     throw new Error('1 이상의 정수를 입력해야 합니다.');
   }
   return parsed;
+}
+
+function collectOption(value: string, previous: string[]): string[] {
+  return [...previous, value];
 }
