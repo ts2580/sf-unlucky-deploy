@@ -12,6 +12,7 @@ import { renderTerminalReport } from '../reports/terminal.js';
 import { writeComparisonReports, type ReportPaths } from '../reports/writer.js';
 import {
   ProcessSfClient,
+  isAmbiguousSalesforceFailure,
   sanitizeSfOutput,
   type SfClient,
 } from '../salesforce/sf-client.js';
@@ -114,15 +115,23 @@ export async function runDeployCommand(
 
   await assertPayloadUnchanged(sourceSnapshot.packageRoot, sourceSnapshot.payloadSha256);
   const deployArgs = buildDeployArgs(options, sourceSnapshot.packageRoot, targetAlias, testPlan);
-  const dryRunResult = sanitizeSfOutput(
-    await sfClient.runJson([...deployArgs, '--dry-run'], { cwd }),
-  );
+  const dryRunResult = sanitizeSfOutput(await runDeploymentRequest(
+    sfClient,
+    [...deployArgs, '--dry-run'],
+    cwd,
+    options.wait,
+  ));
   await writeJson(path.join(context.logsDirectory, 'dry-run.json'), dryRunResult);
 
   let deployResult: unknown;
   if (options.execute) {
     await assertPayloadUnchanged(sourceSnapshot.packageRoot, sourceSnapshot.payloadSha256);
-    deployResult = sanitizeSfOutput(await sfClient.runJson(deployArgs, { cwd }));
+    deployResult = sanitizeSfOutput(await runDeploymentRequest(
+      sfClient,
+      deployArgs,
+      cwd,
+      options.wait,
+    ));
     await writeJson(path.join(context.logsDirectory, 'deploy.json'), deployResult);
   }
 
@@ -140,6 +149,30 @@ export async function runDeployCommand(
   }
   emitJsonIfRequested(options.json, stdout, result);
   return result;
+}
+
+async function runDeploymentRequest(
+  sfClient: SfClient,
+  args: readonly string[],
+  cwd: string,
+  waitMinutes = 60,
+): Promise<unknown> {
+  try {
+    return await sfClient.runJson(args, {
+      cwd,
+      timeoutMs: (waitMinutes + 5) * 60 * 1_000,
+    });
+  } catch (error) {
+    if (isAmbiguousSalesforceFailure(error)) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new SfudError(
+        'SF_EXTERNAL_STATE_UNKNOWN',
+        `Salesforce 배포 요청의 최종 상태를 확인할 수 없습니다: ${message}`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
 }
 
 function buildDeployArgs(

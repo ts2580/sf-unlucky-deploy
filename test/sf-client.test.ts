@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import {
   extractSfFailureMessage,
+  isAmbiguousSalesforceFailure,
   redactSensitiveText,
   sanitizeSfOutput,
 } from '../src/salesforce/sf-client.js';
+import { SfudError } from '../src/core/errors.js';
 
 describe('Salesforce CLI output sanitization', () => {
   it('중첩된 인증 필드와 auth URL을 제거한다', () => {
@@ -47,5 +49,15 @@ describe('Salesforce CLI output sanitization', () => {
     });
 
     expect(extractSfFailureMessage(stdout, '')).toBe('Failed | No package.xml found');
+  });
+
+  it('제한 시간과 전송 단절을 외부 상태가 불명확한 오류로 분류한다', () => {
+    expect(isAmbiguousSalesforceFailure(
+      new SfudError('SF_COMMAND_TIMEOUT', 'Salesforce CLI 명령이 제한 시간을 초과했습니다.'),
+    )).toBe(true);
+    expect(isAmbiguousSalesforceFailure(new Error('request aborted: ECONNRESET'))).toBe(true);
+    expect(isAmbiguousSalesforceFailure(
+      new SfudError('SF_COMMAND_FAILED', 'Apex 테스트가 실패했습니다.'),
+    )).toBe(false);
   });
 });
