@@ -7,6 +7,10 @@
   "bin": {
     "sfud": "dist/cli.js"
   },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
   "scripts": {
     "build": "npm run build:cli && npm run build:ui",
     "build:cli": "tsc --project tsconfig.build.json && node scripts/make-cli-executable.mjs",
@@ -14,6 +18,8 @@
     "check": "npm run typecheck && vitest run && npm run build",
     "dev": "tsx src/cli.ts",
     "dev:ui": "vite --config ui/vite.config.ts",
+    "prepack": "npm run build",
+    "release:check": "node scripts/check-release-version.mjs",
     "test": "vitest run",
     "test:e2e": "node scripts/run-playwright.mjs",
     "test:watch": "vitest",
