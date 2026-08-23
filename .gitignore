@@ -13,6 +13,7 @@ coverage/
 .sf/
 .sfdx/
 .sfud/
+AGENTS.md
 playwright-report/
 test-results/
 
