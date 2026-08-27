@@ -1,3 +1,6 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+
 import { expect, test, type Page } from '@playwright/test';
 
 const email = 'e2e-admin@example.com';
@@ -64,7 +67,25 @@ test('메뉴마다 독립 URL과 화면을 제공한다', async ({ page }) => {
 
   await page.getByRole('link', { name: '설정', exact: true }).click();
   await expect(page).toHaveURL(/\/settings$/u);
-  await expect(page.getByRole('heading', { name: '연결과 로컬 프로젝트를 관리합니다.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '연결과 서버 프로젝트를 확인합니다.' })).toBeVisible();
+});
+
+test('내 단말기의 DX 프로젝트를 임시 소스로 업로드한다', async ({ page }, testInfo) => {
+  const projectPath = testInfo.outputPath('uploaded-project');
+  await mkdir(projectPath, { recursive: true });
+  await writeFile(path.join(projectPath, 'sfdx-project.json'), JSON.stringify({
+    packageDirectories: [{ path: '.', default: true }],
+    sourceApiVersion: '67.0',
+  }));
+  await login(page, '/deploy');
+  const uploadInput = page.locator('.upload-button input[type="file"]');
+  await expect(uploadInput).toBeEnabled();
+  await uploadInput.setInputFiles(projectPath);
+
+  await expect(page.getByRole('status')).toContainText('uploaded-project 업로드 완료');
+  await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue(/^upload:/u);
+  await expect(page.getByText('내 단말기에서 임시 업로드 · 마지막 사용 후 4시간', { exact: true }))
+    .toBeVisible();
 });
 
 test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', async ({ page }) => {

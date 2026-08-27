@@ -342,7 +342,18 @@ node dist/cli.js ui \
   --no-open
 ```
 
-`--project`는 반복해서 지정할 수 있으며 웹 API는 이 allowlist 밖의 로컬 경로와 manifest를 거부한다. 옵션을 생략하면 서버를 시작한 현재 Salesforce DX 프로젝트만 허용한다. `SFUD_DATA_DIR` 환경변수로도 저장 위치를 지정할 수 있다. 데이터 디렉터리는 `0700`, DB 파일은 `0600` 권한으로 제한하며 다음 설정을 적용한다.
+`--project`는 반복해서 지정할 수 있으며 이 경로만 **서버 프로젝트**로 노출된다. 옵션을
+생략하면 등록되는 서버 프로젝트가 없으며, 서버를 시작한 현재 디렉터리를 자동으로 비교
+소스에 넣지 않는다. 웹 API는 allowlist 밖의 서버 경로와 manifest를 거부한다.
+
+브라우저의 **내 프로젝트 업로드**는 접속한 단말기에서 선택한 Salesforce DX 폴더를 서버의
+사용자별 임시 디렉터리로 전송한다. 업로드 프로젝트는 마지막 비교 또는 dry-run 사용 후
+4시간이 지나거나 서버 프로세스가 종료되면 제거된다. 업로드는 파일 2,000개, 파일당 10MB,
+전체 100MB로 제한하며 `.git`, `.sf`, `.sfdx`, `node_modules`, `.env`와 일반적인 비밀키 파일은
+받지 않는다. 서버 프로젝트는 경로 참조이고 업로드 프로젝트는 임시 복사본이므로 서로 다른
+소스 유형이다.
+
+`SFUD_DATA_DIR` 환경변수로도 저장 위치를 지정할 수 있다. 데이터 디렉터리는 `0700`, DB 파일은 `0600` 권한으로 제한하며 다음 설정을 적용한다.
 
 ```text
 foreign_keys = ON
@@ -370,6 +381,8 @@ proxy_set_header X-Forwarded-Proto $scheme;
 
 `OPERATOR`, `DEPLOYER`, `ADMIN` 사용자는 웹의 **비교 및 배포** 화면에서 desired source와
 target org를 선택하고, 비교가 성공하면 같은 범위로 Salesforce check-only를 실행할 수 있다.
+desired source는 `--project`로 등록한 서버 프로젝트, 브라우저에서 임시 업로드한 내 단말기
+프로젝트, 또는 다른 Salesforce org 중에서 선택한다.
 서버는 `sf org list --json` 결과에서 별칭, 표시 이름, edition, 연결 상태만 추출하며
 토큰·client ID·키 경로·로컬 절대 경로를 API에 반환하지 않는다.
 

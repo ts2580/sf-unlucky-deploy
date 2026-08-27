@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
 
 type IconName =
   | 'activity'
@@ -59,8 +59,10 @@ interface AuthStatusResponse {
 interface WorkspaceSource {
   id: string;
   kind: 'org' | 'local';
+  location?: 'org' | 'server' | 'upload';
   label: string;
   detail: string;
+  expiresAt?: string;
 }
 
 interface WorkspaceProject {
@@ -72,6 +74,7 @@ interface WorkspaceProject {
 interface WorkspaceResponse {
   sources: WorkspaceSource[];
   projects: WorkspaceProject[];
+  uploads?: WorkspaceProject[];
 }
 
 interface MetadataTypeOption {
@@ -142,7 +145,7 @@ const pageMeta: Record<PageKey, { eyebrow: string; title: string }> = {
   home: { eyebrow: 'METADATA WORKSPACE', title: '배포 대시보드' },
   deploy: { eyebrow: 'COMPARE & DEPLOY', title: '비교 및 배포' },
   runs: { eyebrow: 'RUN HISTORY', title: '실행 기록' },
-  settings: { eyebrow: 'LOCAL CONFIGURATION', title: '설정' },
+  settings: { eyebrow: 'SERVER CONFIGURATION', title: '설정' },
 };
 
 const navigation: Array<{ icon: IconName; label: string; page: PageKey; href: string }> = [
@@ -343,7 +346,7 @@ export function App() {
             </OverviewCard>
             <OverviewCard
               icon="folder"
-              title="로컬 DX 프로젝트"
+              title="서버 DX 프로젝트"
               value={String(projectCount)}
               detail={dashboardWorkspace?.projects[0]?.displayName ?? '프로젝트 확인 중'}
               action="프로젝트 열기"
@@ -599,6 +602,8 @@ function DeployPage({ user }: { user: ApiUser }) {
   const [comparisonJob, setComparisonJob] = useState<ComparisonJobResponse | null>(null);
   const [dryRunJob, setDryRunJob] = useState<DryRunJobResponse | null>(null);
   const [error, setError] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [uploadMessage, setUploadMessage] = useState('');
   const comparisonRequestControllerRef = useRef<AbortController | null>(null);
   const dryRunRequestControllerRef = useRef<AbortController | null>(null);
   const comparisonJobSelectionKeyRef = useRef<string | null>(null);
@@ -742,6 +747,51 @@ function DeployPage({ user }: { user: ApiUser }) {
   const scopeValid = scopeQuery === ALL_METADATA_LABEL || selectedMetadataType !== undefined;
   const comparisonReady = comparisonJob?.status === 'SUCCEEDED';
 
+  const uploadProject = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const selectedFiles = [...(input.files ?? [])];
+    input.value = '';
+    if (selectedFiles.length === 0) return;
+    const uploadableFiles = selectedFiles.filter((file) => isUploadableProjectFile(
+      file.webkitRelativePath || file.name,
+    ));
+    if (uploadableFiles.length === 0) {
+      setUploadMessage('업로드할 수 있는 프로젝트 파일이 없습니다. .git, node_modules와 비밀키 파일은 제외됩니다.');
+      return;
+    }
+    setUploading(true);
+    setUploadMessage('');
+    try {
+      const form = new FormData();
+      const firstPath = uploadableFiles[0]!.webkitRelativePath;
+      form.append('label', firstPath.length > 0 ? firstPath.split('/')[0]! : '업로드 프로젝트');
+      for (const file of uploadableFiles) {
+        form.append('files', file, file.webkitRelativePath || file.name);
+      }
+      const response = await fetch('/api/v1/uploads/projects', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'x-sfud-csrf': readCookie('sfud_csrf') ?? '' },
+        body: form,
+      });
+      const data = await response.json() as { source?: WorkspaceSource; error?: { message: string } };
+      if (!response.ok || data.source === undefined) {
+        throw new Error(data.error?.message ?? '프로젝트를 업로드하지 못했습니다.');
+      }
+      setWorkspace((current) => current === null ? current : {
+        ...current,
+        sources: [...current.sources.filter((entry) => entry.id !== data.source!.id), data.source!],
+      });
+      setSourceId(data.source.id);
+      const skipped = selectedFiles.length - uploadableFiles.length;
+      setUploadMessage(`${data.source.label} 업로드 완료${skipped > 0 ? ` · 제외된 파일 ${skipped}개` : ''}`);
+    } catch (caught) {
+      setUploadMessage(caught instanceof Error ? caught.message : '프로젝트를 업로드하지 못했습니다.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const runComparison = async () => {
     setError('');
     setComparisonJob(null);
@@ -836,6 +886,20 @@ function DeployPage({ user }: { user: ApiUser }) {
               <div className="direction-marker"><span>배포 대상</span><Icon name="arrow" /></div>
               <WorkspaceSourceSelect side="TARGET ORG" value={targetOrgId} sources={(workspace?.sources ?? []).filter((entry) => entry.kind === 'org')} onChange={setTargetOrgId} tone="blue" />
             </div>
+            <div className="project-source-actions">
+              <div><strong>프로젝트 소스가 어디에 있나요?</strong><p><b>서버 프로젝트</b>는 시작할 때 <code>--project</code>로 등록하고, <b>내 단말기 프로젝트</b>는 여기서 임시 업로드합니다.</p></div>
+              <label className={`small-button upload-button${uploading ? ' upload-button-busy' : ''}`}>
+                <Icon name={uploading ? 'refresh' : 'plus'} />{uploading ? '업로드 중……' : '내 프로젝트 업로드'}
+                <input
+                  type="file"
+                  multiple
+                  disabled={!canRun || uploading || workspace === null}
+                  onChange={(event) => void uploadProject(event)}
+                  {...{ webkitdirectory: '' }}
+                />
+              </label>
+            </div>
+            {uploadMessage && <p className="upload-message" role="status">{uploadMessage}</p>}
           </section>
 
           <section className="workflow-panel" aria-labelledby="deploy-scope-heading">
@@ -915,8 +979,8 @@ function SettingsPage({ health, remoteAccess, workspace }: { health: HealthRespo
   return (
     <div className="page-stack">
       <PageIntro
-        kicker="LOCAL ONLY"
-        title="연결과 로컬 프로젝트를 관리합니다."
+        kicker="SERVER CONFIGURATION"
+        title="연결과 서버 프로젝트를 확인합니다."
         description="Salesforce 인증은 sf CLI에서 관리하며 access token과 auth URL은 UI에 저장하지 않습니다."
       />
       <div className="settings-grid">
@@ -937,8 +1001,12 @@ function SettingsPage({ health, remoteAccess, workspace }: { health: HealthRespo
           <div className="connection-card"><div className="avatar-stack large"><span>SF</span><i /></div><div><strong>{orgs.length}개 org 사용 가능</strong><p>{orgs.map((org) => org.label).join(' · ') || '연결 확인 중'}</p></div><button type="button" onClick={() => window.location.reload()}><Icon name="refresh" />새로고침</button></div>
         </section>
         <section className="workflow-panel settings-wide" aria-labelledby="project-heading">
-          <div className="panel-heading"><span className="card-icon icon-violet"><Icon name="folder" /></span><div><h2 id="project-heading">허용된 로컬 프로젝트</h2><p>브라우저에서 접근 가능한 DX 프로젝트 allowlist</p></div><button className="small-button" type="button"><Icon name="plus" />프로젝트 추가</button></div>
-          {workspace?.projects.map((project) => <div className="project-row" key={project.id}><span className="project-logo"><Icon name="code" /></span><div><strong>{project.displayName}</strong><code>Manifest {project.manifests.length}개</code></div><span className="tag tag-green">ACTIVE</span><button type="button" aria-label={`${project.displayName} 프로젝트 설정`}><Icon name="chevron" /></button></div>) ?? <p className="empty-runs">프로젝트 확인 중입니다.</p>}
+          <div className="panel-heading"><span className="card-icon icon-violet"><Icon name="folder" /></span><div><h2 id="project-heading">명시적으로 등록된 서버 프로젝트</h2><p><code>sfud ui --project &lt;DX 경로&gt;</code>로 등록한 서버의 allowlist</p></div></div>
+          {workspace === null
+            ? <p className="empty-runs">프로젝트 확인 중입니다.</p>
+            : workspace.projects.length === 0
+              ? <p className="empty-runs">등록된 서버 프로젝트가 없습니다. 서버 시작 시 <code>--project</code>를 지정하세요.</p>
+              : workspace.projects.map((project) => <div className="project-row" key={project.id}><span className="project-logo"><Icon name="code" /></span><div><strong>{project.displayName}</strong><code>Manifest {project.manifests.length}개</code></div><span className="tag tag-green">SERVER</span><span aria-hidden="true"><Icon name="chevron" /></span></div>)}
         </section>
       </div>
     </div>
@@ -1249,6 +1317,15 @@ function readCookie(name: string): string | undefined {
     if (key === name) return decodeURIComponent(value.join('='));
   }
   return undefined;
+}
+
+function isUploadableProjectFile(relativePath: string): boolean {
+  const segments = relativePath.split('/');
+  if (segments.some((segment) => ['.git', '.sf', '.sfdx', 'node_modules'].includes(segment))) return false;
+  const basename = segments.at(-1)?.toLowerCase() ?? '';
+  return basename !== '.env'
+    && !basename.startsWith('.env.')
+    && !['.key', '.pem', '.p12', '.pfx'].some((extension) => basename.endsWith(extension));
 }
 
 function Icon({ name }: { name: IconName }) {
