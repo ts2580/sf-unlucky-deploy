@@ -8,8 +8,10 @@ import { ComparisonJobRepository, type ComparisonJob } from './comparison-job-re
 import type { WorkspaceService } from '../web/server/workspace-service.js';
 
 export interface CreateComparisonInput {
-  projectId: string;
-  manifest: string;
+  projectId?: string;
+  scope?: 'manifest' | 'all';
+  metadataType?: string;
+  manifest?: string;
   leftSourceId: string;
   rightSourceId: string;
   strict: boolean;
@@ -27,13 +29,36 @@ export class ComparisonService {
   ) {}
 
   public async create(input: CreateComparisonInput): Promise<ComparisonJob> {
-    const [{ project, path: manifestPath }, leftSource, rightSource] = await Promise.all([
-      this.workspace.resolveManifest(input.projectId, input.manifest),
+    const scope = input.scope ?? 'manifest';
+    const [project, leftSource, rightSource] = await Promise.all([
+      scope === 'all'
+        ? Promise.resolve(this.workspace.defaultProject())
+        : this.workspace.resolveProject(requiredProjectId(input.projectId)),
       this.workspace.resolveSource(input.leftSourceId),
       this.workspace.resolveSource(input.rightSourceId),
     ]);
     if (leftSource === rightSource) throw new Error('서로 다른 비교 소스를 선택하세요.');
+    if (scope !== 'all' && input.metadataType !== undefined) {
+      throw new Error('Salesforce metadata type은 전체 metadata 비교에서만 선택할 수 있습니다.');
+    }
+    if (input.metadataType !== undefined) {
+      const availableTypes = await this.workspace.listMetadataTypes([
+        input.leftSourceId,
+        input.rightSourceId,
+      ]);
+      if (!availableTypes.some((entry) => entry.name === input.metadataType)) {
+        throw new Error(`선택한 Salesforce metadata type을 사용할 수 없습니다: ${input.metadataType}`);
+      }
+    }
+    const manifestPath = scope === 'all'
+      ? '@all'
+      : (await this.workspace.resolveManifest(
+        requiredProjectId(input.projectId),
+        requiredManifest(input.manifest),
+      )).path;
     const job = await this.repository.create({
+      scope: scope === 'all' ? 'ALL' : 'MANIFEST',
+      ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
       projectPath: project.realPath,
       manifestPath,
       leftSource,
@@ -53,7 +78,12 @@ export class ComparisonService {
       const result = await runCompareCommand({
         left: job.leftSource,
         right: job.rightSource,
-        manifest: job.manifestPath,
+        ...(job.scope === 'ALL'
+          ? {
+            allMetadata: true,
+            ...(job.metadataType === undefined ? {} : { metadataType: job.metadataType }),
+          }
+          : { manifest: job.manifestPath }),
         reportDir: path.join(this.runsDirectory, job.id),
         strict: job.strict,
         showIdentical: job.showIdentical,
@@ -71,4 +101,14 @@ export class ComparisonService {
       throw error;
     }
   }
+}
+
+function requiredManifest(value: string | undefined): string {
+  if (value === undefined || value.length === 0) throw new Error('manifest 선택이 필요합니다.');
+  return value;
+}
+
+function requiredProjectId(value: string | undefined): string {
+  if (value === undefined || value.length === 0) throw new Error('manifest 프로젝트 선택이 필요합니다.');
+  return value;
 }

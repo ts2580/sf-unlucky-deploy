@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { access, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 
+import { readProjectApiVersion, withRequestWorkspace } from '../../core/request-workspace.js';
 import type { SfClient } from '../../salesforce/sf-client.js';
 
 export interface WorkspaceOrg {
@@ -16,6 +17,11 @@ export interface WorkspaceProject {
   id: string;
   displayName: string;
   manifests: string[];
+}
+
+export interface WorkspaceMetadataType {
+  name: string;
+  directoryName: string;
 }
 
 export interface AllowedProject extends WorkspaceProject {
@@ -33,6 +39,8 @@ interface RawOrg {
 export class WorkspaceService {
   private orgCache: { expiresAt: number; value: WorkspaceOrg[] } | undefined;
   private orgRequest: Promise<WorkspaceOrg[]> | undefined;
+  private readonly metadataTypeCache = new Map<string, { expiresAt: number; value: WorkspaceMetadataType[] }>();
+  private readonly metadataTypeRequests = new Map<string, Promise<WorkspaceMetadataType[]>>();
 
   private constructor(
     private readonly sfClient: SfClient,
@@ -74,6 +82,51 @@ export class WorkspaceService {
     }
   }
 
+  public async listMetadataTypes(sourceIds: readonly string[]): Promise<WorkspaceMetadataType[]> {
+    const resolvedSources = await Promise.all(sourceIds.map((sourceId) => this.resolveSource(sourceId)));
+    const aliases = [...new Set(resolvedSources.flatMap((source) =>
+      source.startsWith('org:') ? [source.slice('org:'.length)] : []))];
+    if (aliases.length === 0) {
+      const fallback = (await this.listOrgs()).find((org) => org.connected);
+      if (fallback !== undefined) aliases.push(fallback.alias);
+    }
+    const values = await Promise.all(aliases.map((alias) => this.listMetadataTypesForOrg(alias)));
+    const unique = new Map<string, WorkspaceMetadataType>();
+    for (const value of values.flat()) unique.set(value.name, value);
+    return [...unique.values()].sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  private async listMetadataTypesForOrg(alias: string): Promise<WorkspaceMetadataType[]> {
+    const cached = this.metadataTypeCache.get(alias);
+    if (cached !== undefined && cached.expiresAt > Date.now()) return cached.value;
+    const pending = this.metadataTypeRequests.get(alias);
+    if (pending !== undefined) return pending;
+    const projectPath = this.projects[0]!.realPath;
+    const request = withRequestWorkspace(projectPath, async (workspacePath) => {
+      const apiVersion = await readProjectApiVersion(projectPath);
+      const raw = await this.sfClient.runJson([
+        'org', 'list', 'metadata-types', '--target-org', alias, '--api-version', apiVersion,
+      ], { cwd: workspacePath, timeoutMs: 60_000 });
+      const metadataObjects = isRecord(raw) && isRecord(raw.result) && Array.isArray(raw.result.metadataObjects)
+        ? raw.result.metadataObjects
+        : [];
+      return metadataObjects.flatMap((entry) => {
+        if (!isRecord(entry) || typeof entry.xmlName !== 'string' || typeof entry.directoryName !== 'string') {
+          return [];
+        }
+        return [{ name: entry.xmlName, directoryName: entry.directoryName }];
+      });
+    });
+    this.metadataTypeRequests.set(alias, request);
+    try {
+      const value = await request;
+      this.metadataTypeCache.set(alias, { expiresAt: Date.now() + 5 * 60_000, value });
+      return value;
+    } finally {
+      this.metadataTypeRequests.delete(alias);
+    }
+  }
+
   private async loadOrgs(): Promise<WorkspaceOrg[]> {
     const raw = await this.sfClient.runJson(['org', 'list'], { cwd: this.projects[0]!.realPath, timeoutMs: 30_000 });
     const result = isRecord(raw) && isRecord(raw.result) ? raw.result : {};
@@ -101,6 +154,10 @@ export class WorkspaceService {
     const project = this.projects.find((candidate) => candidate.id === projectId);
     if (project === undefined) throw new Error('허용되지 않은 Salesforce DX 프로젝트입니다.');
     return project;
+  }
+
+  public defaultProject(): AllowedProject {
+    return this.projects[0]!;
   }
 
   public async resolveManifest(projectId: string, manifest: string): Promise<{ project: AllowedProject; path: string }> {

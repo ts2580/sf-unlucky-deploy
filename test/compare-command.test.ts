@@ -37,6 +37,11 @@ describe('compare command', () => {
     expect(result.exitCode).toBe(1);
     expect(result.comparison.summary.modified).toBe(1);
     expect(client.calls.filter((call) => call.args.includes('retrieve'))).toHaveLength(2);
+    const requestWorkspaces = new Set(client.calls.map((call) => call.options.cwd));
+    expect(requestWorkspaces.size).toBe(1);
+    const requestWorkspace = [...requestWorkspaces][0]!;
+    expect(path.basename(requestWorkspace)).toMatch(/^sfud-request-/u);
+    await expect(access(requestWorkspace)).rejects.toThrow();
     expect(output.join('')).toContain("return 'right'");
     await Promise.all([
       access(result.reports.markdown),

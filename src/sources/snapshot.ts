@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
 import { SfudError } from '../core/errors.js';
+import type { MetadataTypeDescriptor } from '../metadata/component-resolver.js';
 import {
   ensureEmptyDirectory,
   findPackageRoot,
@@ -20,6 +21,7 @@ export interface SnapshotOptions {
   commandProjectPath: string;
   sfClient: SfClient;
   waitMinutes?: number;
+  metadataTypes?: MetadataTypeDescriptor[];
 }
 
 export interface MetadataSnapshot {
@@ -29,6 +31,7 @@ export interface MetadataSnapshot {
   manifestSha256: string;
   payloadSha256: string;
   createdAt: string;
+  metadataTypes?: MetadataTypeDescriptor[];
 }
 
 export async function createSnapshot(options: SnapshotOptions): Promise<MetadataSnapshot> {
@@ -83,6 +86,7 @@ export async function createSnapshot(options: SnapshotOptions): Promise<Metadata
     manifestSha256: await sha256File(manifestPath),
     payloadSha256: await sha256Directory(packageRoot),
     createdAt: new Date().toISOString(),
+    ...(options.metadataTypes === undefined ? {} : { metadataTypes: options.metadataTypes }),
   };
 
   await writeJson(path.join(options.outputDir, 'snapshot.json'), snapshot);

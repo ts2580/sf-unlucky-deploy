@@ -8,6 +8,7 @@ import type { ComparisonResult } from '../metadata/comparator.js';
 import type { ApexTestPlan } from './test-plan.js';
 
 export type DeploymentJobKind = 'DRY_RUN' | 'DEPLOY';
+export type DeploymentScope = 'MANIFEST' | 'ALL';
 export type DeploymentJobStatus =
   | 'QUEUED'
   | 'DRY_RUN_RUNNING'
@@ -24,6 +25,8 @@ export interface DeploymentJob {
   source: string;
   targetAlias: string;
   manifestPath: string;
+  scope: DeploymentScope;
+  metadataType?: string;
   payloadChecksum: string;
   runDirectory?: string;
   salesforceDeploymentId?: string;
@@ -45,6 +48,8 @@ export interface CreateDryRunJobInput {
   source: string;
   targetAlias: string;
   manifestPath: string;
+  scope?: DeploymentScope;
+  metadataType?: string;
   payloadChecksum: string;
   runDirectory?: string;
   createdBy?: string;
@@ -71,6 +76,8 @@ interface DeploymentJobRow {
   source: string;
   target_alias: string;
   manifest_path: string;
+  scope: DeploymentScope;
+  metadata_type: string | null;
   payload_checksum: string;
   run_directory: string | null;
   salesforce_deployment_id: string | null;
@@ -112,14 +119,16 @@ export class DeploymentJobRepository {
     await runInImmediateTransaction(this.database, async () => {
       await this.database.run(`
         INSERT INTO deployment_jobs (
-          id, kind, status, source, target_alias, manifest_path, payload_checksum,
+          id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
           run_directory, created_by, created_at, updated_at
-        ) VALUES (?, 'DRY_RUN', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, 'DRY_RUN', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         id,
         input.source,
         input.targetAlias,
         input.manifestPath,
+        input.scope ?? 'MANIFEST',
+        input.metadataType ?? null,
         input.payloadChecksum,
         input.runDirectory ?? null,
         input.createdBy ?? null,
@@ -279,14 +288,16 @@ export class DeploymentJobRepository {
         deployJobId = this.createId();
         await this.database.run(`
         INSERT INTO deployment_jobs (
-          id, kind, status, source, target_alias, manifest_path, payload_checksum,
+          id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
           run_directory, dry_run_job_id, created_by, created_at, updated_at
-        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         deployJobId,
         dryRun.source,
         dryRun.targetAlias,
         dryRun.manifestPath,
+        dryRun.scope,
+        dryRun.metadataType ?? null,
         dryRun.payloadChecksum,
         dryRun.runDirectory ?? null,
         dryRun.id,
@@ -407,6 +418,8 @@ function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
     source: row.source,
     targetAlias: row.target_alias,
     manifestPath: row.manifest_path,
+    scope: row.scope,
+    ...(row.metadata_type === null ? {} : { metadataType: row.metadata_type }),
     payloadChecksum: row.payload_checksum,
     ...(row.run_directory === null ? {} : { runDirectory: row.run_directory }),
     ...(row.salesforce_deployment_id === null

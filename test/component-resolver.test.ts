@@ -37,4 +37,29 @@ describe('metadata component resolver', () => {
       'classes/OrderService.cls-meta.xml',
     ]);
   });
+
+  it('sf metadata type 설명으로 기존에 알 수 없던 source/meta 쌍을 묶는다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-dynamic-components-'));
+    temporaryDirectories.push(root);
+    await writeFixtureFiles(root, {
+      'package.xml': '<Package/>',
+      'contentassets/product.asset': 'binary-content',
+      'contentassets/product.asset-meta.xml': '<ContentAsset/>',
+      'territory2Models/West.territory2': '<Territory2/>',
+      'territory2Models/West.Rule.territory2Rule': '<Territory2Rule/>',
+    });
+
+    const components = await resolveMetadataComponents(root, [
+      { directoryName: 'contentassets', suffix: 'asset', xmlName: 'ContentAsset' },
+      { directoryName: 'territory2Models', suffix: 'territory2', xmlName: 'Territory2' },
+      { directoryName: 'territory2Models', suffix: 'territory2Rule', xmlName: 'Territory2Rule' },
+    ]);
+
+    expect(components.get('ContentAsset:product')?.files).toEqual([
+      'contentassets/product.asset',
+      'contentassets/product.asset-meta.xml',
+    ]);
+    expect(components.has('Territory2:West')).toBe(true);
+    expect(components.has('Territory2Rule:West.Rule')).toBe(true);
+  });
 });

@@ -172,6 +172,30 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE deployment_jobs ADD COLUMN dry_run_result_json TEXT;
     `,
   },
+  {
+    version: 5,
+    name: 'comparison_scope',
+    sql: `
+      ALTER TABLE comparison_jobs
+      ADD COLUMN scope TEXT NOT NULL DEFAULT 'MANIFEST' CHECK (scope IN ('MANIFEST', 'ALL'));
+    `,
+  },
+  {
+    version: 6,
+    name: 'comparison_metadata_type',
+    sql: `
+      ALTER TABLE comparison_jobs ADD COLUMN metadata_type TEXT;
+    `,
+  },
+  {
+    version: 7,
+    name: 'deployment_scope',
+    sql: `
+      ALTER TABLE deployment_jobs
+      ADD COLUMN scope TEXT NOT NULL DEFAULT 'MANIFEST' CHECK (scope IN ('MANIFEST', 'ALL'));
+      ALTER TABLE deployment_jobs ADD COLUMN metadata_type TEXT;
+    `,
+  },
 ];
 
 export async function applyMigrations(database: Database, now: () => string): Promise<void> {

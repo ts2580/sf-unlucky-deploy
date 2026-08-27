@@ -6,11 +6,17 @@ import { requireAuthenticatedSession } from './auth-routes.js';
 
 interface CreateComparisonBody {
   projectId?: string;
+  scope?: 'manifest' | 'all';
   manifest?: string;
   leftSourceId?: string;
   rightSourceId?: string;
   strict?: boolean;
   showIdentical?: boolean;
+  metadataType?: string;
+}
+
+interface MetadataTypesQuery {
+  sourceIds?: string;
 }
 
 export async function registerComparisonRoutes(app: FastifyInstance): Promise<void> {
@@ -48,6 +54,22 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     }
   });
 
+  app.get<{ Querystring: MetadataTypesQuery }>('/api/v1/metadata-types', async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply);
+    if (session === undefined) return;
+    try {
+      const sourceIds = (request.query.sourceIds ?? '').split(',').filter((value) => value.length > 0);
+      if (sourceIds.length > 2) throw new Error('metadata type 조회 소스는 최대 2개입니다.');
+      const metadataTypes = await app.sfudRuntime.workspace.listMetadataTypes(sourceIds);
+      return reply.send({ metadataTypes });
+    } catch (error) {
+      return reply.code(400).send({ error: {
+        code: 'METADATA_TYPES_LOAD_FAILED',
+        message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
+      } });
+    }
+  });
+
   app.post<{ Body: CreateComparisonBody }>('/api/v1/comparisons', async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply, {
       csrf: true,
@@ -55,9 +77,16 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     });
     if (session === undefined) return;
     try {
+      const scope = comparisonScope(request.body?.scope);
       const job = await app.sfudRuntime.comparisons.create({
-        projectId: requiredString(request.body?.projectId, '프로젝트'),
-        manifest: requiredString(request.body?.manifest, 'manifest'),
+        ...(scope === 'manifest'
+          ? { projectId: requiredString(request.body?.projectId, 'manifest 프로젝트') }
+          : {}),
+        scope,
+        ...(request.body?.manifest === undefined ? {} : { manifest: request.body.manifest }),
+        ...(request.body?.metadataType === undefined
+          ? {}
+          : { metadataType: requiredMetadataType(request.body.metadataType) }),
         leftSourceId: requiredString(request.body?.leftSourceId, 'LEFT 소스'),
         rightSourceId: requiredString(request.body?.rightSourceId, 'RIGHT 소스'),
         strict: request.body?.strict === true,
@@ -106,7 +135,11 @@ function publicJob(app: FastifyInstance, job: ComparisonJob, includeResult: bool
     id: job.id,
     status: job.status,
     projectId: app.sfudRuntime.workspace.publicSource(`local:${job.projectPath}`).id.replace(/^project:/u, ''),
-    manifest: app.sfudRuntime.workspace.publicManifest(job.projectPath, job.manifestPath),
+    scope: job.scope === 'ALL' ? 'all' : 'manifest',
+    ...(job.metadataType === undefined ? {} : { metadataType: job.metadataType }),
+    manifest: job.scope === 'ALL'
+      ? job.metadataType ?? '전체 배포 가능 메타데이터 (SF CLI)'
+      : app.sfudRuntime.workspace.publicManifest(job.projectPath, job.manifestPath),
     left,
     right,
     strict: job.strict,
@@ -124,5 +157,18 @@ function publicJob(app: FastifyInstance, job: ComparisonJob, includeResult: bool
 
 function requiredString(value: unknown, label: string): string {
   if (typeof value !== 'string' || value.length === 0) throw new Error(`${label} 선택이 필요합니다.`);
+  return value;
+}
+
+function comparisonScope(value: unknown): 'manifest' | 'all' {
+  if (value === undefined || value === 'manifest') return 'manifest';
+  if (value === 'all') return 'all';
+  throw new Error('지원하지 않는 비교 범위입니다.');
+}
+
+function requiredMetadataType(value: unknown): string {
+  if (typeof value !== 'string' || !/^[A-Za-z][A-Za-z0-9_]*$/u.test(value)) {
+    throw new Error('Salesforce metadata type이 올바르지 않습니다.');
+  }
   return value;
 }

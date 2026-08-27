@@ -33,7 +33,7 @@ test('대시보드 shell과 핵심 안전 안내를 렌더링한다', async ({ p
 
   await expect(page.getByRole('heading', { name: '배포 대시보드' })).toBeVisible();
   await expect(page.getByRole('heading', { name: /변경을 먼저 확인하고/u })).toBeVisible();
-  await expect(page.getByRole('link', { name: /새 비교 시작/u })).toBeVisible();
+  await expect(page.getByRole('link', { name: /비교 및 배포 시작/u })).toBeVisible();
   await expect(page.getByText('삭제는 자동으로 실행되지 않습니다.')).toBeVisible();
   await expect(page.getByText('UI 27546')).toBeVisible();
 });
@@ -47,7 +47,7 @@ test('390px 모바일 화면에서 body 수평 overflow가 없다', async ({ pag
   );
 
   expect(hasHorizontalOverflow).toBe(false);
-  await expect(page.getByRole('link', { name: /새 비교 시작/u })).toBeVisible();
+  await expect(page.getByRole('link', { name: /비교 및 배포 시작/u })).toBeVisible();
   await expect(page.getByRole('navigation', { name: '주요 메뉴' })).toBeVisible();
   await expect(page.getByRole('link', { name: '실행 기록', exact: true })).toBeVisible();
   await expect(page.getByRole('link', { name: '설정', exact: true })).toBeVisible();
@@ -55,12 +55,8 @@ test('390px 모바일 화면에서 body 수평 overflow가 없다', async ({ pag
 
 test('메뉴마다 독립 URL과 화면을 제공한다', async ({ page }) => {
   await login(page, '/compare');
-  await expect(page.getByRole('heading', { name: '어떤 환경의 차이를 확인할까요?' })).toBeVisible();
-  await expect(page.getByRole('link', { name: '새 비교', exact: true })).toHaveAttribute('aria-current', 'page');
-
-  await page.getByRole('link', { name: '새 배포', exact: true }).click();
-  await expect(page).toHaveURL(/\/deploy$/u);
-  await expect(page.getByRole('heading', { name: '검증이 끝난 변경만 배포합니다.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '한 흐름에서 비교하고 배포를 검증합니다.' })).toBeVisible();
+  await expect(page.getByRole('link', { name: '비교 및 배포', exact: true })).toHaveAttribute('aria-current', 'page');
 
   await page.getByRole('link', { name: '실행 기록', exact: true }).click();
   await expect(page).toHaveURL(/\/runs$/u);
@@ -82,9 +78,24 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
       ],
     },
   }));
+  await page.route('**/api/v1/metadata-types**', async (route) => route.fulfill({ json: {
+    metadataTypes: [
+      { name: 'ApexClass', directoryName: 'classes' },
+      { name: 'CustomObject', directoryName: 'objects' },
+      { name: 'LightningComponentBundle', directoryName: 'lwc' },
+    ],
+  } }));
   let polls = 0;
   await page.route('**/api/v1/comparisons**', async (route) => {
     if (route.request().method() === 'POST') {
+      expect(route.request().postDataJSON()).toMatchObject({
+        scope: 'all',
+        metadataType: 'ApexClass',
+        leftSourceId: 'org:left',
+        rightSourceId: 'org:right',
+      });
+      expect(route.request().postDataJSON()).not.toHaveProperty('manifest');
+      expect(route.request().postDataJSON()).not.toHaveProperty('projectId');
       await route.fulfill({ json: { job: comparisonFixture('QUEUED') }, status: 202 });
       return;
     }
@@ -96,14 +107,58 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
     await route.fulfill({ json: { job: comparisonFixture(polls > 1 ? 'SUCCEEDED' : 'RUNNING') } });
   });
 
-  await login(page, '/compare');
-  await expect(page.getByLabel('LEFT 비교 소스')).toHaveValue('org:left');
-  await expect(page.getByLabel('RIGHT 비교 소스')).toHaveValue('org:right');
+  await login(page, '/deploy');
+  await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue('org:right');
+  await expect(page.getByLabel('TARGET ORG 비교 소스')).toHaveValue('org:left');
+  const scopeCombobox = page.getByRole('combobox', { name: 'Salesforce metadata type' });
+  await expect(scopeCombobox).toHaveValue('전체 메타데이터');
+  await expect(page.locator('#salesforce-deploy-metadata-types option')).toHaveCount(4);
+  await scopeCombobox.fill('ApexClass');
+  await expect(page.getByText('3개 metadata type 검색 가능 · source와 target의 합집합')).toBeVisible();
   await page.getByRole('button', { name: /비교 실행$/u }).click();
   await expect(page.getByText('메타데이터 비교 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'left → right' })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByText('Hello', { exact: true })).toBeVisible();
   await expect(page.locator('.component-status', { hasText: 'MODIFIED' })).toBeVisible();
+});
+
+test('선택 변경 후 이전 비교 polling 결과를 폐기한다', async ({ page }) => {
+  await page.route('**/api/v1/workspace', async (route) => route.fulfill({ json: {
+    projects: [{ id: 'project-1', displayName: 'fixture-project', manifests: [] }],
+    sources: [
+      { id: 'org:left', kind: 'org', label: 'left', detail: 'Left Org' },
+      { id: 'org:right', kind: 'org', label: 'right', detail: 'Right Org' },
+      { id: 'org:third', kind: 'org', label: 'third', detail: 'Third Org' },
+    ],
+  } }));
+  await page.route('**/api/v1/metadata-types**', async (route) => route.fulfill({ json: {
+    metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }],
+  } }));
+  let pollingStarted = false;
+  await page.route('**/api/v1/comparisons**', async (route) => {
+    if (route.request().method() === 'POST') {
+      await route.fulfill({ status: 202, json: { job: comparisonFixture('QUEUED') } });
+      return;
+    }
+    if (new URL(route.request().url()).pathname === '/api/v1/comparisons') {
+      await route.fulfill({ json: { jobs: [] } });
+      return;
+    }
+    pollingStarted = true;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await route.fulfill({ json: { job: comparisonFixture('SUCCEEDED') } }).catch(() => undefined);
+  });
+
+  await login(page, '/deploy');
+  await page.getByRole('button', { name: /비교 실행/u }).click();
+  await expect(page.getByText('비교 대기 중')).toBeVisible();
+  await expect.poll(() => pollingStarted, { timeout: 3_000 }).toBe(true);
+  await page.getByLabel('DESIRED SOURCE 비교 소스').selectOption('org:third');
+  await expect(page.getByRole('button', { name: /비교 실행/u })).toBeEnabled();
+  await page.waitForTimeout(600);
+
+  await expect(page.getByRole('heading', { name: 'left → right' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /같은 범위로 Dry-run/u })).toHaveCount(0);
 });
 
 test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시한다', async ({ page }) => {
@@ -115,9 +170,32 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
       { id: 'project:project-1', kind: 'local', label: 'fixture-project', detail: 'Local DX project' },
     ],
   } }));
-  await page.route('**/api/v1/deployments/dry-run', async (route) => route.fulfill({
-    status: 202, json: { job: dryRunFixture('QUEUED') },
-  }));
+  await page.route('**/api/v1/metadata-types**', async (route) => route.fulfill({ json: {
+    metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }],
+  } }));
+  let comparisonPolls = 0;
+  await page.route('**/api/v1/comparisons**', async (route) => {
+    if (route.request().method() === 'POST') {
+      expect(route.request().postDataJSON()).toMatchObject({
+        scope: 'all', leftSourceId: 'org:target', rightSourceId: 'project:project-1',
+      });
+      await route.fulfill({ status: 202, json: { job: deploymentComparisonFixture('QUEUED') } });
+      return;
+    }
+    if (new URL(route.request().url()).pathname === '/api/v1/comparisons') {
+      await route.fulfill({ json: { jobs: [] } });
+      return;
+    }
+    comparisonPolls += 1;
+    await route.fulfill({ json: { job: deploymentComparisonFixture(comparisonPolls > 1 ? 'SUCCEEDED' : 'RUNNING') } });
+  });
+  await page.route('**/api/v1/deployments/dry-run', async (route) => {
+    expect(route.request().postDataJSON()).toMatchObject({
+      scope: 'all', sourceId: 'project:project-1', targetOrgId: 'org:target',
+    });
+    expect(route.request().postDataJSON()).not.toHaveProperty('manifest');
+    await route.fulfill({ status: 202, json: { job: dryRunFixture('QUEUED') } });
+  });
   let polls = 0;
   await page.route('**/api/v1/deployment-jobs**', async (route) => {
     if (new URL(route.request().url()).pathname === '/api/v1/deployment-jobs') {
@@ -131,7 +209,10 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await login(page, '/deploy');
   await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue('project:project-1');
   await expect(page.getByLabel('TARGET ORG 비교 소스')).toHaveValue('org:target');
-  await page.getByRole('button', { name: /Dry-run 시작/u }).click();
+  await page.getByRole('button', { name: /비교 실행/u }).click();
+  await expect(page.getByText('메타데이터 비교 중')).toBeVisible();
+  await expect(page.getByText('NEW', { exact: true }).first()).toBeVisible({ timeout: 5_000 });
+  await page.getByRole('button', { name: /같은 범위로 Dry-run/u }).click();
   await expect(page.getByText('Salesforce check-only 실행 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Salesforce dry-run 성공' })).toBeVisible({ timeout: 5_000 });
   const result = page.getByLabel('Salesforce dry-run 성공');
@@ -144,7 +225,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
     () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
   );
   const resultBox = await result.boundingBox();
-  const summaryBox = await page.getByRole('complementary', { name: 'Dry-run 요약' }).boundingBox();
+  const summaryBox = await page.getByRole('complementary', { name: '비교 및 Dry-run 요약' }).boundingBox();
 
   expect(hasHorizontalOverflow).toBe(false);
   expect(resultBox).not.toBeNull();
@@ -194,6 +275,22 @@ function comparisonFixture(status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED'): Comparis
         }],
       },
     }),
+  };
+}
+
+function deploymentComparisonFixture(status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED') {
+  return {
+    id: 'deployment-comparison-1', status, scope: 'all', manifest: '전체 메타데이터',
+    left: { id: 'org:target', kind: 'org', label: 'target' },
+    right: { id: 'project:project-1', kind: 'local', label: 'fixture-project' },
+    ...(status !== 'SUCCEEDED' ? {} : { result: {
+      summary: { added: 1, removed: 1, modified: 0, identical: 0, total: 2, different: 2 },
+      warnings: ['TARGET ONLY는 destructive manifest 없이는 삭제되지 않습니다.'],
+      components: [
+        { key: 'ApexClass:NewClass', type: 'ApexClass', fullName: 'NewClass', status: 'ADDED', files: [] },
+        { key: 'ApexClass:OldClass', type: 'ApexClass', fullName: 'OldClass', status: 'REMOVED', files: [] },
+      ],
+    } }),
   };
 }
 
