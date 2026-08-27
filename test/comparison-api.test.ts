@@ -14,7 +14,10 @@ describe('비교 API', () => {
     const projectPath = path.join(root, 'project');
     const manifestDirectory = path.join(projectPath, 'manifest');
     await mkdir(manifestDirectory, { recursive: true });
-    await writeFile(path.join(projectPath, 'sfdx-project.json'), '{}\n');
+    await writeFile(path.join(projectPath, 'sfdx-project.json'), JSON.stringify({
+      packageDirectories: [{ path: 'force-app', default: true }],
+      sourceApiVersion: '64.0',
+    }));
     await writeFile(path.join(manifestDirectory, 'package.xml'), '<Package/>\n');
     const sfClient = new ComparisonSfClient();
     const server = await createWebServer({
@@ -62,6 +65,12 @@ describe('비교 API', () => {
       expect(metadataTypes.json()).toEqual({
         metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }],
       });
+      const metadataTypeCalls = sfClient.calls.filter((args) =>
+        args[0] === 'org' && args[1] === 'list' && args[2] === 'metadata-types');
+      expect(metadataTypeCalls).toHaveLength(2);
+      for (const args of metadataTypeCalls) {
+        expect(args).toEqual(expect.arrayContaining(['--api-version', '64.0']));
+      }
       const comparisonPayload = {
         projectId,
         manifest: 'manifest/package.xml',

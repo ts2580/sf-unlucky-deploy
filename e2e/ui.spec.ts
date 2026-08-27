@@ -122,6 +122,45 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(page.locator('.component-status', { hasText: 'MODIFIED' })).toBeVisible();
 });
 
+test('선택 변경 후 이전 비교 polling 결과를 폐기한다', async ({ page }) => {
+  await page.route('**/api/v1/workspace', async (route) => route.fulfill({ json: {
+    projects: [{ id: 'project-1', displayName: 'fixture-project', manifests: [] }],
+    sources: [
+      { id: 'org:left', kind: 'org', label: 'left', detail: 'Left Org' },
+      { id: 'org:right', kind: 'org', label: 'right', detail: 'Right Org' },
+      { id: 'org:third', kind: 'org', label: 'third', detail: 'Third Org' },
+    ],
+  } }));
+  await page.route('**/api/v1/metadata-types**', async (route) => route.fulfill({ json: {
+    metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }],
+  } }));
+  let pollingStarted = false;
+  await page.route('**/api/v1/comparisons**', async (route) => {
+    if (route.request().method() === 'POST') {
+      await route.fulfill({ status: 202, json: { job: comparisonFixture('QUEUED') } });
+      return;
+    }
+    if (new URL(route.request().url()).pathname === '/api/v1/comparisons') {
+      await route.fulfill({ json: { jobs: [] } });
+      return;
+    }
+    pollingStarted = true;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await route.fulfill({ json: { job: comparisonFixture('SUCCEEDED') } }).catch(() => undefined);
+  });
+
+  await login(page, '/deploy');
+  await page.getByRole('button', { name: /비교 실행/u }).click();
+  await expect(page.getByText('비교 대기 중')).toBeVisible();
+  await expect.poll(() => pollingStarted, { timeout: 3_000 }).toBe(true);
+  await page.getByLabel('DESIRED SOURCE 비교 소스').selectOption('org:third');
+  await expect(page.getByRole('button', { name: /비교 실행/u })).toBeEnabled();
+  await page.waitForTimeout(600);
+
+  await expect(page.getByRole('heading', { name: 'left → right' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /같은 범위로 Dry-run/u })).toHaveCount(0);
+});
+
 test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시한다', async ({ page }) => {
   await page.route('**/api/v1/workspace', async (route) => route.fulfill({ json: {
     orgs: [{ id: 'org:target', alias: 'target', label: 'Target', connected: true }],

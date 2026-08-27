@@ -5,6 +5,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { generateDeployableManifest } from '../src/metadata/deployable-manifest.js';
+import { resolveMetadataComponents } from '../src/metadata/component-resolver.js';
 import type { SfClient, SfRunOptions } from '../src/salesforce/sf-client.js';
 import { parseSourceSpec } from '../src/sources/source-spec.js';
 
@@ -43,7 +44,9 @@ describe('전체 배포 가능 메타데이터 manifest', () => {
       expect.arrayContaining(['--source-dir', path.join(localProject, 'force-app'), '--api-version', '67.0']),
     );
     expect(sfClient.calls).toContainEqual(
-      expect.arrayContaining(['org', 'list', 'metadata-types', '--target-org', 'stdOrg']),
+      expect.arrayContaining([
+        'org', 'list', 'metadata-types', '--target-org', 'stdOrg', '--api-version', '67.0',
+      ]),
     );
     expect(generated.metadataTypes).toEqual([
       { directoryName: 'labels', suffix: 'labels', xmlName: 'CustomLabels' },
@@ -63,6 +66,43 @@ describe('전체 배포 가능 메타데이터 manifest', () => {
     <version>67.0</version>
 </Package>
 `);
+  });
+
+  it('local-only 비교에서도 meta XML에서 동적 타입 descriptor를 생성한다', async () => {
+    const root = await createProject();
+    const left = path.join(root, 'left');
+    const right = path.join(root, 'right');
+    for (const project of [left, right]) {
+      await mkdir(path.join(project, 'force-app', 'contentassets'), { recursive: true });
+      await writeFile(path.join(project, 'sfdx-project.json'), JSON.stringify({
+        packageDirectories: [{ path: 'force-app' }], sourceApiVersion: '67.0',
+      }));
+      await writeFile(path.join(project, 'force-app', 'contentassets', 'product.asset'), 'asset');
+      await writeFile(
+        path.join(project, 'force-app', 'contentassets', 'product.asset-meta.xml'),
+        '<?xml version="1.0"?><ContentAsset xmlns="http://soap.sforce.com/2006/04/metadata"/>',
+      );
+    }
+
+    const generated = await generateDeployableManifest({
+      sources: [parseSourceSpec(`local:${left}`, root), parseSourceSpec(`local:${right}`, root)],
+      outputDirectory: path.join(root, 'local-only-generated'),
+      commandProjectPath: root,
+      sfClient: new ManifestSfClient(),
+    });
+
+    expect(generated.metadataTypes).toContainEqual({
+      directoryName: 'contentassets', suffix: 'asset', xmlName: 'ContentAsset',
+    });
+    const components = await resolveMetadataComponents(
+      path.join(left, 'force-app'),
+      generated.metadataTypes,
+    );
+    expect(components).toHaveLength(1);
+    expect(components.get('ContentAsset:product')?.files).toEqual([
+      'contentassets/product.asset',
+      'contentassets/product.asset-meta.xml',
+    ]);
   });
 
   it('선택한 Salesforce metadata type만 합집합 manifest에 남긴다', async () => {

@@ -15,7 +15,7 @@ export async function withRequestWorkspace<T>(
   const workspacePath = await mkdtemp(path.join(os.tmpdir(), 'sfud-request-'));
   await chmod(workspacePath, 0o700);
   try {
-    await initializeWorkspace(workspacePath, await readApiVersion(templateProjectPath));
+    await initializeWorkspace(workspacePath, await readProjectApiVersion(templateProjectPath));
     return await task(workspacePath);
   } finally {
     await rm(workspacePath, { recursive: true, force: true });
@@ -33,7 +33,7 @@ async function initializeWorkspace(workspacePath: string, sourceApiVersion: stri
   }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
 }
 
-async function readApiVersion(templateProjectPath: string): Promise<string> {
+export async function readProjectApiVersion(templateProjectPath: string): Promise<string> {
   try {
     const configuration = JSON.parse(
       await readFile(path.join(templateProjectPath, 'sfdx-project.json'), 'utf8'),

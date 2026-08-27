@@ -4,7 +4,8 @@ import path from 'node:path';
 import { XMLParser } from 'fast-xml-parser';
 
 import { SfudError } from '../core/errors.js';
-import { pathExists, writeJson } from '../core/files.js';
+import { listFiles, pathExists, writeJson } from '../core/files.js';
+import { readProjectApiVersion } from '../core/request-workspace.js';
 import type { SfClient } from '../salesforce/sf-client.js';
 import type { SourceSpec } from '../sources/source-spec.js';
 import type { MetadataTypeDescriptor } from './component-resolver.js';
@@ -23,7 +24,6 @@ interface ParsedManifest {
 }
 
 interface ProjectConfiguration {
-  sourceApiVersion?: unknown;
   packageDirectories?: Array<{ path?: unknown }>;
 }
 
@@ -52,9 +52,11 @@ export async function generateDeployableManifest(
       name,
       '--output-dir',
       sourceDirectory,
-      ...(apiVersion === undefined ? [] : ['--api-version', apiVersion]),
+      '--api-version',
+      apiVersion,
     ];
 
+    let metadataTypes: MetadataTypeDescriptor[];
     if (source.kind === 'org') {
       args.push('--from-org', source.alias);
       for (const metadataType of options.metadataTypes ?? []) {
@@ -64,6 +66,15 @@ export async function generateDeployableManifest(
         cwd: options.commandProjectPath,
         timeoutMs: 35 * 60 * 1000,
       });
+      metadataTypes = parseMetadataTypes(await options.sfClient.runJson([
+        'org',
+        'list',
+        'metadata-types',
+        '--target-org',
+        source.alias,
+        '--api-version',
+        apiVersion,
+      ], { cwd: options.commandProjectPath, timeoutMs: 60_000 }));
     } else {
       const sourceDirectories = await readPackageDirectories(source.projectPath);
       for (const sourcePath of sourceDirectories) {
@@ -73,6 +84,7 @@ export async function generateDeployableManifest(
         cwd: source.projectPath,
         timeoutMs: 35 * 60 * 1000,
       });
+      metadataTypes = await discoverLocalMetadataTypes(sourceDirectories);
     }
 
     const generatedPath = path.join(sourceDirectory, name);
@@ -82,16 +94,6 @@ export async function generateDeployableManifest(
         `Salesforce CLI가 manifest 파일을 생성하지 않았습니다: ${name}`,
       );
     }
-    const metadataTypes = source.kind === 'org'
-      ? parseMetadataTypes(await options.sfClient.runJson([
-        'org',
-        'list',
-        'metadata-types',
-        '--target-org',
-        source.alias,
-        ...(apiVersion === undefined ? [] : ['--api-version', apiVersion]),
-      ], { cwd: options.commandProjectPath, timeoutMs: 60_000 }))
-      : [];
     return { generatedPath, metadataTypes };
   }));
 
@@ -156,11 +158,31 @@ async function readPackageDirectories(projectPath: string): Promise<string[]> {
   return directories.map((entry) => path.resolve(projectPath, entry));
 }
 
-async function readProjectApiVersion(projectPath: string): Promise<string | undefined> {
-  const configuration = await readProjectConfiguration(path.join(projectPath, 'sfdx-project.json'));
-  return typeof configuration.sourceApiVersion === 'string' && /^\d+\.\d+$/u.test(configuration.sourceApiVersion)
-    ? configuration.sourceApiVersion
-    : undefined;
+async function discoverLocalMetadataTypes(
+  sourceDirectories: readonly string[],
+): Promise<MetadataTypeDescriptor[]> {
+  const descriptors: MetadataTypeDescriptor[] = [];
+  for (const sourceDirectory of sourceDirectories) {
+    for (const relativePath of await listFiles(sourceDirectory)) {
+      if (!relativePath.endsWith('-meta.xml')) continue;
+      const directoryName = relativePath.split('/')[0];
+      if (directoryName === undefined || directoryName.length === 0) continue;
+      const xmlName = extractRootElement(await readFile(path.join(sourceDirectory, relativePath), 'utf8'));
+      if (xmlName === undefined) continue;
+      const sourcePath = relativePath.slice(0, -'-meta.xml'.length);
+      const extension = path.posix.extname(sourcePath);
+      descriptors.push({
+        directoryName,
+        xmlName,
+        ...(extension.length <= 1 ? {} : { suffix: extension.slice(1) }),
+      });
+    }
+  }
+  return mergeMetadataTypes(descriptors);
+}
+
+function extractRootElement(xml: string): string | undefined {
+  return xml.match(/<(?![?!/])(?:[A-Za-z_][\w.-]*:)?([A-Za-z_][\w.-]*)[\s>]/u)?.[1];
 }
 
 async function readProjectConfiguration(configurationPath: string): Promise<ProjectConfiguration> {

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { access, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 
-import { withRequestWorkspace } from '../../core/request-workspace.js';
+import { readProjectApiVersion, withRequestWorkspace } from '../../core/request-workspace.js';
 import type { SfClient } from '../../salesforce/sf-client.js';
 
 export interface WorkspaceOrg {
@@ -101,9 +101,11 @@ export class WorkspaceService {
     if (cached !== undefined && cached.expiresAt > Date.now()) return cached.value;
     const pending = this.metadataTypeRequests.get(alias);
     if (pending !== undefined) return pending;
-    const request = withRequestWorkspace(this.projects[0]!.realPath, async (workspacePath) => {
+    const projectPath = this.projects[0]!.realPath;
+    const request = withRequestWorkspace(projectPath, async (workspacePath) => {
+      const apiVersion = await readProjectApiVersion(projectPath);
       const raw = await this.sfClient.runJson([
-        'org', 'list', 'metadata-types', '--target-org', alias,
+        'org', 'list', 'metadata-types', '--target-org', alias, '--api-version', apiVersion,
       ], { cwd: workspacePath, timeoutMs: 60_000 });
       const metadataObjects = isRecord(raw) && isRecord(raw.result) && Array.isArray(raw.result.metadataObjects)
         ? raw.result.metadataObjects

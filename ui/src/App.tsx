@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 type IconName =
   | 'activity'
@@ -599,6 +599,16 @@ function DeployPage({ user }: { user: ApiUser }) {
   const [comparisonJob, setComparisonJob] = useState<ComparisonJobResponse | null>(null);
   const [dryRunJob, setDryRunJob] = useState<DryRunJobResponse | null>(null);
   const [error, setError] = useState('');
+  const comparisonRequestControllerRef = useRef<AbortController | null>(null);
+  const dryRunRequestControllerRef = useRef<AbortController | null>(null);
+  const comparisonJobSelectionKeyRef = useRef<string | null>(null);
+  const dryRunJobSelectionKeyRef = useRef<string | null>(null);
+  const workflowSelectionKey = [sourceId, targetOrgId, scopeQuery, strict, showIdentical].join('\u0000');
+  const dryRunSelectionKey = [workflowSelectionKey, testLevel, tests].join('\u0000');
+  const workflowSelectionKeyRef = useRef(workflowSelectionKey);
+  const dryRunSelectionKeyRef = useRef(dryRunSelectionKey);
+  workflowSelectionKeyRef.current = workflowSelectionKey;
+  dryRunSelectionKeyRef.current = dryRunSelectionKey;
   const canRun = ['OPERATOR', 'DEPLOYER', 'ADMIN'].includes(user.role);
 
   useEffect(() => {
@@ -646,36 +656,80 @@ function DeployPage({ user }: { user: ApiUser }) {
   }, [sourceId, targetOrgId]);
 
   useEffect(() => {
+    comparisonRequestControllerRef.current?.abort();
+    dryRunRequestControllerRef.current?.abort();
+    comparisonJobSelectionKeyRef.current = null;
+    dryRunJobSelectionKeyRef.current = null;
     setComparisonJob(null);
     setDryRunJob(null);
   }, [sourceId, targetOrgId, scopeQuery, strict, showIdentical]);
 
   useEffect(() => {
+    dryRunRequestControllerRef.current?.abort();
+    dryRunJobSelectionKeyRef.current = null;
+    setDryRunJob(null);
+  }, [testLevel, tests]);
+
+  useEffect(() => {
     if (comparisonJob === null || !['QUEUED', 'RUNNING'].includes(comparisonJob.status)) return;
+    const selectionKey = comparisonJobSelectionKeyRef.current;
+    if (selectionKey === null) return;
+    const controller = new AbortController();
     const timeout = window.setTimeout(() => {
-      fetch(`/api/v1/comparisons/${comparisonJob.id}`, { credentials: 'same-origin' })
+      fetch(`/api/v1/comparisons/${comparisonJob.id}`, {
+        credentials: 'same-origin', signal: controller.signal,
+      })
         .then(async (response) => {
           const data = await response.json() as { job?: ComparisonJobResponse; error?: { message: string } };
           if (!response.ok || data.job === undefined) throw new Error(data.error?.message ?? '비교 상태를 확인하지 못했습니다.');
+          if (
+            controller.signal.aborted
+            || workflowSelectionKeyRef.current !== selectionKey
+            || comparisonJobSelectionKeyRef.current !== selectionKey
+            || data.job.id !== comparisonJob.id
+          ) return;
           setComparisonJob(data.job);
         })
-        .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : '비교 상태를 확인하지 못했습니다.'));
+        .catch((caught: unknown) => {
+          if (caught instanceof DOMException && caught.name === 'AbortError') return;
+          setError(caught instanceof Error ? caught.message : '비교 상태를 확인하지 못했습니다.');
+        });
     }, 900);
-    return () => window.clearTimeout(timeout);
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
   }, [comparisonJob]);
 
   useEffect(() => {
     if (dryRunJob === null || !['QUEUED', 'DRY_RUN_RUNNING'].includes(dryRunJob.status)) return;
+    const selectionKey = dryRunJobSelectionKeyRef.current;
+    if (selectionKey === null) return;
+    const controller = new AbortController();
     const timeout = window.setTimeout(() => {
-      fetch(`/api/v1/deployment-jobs/${dryRunJob.id}`, { credentials: 'same-origin' })
+      fetch(`/api/v1/deployment-jobs/${dryRunJob.id}`, {
+        credentials: 'same-origin', signal: controller.signal,
+      })
         .then(async (response) => {
           const data = await response.json() as { job?: DryRunJobResponse; error?: { message: string } };
           if (!response.ok || data.job === undefined) throw new Error(data.error?.message ?? 'dry-run 상태를 확인하지 못했습니다.');
+          if (
+            controller.signal.aborted
+            || dryRunSelectionKeyRef.current !== selectionKey
+            || dryRunJobSelectionKeyRef.current !== selectionKey
+            || data.job.id !== dryRunJob.id
+          ) return;
           setDryRunJob(data.job);
         })
-        .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : 'dry-run 상태를 확인하지 못했습니다.'));
+        .catch((caught: unknown) => {
+          if (caught instanceof DOMException && caught.name === 'AbortError') return;
+          setError(caught instanceof Error ? caught.message : 'dry-run 상태를 확인하지 못했습니다.');
+        });
     }, 1_000);
-    return () => window.clearTimeout(timeout);
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
   }, [dryRunJob]);
 
   const source = workspace?.sources.find((entry) => entry.id === sourceId);
@@ -692,9 +746,15 @@ function DeployPage({ user }: { user: ApiUser }) {
     setError('');
     setComparisonJob(null);
     setDryRunJob(null);
+    const selectionKey = workflowSelectionKey;
+    const controller = new AbortController();
+    comparisonRequestControllerRef.current?.abort();
+    comparisonRequestControllerRef.current = controller;
+    comparisonJobSelectionKeyRef.current = selectionKey;
     try {
       const response = await fetch('/api/v1/comparisons', {
         method: 'POST', credentials: 'same-origin',
+        signal: controller.signal,
         headers: { 'content-type': 'application/json', 'x-sfud-csrf': readCookie('sfud_csrf') ?? '' },
         body: JSON.stringify({
           scope: 'all',
@@ -707,19 +767,35 @@ function DeployPage({ user }: { user: ApiUser }) {
       });
       const data = await response.json() as { job?: ComparisonJobResponse; error?: { message: string } };
       if (!response.ok || data.job === undefined) throw new Error(data.error?.message ?? '비교를 시작하지 못했습니다.');
+      if (
+        controller.signal.aborted
+        || workflowSelectionKeyRef.current !== selectionKey
+        || comparisonJobSelectionKeyRef.current !== selectionKey
+      ) return;
       setComparisonJob(data.job);
     } catch (caught) {
+      if (caught instanceof DOMException && caught.name === 'AbortError') return;
       setError(caught instanceof Error ? caught.message : '비교를 시작하지 못했습니다.');
+    } finally {
+      if (comparisonRequestControllerRef.current === controller) {
+        comparisonRequestControllerRef.current = null;
+      }
     }
   };
 
   const startDryRun = async () => {
     setError('');
     setDryRunJob(null);
+    const selectionKey = dryRunSelectionKey;
+    const controller = new AbortController();
+    dryRunRequestControllerRef.current?.abort();
+    dryRunRequestControllerRef.current = controller;
+    dryRunJobSelectionKeyRef.current = selectionKey;
     try {
       const response = await fetch('/api/v1/deployments/dry-run', {
         method: 'POST',
         credentials: 'same-origin',
+        signal: controller.signal,
         headers: { 'content-type': 'application/json', 'x-sfud-csrf': readCookie('sfud_csrf') ?? '' },
         body: JSON.stringify({
           scope: 'all',
@@ -729,9 +805,19 @@ function DeployPage({ user }: { user: ApiUser }) {
       });
       const data = await response.json() as { job?: DryRunJobResponse; error?: { message: string } };
       if (!response.ok || data.job === undefined) throw new Error(data.error?.message ?? 'dry-run을 시작하지 못했습니다.');
+      if (
+        controller.signal.aborted
+        || dryRunSelectionKeyRef.current !== selectionKey
+        || dryRunJobSelectionKeyRef.current !== selectionKey
+      ) return;
       setDryRunJob(data.job);
     } catch (caught) {
+      if (caught instanceof DOMException && caught.name === 'AbortError') return;
       setError(caught instanceof Error ? caught.message : 'dry-run을 시작하지 못했습니다.');
+    } finally {
+      if (dryRunRequestControllerRef.current === controller) {
+        dryRunRequestControllerRef.current = null;
+      }
     }
   };
 
