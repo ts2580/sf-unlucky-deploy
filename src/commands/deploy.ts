@@ -2,12 +2,14 @@ import path from 'node:path';
 
 import { SfudError } from '../core/errors.js';
 import { sha256Directory, writeJson } from '../core/files.js';
+import { withRequestWorkspace } from '../core/request-workspace.js';
 import {
   selectApexTestPlan,
   type ApexTestPlan,
   type RequestedTestLevel,
 } from '../deploy/test-plan.js';
 import { compareSnapshots, type ComparisonResult } from '../metadata/comparator.js';
+import { generateDeployableManifest } from '../metadata/deployable-manifest.js';
 import { renderTerminalReport } from '../reports/terminal.js';
 import { writeComparisonReports, type ReportPaths } from '../reports/writer.js';
 import {
@@ -23,7 +25,9 @@ import { createRunContext, writeRunMetadata } from './run-context.js';
 export interface DeployCommandOptions {
   from: string;
   to: string;
-  manifest: string;
+  manifest?: string;
+  allMetadata?: boolean;
+  metadataType?: string;
   reportDir?: string;
   dryRun?: boolean;
   execute?: boolean;
@@ -39,6 +43,7 @@ export interface DeployCommandDependencies {
   cwd?: string;
   sfClient?: SfClient;
   stdout?: (value: string) => void;
+  requestWorkspacePath?: string;
 }
 
 export interface DeployCommandResult {
@@ -58,12 +63,27 @@ export async function runDeployCommand(
   validateDeployOptions(options);
   const cwd = dependencies.cwd ?? process.cwd();
   const sfClient = dependencies.sfClient ?? new ProcessSfClient();
+  if (dependencies.requestWorkspacePath === undefined) {
+    return await withRequestWorkspace(cwd, async (requestWorkspacePath) =>
+      runDeployCommand(options, { ...dependencies, cwd, sfClient, requestWorkspacePath }));
+  }
+  const commandProjectPath = dependencies.requestWorkspacePath;
   const stdout = dependencies.stdout ?? ((value: string) => process.stdout.write(value));
-  const manifestPath = path.resolve(cwd, options.manifest);
   const source = parseSourceSpec(options.from, cwd);
   const targetAlias = normalizeTargetAlias(options.to);
   const targetSource = parseSourceSpec(`org:${targetAlias}`, cwd);
   const context = await createRunContext(cwd, options.reportDir, 'deploy');
+  const generatedManifest = options.allMetadata === true || options.metadataType !== undefined
+    ? await generateDeployableManifest({
+      sources: [targetSource, source],
+      ...(options.metadataType === undefined ? {} : { metadataTypes: [options.metadataType] }),
+      outputDirectory: path.join(context.rootDirectory, 'generated-manifest'),
+      commandProjectPath,
+      sfClient,
+    })
+    : undefined;
+  const manifestPath = generatedManifest?.manifestPath
+    ?? path.resolve(cwd, options.manifest ?? 'manifest/package.xml');
   await writeRunMetadata(context, 'deploy', targetSource, source.displayName, manifestPath);
 
   const [targetSnapshot, sourceSnapshot] = await Promise.all([
@@ -71,17 +91,19 @@ export async function runDeployCommand(
       source: targetSource,
       manifestPath,
       outputDir: context.leftSnapshotDirectory,
-      commandProjectPath: cwd,
+      commandProjectPath,
       sfClient,
       waitMinutes: options.wait ?? 60,
+      ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
     }),
     createSnapshot({
       source,
       manifestPath,
       outputDir: context.rightSnapshotDirectory,
-      commandProjectPath: cwd,
+      commandProjectPath,
       sfClient,
       waitMinutes: options.wait ?? 60,
+      ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
     }),
   ]);
 
@@ -90,7 +112,7 @@ export async function runDeployCommand(
   });
   if (comparison.summary.removed > 0) {
     comparison.warnings.push(
-      'REMOVED는 target에만 존재하는 차이이며 destructive manifest 없이는 실제로 삭제되지 않습니다.',
+      'TARGET ONLY는 target에만 존재하는 차이이며 destructive manifest 없이는 실제로 삭제되지 않습니다.',
     );
   }
   const testPlan = await selectApexTestPlan(
@@ -118,7 +140,7 @@ export async function runDeployCommand(
   const dryRunResult = sanitizeSfOutput(await runDeploymentRequest(
     sfClient,
     [...deployArgs, '--dry-run'],
-    cwd,
+    commandProjectPath,
     options.wait,
   ));
   await writeJson(path.join(context.logsDirectory, 'dry-run.json'), dryRunResult);
@@ -129,7 +151,7 @@ export async function runDeployCommand(
     deployResult = sanitizeSfOutput(await runDeploymentRequest(
       sfClient,
       deployArgs,
-      cwd,
+      commandProjectPath,
       options.wait,
     ));
     await writeJson(path.join(context.logsDirectory, 'deploy.json'), deployResult);
@@ -206,6 +228,9 @@ function validateDeployOptions(options: DeployCommandOptions): void {
   }
   if (options.wait !== undefined && (!Number.isInteger(options.wait) || options.wait < 1)) {
     throw new SfudError('INVALID_ARGUMENT', '--wait는 1 이상의 정수여야 합니다.');
+  }
+  if (options.allMetadata !== true && options.metadataType === undefined && options.manifest === undefined) {
+    throw new SfudError('INVALID_ARGUMENT', 'manifest 또는 전체 metadata 범위가 필요합니다.');
   }
 }
 

@@ -42,7 +42,7 @@ describe('SQLite 저장소', () => {
     expect(await store.database.get('PRAGMA journal_mode')).toEqual({ journal_mode: 'wal' });
     expect(await store.database.get('PRAGMA busy_timeout')).toEqual({ timeout: 5_000 });
     expect(await store.database.get('SELECT COUNT(*) count FROM schema_migrations'))
-      .toEqual({ count: 4 });
+      .toEqual({ count: 7 });
     expect((await stat(path.dirname(databasePath))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
     await expect(readFile(databasePath)).resolves.toBeInstanceOf(Buffer);

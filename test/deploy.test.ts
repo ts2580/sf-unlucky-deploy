@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -37,6 +37,10 @@ describe('deploy command', () => {
     expect(deployCalls[0]?.args).toEqual(
       expect.arrayContaining(['--test-level', 'RunSpecifiedTests', '--tests', 'Hello_Test']),
     );
+    const retrieveCall = client.calls.find((call) => call.args.includes('retrieve'))!;
+    expect(deployCalls[0]!.options.cwd).toBe(retrieveCall.options.cwd);
+    expect(path.basename(retrieveCall.options.cwd)).toMatch(/^sfud-request-/u);
+    await expect(access(retrieveCall.options.cwd)).rejects.toThrow();
     expect(result.testPlan).toEqual({
       level: 'RunSpecifiedTests',
       tests: ['Hello_Test'],

@@ -54,6 +54,14 @@ describe('비교 API', () => {
       expect(workspace.body).not.toContain('access-token-secret');
       expect(workspace.body).not.toContain(projectPath);
       const projectId = workspace.json<{ projects: Array<{ id: string }> }>().projects[0]!.id;
+      const metadataTypes = await server.inject({
+        url: '/api/v1/metadata-types?sourceIds=org%3Aleft%2Corg%3Aright',
+        headers: { cookie },
+      });
+      expect(metadataTypes.statusCode).toBe(200);
+      expect(metadataTypes.json()).toEqual({
+        metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }],
+      });
       const comparisonPayload = {
         projectId,
         manifest: 'manifest/package.xml',
@@ -100,6 +108,36 @@ describe('비교 API', () => {
       expect(await server.sfudRuntime.store.database.get(
         "SELECT COUNT(*) count FROM audit_events WHERE event_type = 'COMPARISON_SUCCEEDED'",
       )).toEqual({ count: 1 });
+
+      const allCreated = await server.inject({
+        method: 'POST',
+        url: '/api/v1/comparisons',
+        headers: { cookie, 'x-sfud-csrf': csrfToken },
+        payload: {
+          scope: 'all',
+          metadataType: 'ApexClass',
+          leftSourceId: 'org:left',
+          rightSourceId: 'org:right',
+        },
+      });
+      expect(allCreated.statusCode).toBe(202);
+      const allJobId = allCreated.json<{ job: { id: string } }>().job.id;
+      await server.sfudRuntime.comparisonQueue.onIdle();
+      const allCompleted = await server.inject({
+        url: `/api/v1/comparisons/${allJobId}`,
+        headers: { cookie },
+      });
+      expect(allCompleted.json()).toMatchObject({
+        job: {
+          status: 'SUCCEEDED',
+          scope: 'all',
+          metadataType: 'ApexClass',
+          manifest: 'ApexClass',
+        },
+      });
+      expect(sfClient.calls.filter((args) =>
+        args[0] === 'project' && args[1] === 'generate' && args[2] === 'manifest'))
+        .toHaveLength(2);
     } finally {
       await server.close();
       await rm(root, { recursive: true, force: true });
@@ -123,7 +161,15 @@ describe('비교 API', () => {
 });
 
 class ComparisonSfClient implements SfClient {
+  public readonly calls: string[][] = [];
+
   public async runJson(args: readonly string[], _options: SfRunOptions): Promise<unknown> {
+    this.calls.push([...args]);
+    if (args[0] === 'org' && args[1] === 'list' && args[2] === 'metadata-types') {
+      return { status: 0, result: { metadataObjects: [
+        { directoryName: 'classes', suffix: 'cls', xmlName: 'ApexClass' },
+      ] } };
+    }
     if (args[0] === 'org' && args[1] === 'list') {
       return {
         status: 0,
@@ -134,6 +180,18 @@ class ComparisonSfClient implements SfClient {
           ],
         },
       };
+    }
+    if (args[0] === 'project' && args[1] === 'generate' && args[2] === 'manifest') {
+      const outputDirectory = flagValue(args, '--output-dir');
+      const name = flagValue(args, '--name');
+      await mkdir(outputDirectory, { recursive: true });
+      await writeFile(path.join(outputDirectory, name), `<?xml version="1.0" encoding="UTF-8"?>
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+  <types><members>Hello</members><name>ApexClass</name></types>
+  <version>67.0</version>
+</Package>
+`);
+      return { status: 0 };
     }
     const alias = flagValue(args, '--target-org');
     const outputDirectory = flagValue(args, '--target-metadata-dir');

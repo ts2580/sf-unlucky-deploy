@@ -19,8 +19,10 @@ const TEST_LEVELS: RequestedTestLevel[] = [
 ];
 
 export interface CreateDryRunInput {
-  projectId: string;
-  manifest: string;
+  projectId?: string;
+  scope?: 'manifest' | 'all';
+  metadataType?: string;
+  manifest?: string;
   sourceId: string;
   targetOrgId: string;
   testLevel: RequestedTestLevel;
@@ -41,12 +43,34 @@ export class DryRunService {
 
   public async create(input: CreateDryRunInput): Promise<DeploymentJob> {
     assertInput(input);
-    const [{ project, path: manifestPath }, source, targetSource] = await Promise.all([
-      this.workspace.resolveManifest(input.projectId, input.manifest),
+    if (input.scope !== undefined && input.scope !== 'manifest' && input.scope !== 'all') {
+      throw new SfudError('INVALID_ARGUMENT', '지원하지 않는 배포 범위입니다.');
+    }
+    const scope = input.scope ?? 'manifest';
+    const [project, source, targetSource] = await Promise.all([
+      scope === 'all'
+        ? Promise.resolve(this.workspace.defaultProject())
+        : this.workspace.resolveProject(requiredString(input.projectId, '프로젝트')),
       this.workspace.resolveSource(input.sourceId),
       this.workspace.resolveSource(input.targetOrgId),
     ]);
     if (!targetSource.startsWith('org:')) throw new Error('dry-run 대상은 Salesforce org여야 합니다.');
+    if (source === targetSource) throw new Error('배포 소스와 대상 org는 서로 달라야 합니다.');
+    if (scope !== 'all' && input.metadataType !== undefined) {
+      throw new Error('Salesforce metadata type은 전체 metadata 범위에서만 선택할 수 있습니다.');
+    }
+    if (input.metadataType !== undefined) {
+      const availableTypes = await this.workspace.listMetadataTypes([input.sourceId, input.targetOrgId]);
+      if (!availableTypes.some((entry) => entry.name === input.metadataType)) {
+        throw new Error(`선택한 Salesforce metadata type을 사용할 수 없습니다: ${input.metadataType}`);
+      }
+    }
+    const manifestPath = scope === 'all'
+      ? '@all'
+      : (await this.workspace.resolveManifest(
+        requiredString(input.projectId, '프로젝트'),
+        requiredString(input.manifest, 'manifest'),
+      )).path;
     const targetAlias = targetSource.slice('org:'.length);
     const requestChecksum = createHash('sha256').update(JSON.stringify({
       projectPath: project.realPath,
@@ -57,6 +81,8 @@ export class DryRunService {
       tests: [...input.tests].sort(),
       waitMinutes: input.waitMinutes,
       strict: input.strict,
+      scope,
+      metadataType: input.metadataType,
     })).digest('hex');
     const job = await this.jobs.createDryRun({
       source,
@@ -64,6 +90,8 @@ export class DryRunService {
       manifestPath,
       payloadChecksum: requestChecksum,
       createdBy: input.createdBy,
+      scope: scope === 'all' ? 'ALL' : 'MANIFEST',
+      ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
     });
 
     void this.coordinator.runDryRun(job.id, async () => {
@@ -71,7 +99,12 @@ export class DryRunService {
         const result = await runDeployCommand({
           from: source,
           to: targetAlias,
-          manifest: manifestPath,
+          ...(scope === 'all'
+            ? {
+              allMetadata: true,
+              ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
+            }
+            : { manifest: manifestPath }),
           reportDir: path.join(this.runsDirectory, job.id),
           dryRun: true,
           testLevel: input.testLevel,
@@ -122,6 +155,11 @@ function assertInput(input: CreateDryRunInput): void {
   if (input.tests.length > 200 || input.tests.some((test) => !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(test))) {
     throw new SfudError('INVALID_ARGUMENT', 'Apex 테스트 클래스 이름이 올바르지 않습니다.');
   }
+}
+
+function requiredString(value: string | undefined, label: string): string {
+  if (value === undefined || value.length === 0) throw new SfudError('INVALID_ARGUMENT', `${label} 선택이 필요합니다.`);
+  return value;
 }
 
 function extractDeploymentId(value: unknown): string | undefined {

@@ -6,10 +6,13 @@ import type { ComparisonResult } from '../metadata/comparator.js';
 import { runInImmediateTransaction } from '../storage/transaction.js';
 
 export type ComparisonJobStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
+export type ComparisonScope = 'MANIFEST' | 'ALL';
 
 export interface ComparisonJob {
   id: string;
   status: ComparisonJobStatus;
+  scope: ComparisonScope;
+  metadataType?: string;
   projectPath: string;
   manifestPath: string;
   leftSource: string;
@@ -28,6 +31,8 @@ export interface ComparisonJob {
 }
 
 export interface CreateComparisonJobInput {
+  scope?: ComparisonScope;
+  metadataType?: string;
   projectPath: string;
   manifestPath: string;
   leftSource: string;
@@ -40,6 +45,8 @@ export interface CreateComparisonJobInput {
 interface ComparisonJobRow {
   id: string;
   status: ComparisonJobStatus;
+  scope: ComparisonScope;
+  metadata_type: string | null;
   project_path: string;
   manifest_path: string;
   left_source: string;
@@ -70,10 +77,11 @@ export class ComparisonJobRepository {
     await runInImmediateTransaction(this.database, async () => {
       await this.database.run(`
         INSERT INTO comparison_jobs (
-          id, status, project_path, manifest_path, left_source, right_source,
+          id, status, scope, metadata_type, project_path, manifest_path, left_source, right_source,
           strict, show_identical, created_by, created_at, updated_at
-        ) VALUES (?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, id, input.projectPath, input.manifestPath, input.leftSource, input.rightSource,
+        ) VALUES (?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, id, input.scope ?? 'MANIFEST', input.metadataType ?? null,
+      input.projectPath, input.manifestPath, input.leftSource, input.rightSource,
       input.strict ? 1 : 0, input.showIdentical ? 1 : 0, input.createdBy, timestamp, timestamp);
       await this.writeAudit(input.createdBy, 'COMPARISON_QUEUED', id, {
         left: input.leftSource,
@@ -167,6 +175,8 @@ function mapRow(row: ComparisonJobRow): ComparisonJob {
   return {
     id: row.id,
     status: row.status,
+    scope: row.scope,
+    ...(row.metadata_type === null ? {} : { metadataType: row.metadata_type }),
     projectPath: row.project_path,
     manifestPath: row.manifest_path,
     leftSource: row.left_source,

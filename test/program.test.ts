@@ -31,6 +31,24 @@ describe('sfud CLI', () => {
     ]));
   });
 
+  it('전체 배포 가능 메타데이터 비교 옵션을 제공한다', () => {
+    const compareCommand = createProgram().commands.find((command) => command.name() === 'compare');
+
+    expect(compareCommand?.options.map((option) => option.long)).toEqual(expect.arrayContaining([
+      '--all-metadata',
+      '--metadata-type',
+    ]));
+  });
+
+  it('전체 배포 가능 메타데이터 배포 옵션을 제공한다', () => {
+    const deployCommand = createProgram().commands.find((command) => command.name() === 'deploy');
+
+    expect(deployCommand?.options.map((option) => option.long)).toEqual(expect.arrayContaining([
+      '--all-metadata',
+      '--metadata-type',
+    ]));
+  });
+
   it('잘못된 UI 포트 환경변수는 UI 명령에서만 검증한다', async () => {
     vi.stubEnv('SFUD_UI_PORT', 'not-a-port');
 

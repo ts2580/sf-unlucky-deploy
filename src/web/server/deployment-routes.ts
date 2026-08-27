@@ -7,6 +7,8 @@ import { requireAuthenticatedSession } from './auth-routes.js';
 
 interface CreateDryRunBody {
   projectId?: string;
+  scope?: 'manifest' | 'all';
+  metadataType?: string;
   manifest?: string;
   sourceId?: string;
   targetOrgId?: string;
@@ -25,8 +27,12 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
     if (session === undefined) return;
     try {
       const job = await app.sfudRuntime.dryRuns.create({
-        projectId: requiredString(request.body?.projectId, '프로젝트'),
-        manifest: requiredString(request.body?.manifest, 'manifest'),
+        ...(request.body?.projectId === undefined ? {} : { projectId: request.body.projectId }),
+        ...(request.body?.manifest === undefined ? {} : { manifest: request.body.manifest }),
+        scope: request.body?.scope ?? 'manifest',
+        ...(request.body?.metadataType === undefined ? {} : {
+          metadataType: requiredMetadataType(request.body.metadataType),
+        }),
         sourceId: requiredString(request.body?.sourceId, '배포 소스'),
         targetOrgId: requiredString(request.body?.targetOrgId, '대상 org'),
         testLevel: request.body?.testLevel ?? 'auto',
@@ -76,10 +82,14 @@ function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: b
     status: job.status,
     source,
     target,
-    manifest: app.sfudRuntime.workspace.publicManifest(
-      job.source.startsWith('local:') ? job.source.slice('local:'.length) : process.cwd(),
-      job.manifestPath,
-    ),
+    manifest: job.scope === 'ALL'
+      ? job.metadataType ?? '전체 메타데이터'
+      : app.sfudRuntime.workspace.publicManifest(
+        job.source.startsWith('local:') ? job.source.slice('local:'.length) : process.cwd(),
+        job.manifestPath,
+      ),
+    scope: job.scope === 'ALL' ? 'all' : 'manifest',
+    ...(job.metadataType === undefined ? {} : { metadataType: job.metadataType }),
     prepared: job.prepared,
     ...(job.prepared ? { payloadChecksum: job.payloadChecksum } : {}),
     ...(job.salesforceDeploymentId === undefined ? {} : { salesforceDeploymentId: job.salesforceDeploymentId }),
@@ -105,6 +115,13 @@ function optionalStringArray(value: unknown, label: string): string[] {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
     throw new Error(`${label}는 문자열 배열이어야 합니다.`);
+  }
+  return value;
+}
+
+function requiredMetadataType(value: unknown): string {
+  if (typeof value !== 'string' || !/^[A-Za-z][A-Za-z0-9_]*$/u.test(value)) {
+    throw new Error('Salesforce metadata type이 올바르지 않습니다.');
   }
   return value;
 }

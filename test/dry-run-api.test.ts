@@ -72,6 +72,44 @@ describe('dry-run API', () => {
     }
   });
 
+  it('전체 metadata 범위를 동적으로 생성해 비교와 check-only에 동일하게 사용한다', async () => {
+    const fixture = await createFixture(new DryRunSfClient());
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ sources: Array<{ id: string; kind: string }> }>();
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+
+      const created = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/dry-run',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: {
+          scope: 'all', metadataType: 'ApexClass', sourceId, targetOrgId: 'org:target',
+          testLevel: 'RunLocalTests', waitMinutes: 10,
+        },
+      });
+      expect(created.statusCode).toBe(202);
+      expect(created.json()).toMatchObject({ job: {
+        scope: 'all', metadataType: 'ApexClass', manifest: 'ApexClass',
+      } });
+      const jobId = created.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+
+      const job = (await fixture.server.inject({
+        url: `/api/v1/deployment-jobs/${jobId}`, headers: { cookie: auth.cookie },
+      })).json<{ job: { status: string; comparisonSummary: { modified: number } } }>().job;
+      expect(job).toMatchObject({ status: 'APPROVAL_PENDING', comparisonSummary: { modified: 1 } });
+      const manifestCalls = fixture.client.calls.filter((call) =>
+        call.args[0] === 'project' && call.args[1] === 'generate' && call.args[2] === 'manifest');
+      expect(manifestCalls).toHaveLength(2);
+      expect(manifestCalls[0]!.args).toEqual(expect.arrayContaining(['--metadata', 'ApexClass']));
+      expect(fixture.client.calls.find((call) => call.args.includes('deploy'))?.args).toContain('--dry-run');
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it('Salesforce 실패를 민감 정보 없이 FAILED로 기록한다', async () => {
     const fixture = await createFixture(new DryRunSfClient('definitive'));
     try {
@@ -167,10 +205,25 @@ class DryRunSfClient implements SfClient {
 
   public async runJson(args: readonly string[], options: SfRunOptions): Promise<unknown> {
     this.calls.push({ args, options });
+    if (args[0] === 'org' && args[1] === 'list' && args[2] === 'metadata-types') {
+      return { status: 0, result: { metadataObjects: [
+        { xmlName: 'ApexClass', directoryName: 'classes', suffix: 'cls' },
+      ] } };
+    }
     if (args[0] === 'org' && args[1] === 'list') {
       return { status: 0, result: { nonScratchOrgs: [
         { alias: 'target', name: 'Target', orgEdition: 'Developer', connectedStatus: 'Connected' },
       ] } };
+    }
+    if (args[0] === 'project' && args[1] === 'generate' && args[2] === 'manifest') {
+      await mkdir(flagValue(args, '--output-dir'), { recursive: true });
+      await writeFile(path.join(flagValue(args, '--output-dir'), flagValue(args, '--name')), [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<Package xmlns="http://soap.sforce.com/2006/04/metadata">',
+        '<types><members>Hello</members><members>Hello_Test</members><name>ApexClass</name></types>',
+        '<version>67.0</version></Package>',
+      ].join('\n'));
+      return { status: 0 };
     }
     if (args.includes('retrieve')) {
       await writeSnapshot(flagValue(args, '--target-metadata-dir'), 'target');
@@ -200,7 +253,10 @@ async function createFixture(client: DryRunSfClient) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-dry-run-api-'));
   const projectPath = path.join(root, 'project');
   await mkdir(path.join(projectPath, 'manifest'), { recursive: true });
-  await writeFile(path.join(projectPath, 'sfdx-project.json'), '{}\n');
+  await mkdir(path.join(projectPath, 'force-app'), { recursive: true });
+  await writeFile(path.join(projectPath, 'sfdx-project.json'), JSON.stringify({
+    packageDirectories: [{ path: 'force-app', default: true }], sourceApiVersion: '67.0',
+  }));
   await writeFile(path.join(projectPath, 'manifest', 'package.xml'), '<Package/>\n');
   const server = await createWebServer({
     host: '127.0.0.1', port: 27_546, assetsDirectory: '/missing',

@@ -75,8 +75,8 @@ export async function compareSnapshots(
     );
   }
 
-  const leftComponents = await resolveMetadataComponents(left.packageRoot);
-  const rightComponents = await resolveMetadataComponents(right.packageRoot);
+  const leftComponents = await resolveMetadataComponents(left.packageRoot, left.metadataTypes);
+  const rightComponents = await resolveMetadataComponents(right.packageRoot, right.metadataTypes);
   const keys = [...new Set([...leftComponents.keys(), ...rightComponents.keys()])].sort((a, b) =>
     a.localeCompare(b),
   );
