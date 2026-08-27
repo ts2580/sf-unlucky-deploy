@@ -68,6 +68,7 @@ export async function runCompareCommand(
         outputDir: context.leftSnapshotDirectory,
         commandProjectPath,
         sfClient,
+        ...(generatedManifest?.empty === true ? { empty: true } : {}),
         ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
       }),
       createSnapshot({
@@ -76,6 +77,7 @@ export async function runCompareCommand(
         outputDir: context.rightSnapshotDirectory,
         commandProjectPath,
         sfClient,
+        ...(generatedManifest?.empty === true ? { empty: true } : {}),
         ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
       }),
     ]);

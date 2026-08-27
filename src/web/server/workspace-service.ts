@@ -51,6 +51,7 @@ export class WorkspaceService {
   private readonly metadataTypeRequests = new Map<string, Promise<WorkspaceMetadataType[]>>();
   private readonly uploadedProjects = new Map<string, UploadedProject>();
   private readonly uploadExpirationTimers = new Map<string, NodeJS.Timeout>();
+  private readonly uploadPins = new Map<string, number>();
 
   private constructor(
     private readonly sfClient: SfClient,
@@ -138,6 +139,9 @@ export class WorkspaceService {
     if (ownerUserId !== undefined && (project === undefined || project.ownerUserId !== ownerUserId)) {
       throw new Error('사용할 수 없는 업로드 프로젝트입니다.');
     }
+    if ((this.uploadPins.get(id) ?? 0) > 0) {
+      throw new Error('작업에서 사용 중인 업로드 프로젝트는 제거할 수 없습니다.');
+    }
     const timer = this.uploadExpirationTimers.get(id);
     if (timer !== undefined) clearTimeout(timer);
     this.uploadExpirationTimers.delete(id);
@@ -148,6 +152,7 @@ export class WorkspaceService {
   public async close(): Promise<void> {
     for (const timer of this.uploadExpirationTimers.values()) clearTimeout(timer);
     this.uploadExpirationTimers.clear();
+    this.uploadPins.clear();
     this.uploadedProjects.clear();
     await rm(this.uploadRoot, { recursive: true, force: true });
   }
@@ -266,6 +271,42 @@ export class WorkspaceService {
     return this.defaultProject();
   }
 
+  public pinSources(sourceIds: readonly string[], ownerUserId: string): () => void {
+    const uploadIds = [...new Set(sourceIds.flatMap((sourceId) =>
+      sourceId.startsWith('upload:') ? [sourceId.slice('upload:'.length)] : []))];
+    for (const id of uploadIds) {
+      const project = this.uploadedProjects.get(id);
+      if (project === undefined || project.ownerUserId !== ownerUserId) {
+        throw new Error('사용할 수 없는 업로드 프로젝트입니다.');
+      }
+    }
+    for (const id of uploadIds) {
+      const timer = this.uploadExpirationTimers.get(id);
+      if (timer !== undefined) clearTimeout(timer);
+      this.uploadExpirationTimers.delete(id);
+      this.uploadPins.set(id, (this.uploadPins.get(id) ?? 0) + 1);
+    }
+
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      for (const id of uploadIds) {
+        const count = this.uploadPins.get(id) ?? 0;
+        if (count > 1) {
+          this.uploadPins.set(id, count - 1);
+          continue;
+        }
+        this.uploadPins.delete(id);
+        const project = this.uploadedProjects.get(id);
+        if (project !== undefined) {
+          project.expiresAt = Date.now() + UPLOAD_TTL_MS;
+          this.scheduleUploadExpiration(project);
+        }
+      }
+    };
+  }
+
   public async resolveManifest(projectId: string, manifest: string): Promise<{ project: AllowedProject; path: string }> {
     const project = await this.resolveProject(projectId);
     if (!project.manifests.includes(manifest)) throw new Error('허용되지 않은 manifest입니다.');
@@ -332,13 +373,19 @@ export class WorkspaceService {
   private removeExpiredUploads(): void {
     const now = Date.now();
     for (const [id, project] of this.uploadedProjects) {
-      if (project.expiresAt <= now) void this.discardProjectUpload(id);
+      if (project.expiresAt <= now && (this.uploadPins.get(id) ?? 0) === 0) {
+        void this.discardProjectUpload(id);
+      }
     }
   }
 
   private scheduleUploadExpiration(project: UploadedProject): void {
     const current = this.uploadExpirationTimers.get(project.id);
     if (current !== undefined) clearTimeout(current);
+    if ((this.uploadPins.get(project.id) ?? 0) > 0) {
+      this.uploadExpirationTimers.delete(project.id);
+      return;
+    }
     const timer = setTimeout(() => {
       void this.discardProjectUpload(project.id).catch(() => undefined);
     }, Math.max(0, project.expiresAt - Date.now()));

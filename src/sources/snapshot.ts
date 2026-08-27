@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises';
+import { copyFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
 import { SfudError } from '../core/errors.js';
@@ -22,6 +22,7 @@ export interface SnapshotOptions {
   sfClient: SfClient;
   waitMinutes?: number;
   metadataTypes?: MetadataTypeDescriptor[];
+  empty?: boolean;
 }
 
 export interface MetadataSnapshot {
@@ -42,7 +43,12 @@ export async function createSnapshot(options: SnapshotOptions): Promise<Metadata
   const rawDir = path.join(options.outputDir, 'raw');
   await mkdir(rawDir, { recursive: true });
 
-  if (options.source.kind === 'org') {
+  let packageRoot: string;
+  if (options.empty === true) {
+    packageRoot = path.join(rawDir, 'sfud');
+    await mkdir(packageRoot, { recursive: true });
+    await copyFile(manifestPath, path.join(packageRoot, 'package.xml'));
+  } else if (options.source.kind === 'org') {
     await options.sfClient.runJson(
       [
         'project',
@@ -61,6 +67,7 @@ export async function createSnapshot(options: SnapshotOptions): Promise<Metadata
       ],
       { cwd: options.commandProjectPath },
     );
+    packageRoot = await findPackageRoot(rawDir);
   } else {
     await options.sfClient.runJson(
       [
@@ -76,9 +83,9 @@ export async function createSnapshot(options: SnapshotOptions): Promise<Metadata
       ],
       { cwd: options.source.projectPath },
     );
+    packageRoot = await findPackageRoot(rawDir);
   }
 
-  const packageRoot = await findPackageRoot(rawDir);
   const snapshot: MetadataSnapshot = {
     source: options.source,
     packageRoot,

@@ -30,6 +30,11 @@ interface ProjectConfiguration {
 export interface GeneratedDeployableManifest {
   manifestPath: string;
   metadataTypes: MetadataTypeDescriptor[];
+  empty: boolean;
+  sourceManifests: Array<{
+    manifestPath: string;
+    empty: boolean;
+  }>;
 }
 
 export async function generateDeployableManifest(
@@ -101,9 +106,23 @@ export async function generateDeployableManifest(
   const merged = filterManifestTypes(mergeManifests(manifests), options.metadataTypes);
   const outputPath = path.join(options.outputDirectory, 'package.xml');
   const metadataTypes = mergeMetadataTypes(generated.flatMap((entry) => entry.metadataTypes));
+  const sourceManifests = generated.map(({ generatedPath }, index) => ({
+    manifestPath: generatedPath,
+    parsed: filterManifestTypes(manifests[index]!, options.metadataTypes),
+  }));
+  await Promise.all(sourceManifests.map(({ manifestPath, parsed }) =>
+    writeFile(manifestPath, renderManifest(parsed, apiVersion), 'utf8')));
   await writeFile(outputPath, renderManifest(merged, apiVersion), 'utf8');
   await writeJson(path.join(options.outputDirectory, 'metadata-types.json'), metadataTypes);
-  return { manifestPath: outputPath, metadataTypes };
+  return {
+    manifestPath: outputPath,
+    metadataTypes,
+    empty: isManifestEmpty(merged),
+    sourceManifests: sourceManifests.map(({ manifestPath, parsed }) => ({
+      manifestPath,
+      empty: isManifestEmpty(parsed),
+    })),
+  };
 }
 
 function filterManifestTypes(
@@ -165,11 +184,12 @@ async function discoverLocalMetadataTypes(
   for (const sourceDirectory of sourceDirectories) {
     for (const relativePath of await listFiles(sourceDirectory)) {
       if (!relativePath.endsWith('-meta.xml')) continue;
-      const directoryName = relativePath.split('/')[0];
+      const metadataPath = stripStandardSourcePrefix(relativePath);
+      const directoryName = metadataPath.split('/')[0];
       if (directoryName === undefined || directoryName.length === 0) continue;
       const xmlName = extractRootElement(await readFile(path.join(sourceDirectory, relativePath), 'utf8'));
       if (xmlName === undefined) continue;
-      const sourcePath = relativePath.slice(0, -'-meta.xml'.length);
+      const sourcePath = metadataPath.slice(0, -'-meta.xml'.length);
       const extension = path.posix.extname(sourcePath);
       descriptors.push({
         directoryName,
@@ -179,6 +199,13 @@ async function discoverLocalMetadataTypes(
     }
   }
   return mergeMetadataTypes(descriptors);
+}
+
+function stripStandardSourcePrefix(relativePath: string): string {
+  const parts = relativePath.split('/');
+  return parts[0] === 'main' && parts[1] === 'default'
+    ? parts.slice(2).join('/')
+    : relativePath;
 }
 
 function extractRootElement(xml: string): string | undefined {
@@ -233,6 +260,10 @@ function mergeManifests(manifests: readonly ParsedManifest[]): ParsedManifest {
     }
   }
   return merged;
+}
+
+function isManifestEmpty(manifest: ParsedManifest): boolean {
+  return [...manifest.types.values()].every((members) => members.size === 0);
 }
 
 function renderManifest(manifest: ParsedManifest, preferredVersion?: string): string {

@@ -55,6 +55,31 @@ describe('프로젝트 업로드 API', () => {
         .toEqual(expect.arrayContaining(['--api-version', '61.0']));
 
       const id = source.id.slice('upload:'.length);
+      let releaseBlocker!: () => void;
+      const blockerGate = new Promise<void>((resolve) => { releaseBlocker = resolve; });
+      const blocker = fixture.server.sfudRuntime.comparisonQueue.enqueue('blocking-job', async () => blockerGate);
+      const queued = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/comparisons',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: {
+          scope: 'all', leftSourceId: 'org:target', rightSourceId: source.id,
+          strict: false, showIdentical: false,
+        },
+      });
+      expect(queued.statusCode).toBe(202);
+      const pinnedDelete = await fixture.server.inject({
+        method: 'DELETE', url: `/api/v1/uploads/projects/${id}`,
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+      });
+      expect(pinnedDelete.statusCode).toBe(404);
+      expect(pinnedDelete.json()).toMatchObject({ error: {
+        message: '작업에서 사용 중인 업로드 프로젝트는 제거할 수 없습니다.',
+      } });
+      await expect(access(uploadedPath)).resolves.toBeUndefined();
+
+      releaseBlocker();
+      await blocker;
+      await fixture.server.sfudRuntime.comparisonQueue.onIdle();
       const deleted = await fixture.server.inject({
         method: 'DELETE', url: `/api/v1/uploads/projects/${id}`,
         headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },

@@ -73,13 +73,15 @@ describe('전체 배포 가능 메타데이터 manifest', () => {
     const left = path.join(root, 'left');
     const right = path.join(root, 'right');
     for (const project of [left, right]) {
-      await mkdir(path.join(project, 'force-app', 'contentassets'), { recursive: true });
+      await mkdir(path.join(project, 'force-app', 'main', 'default', 'contentassets'), { recursive: true });
       await writeFile(path.join(project, 'sfdx-project.json'), JSON.stringify({
         packageDirectories: [{ path: 'force-app' }], sourceApiVersion: '67.0',
       }));
-      await writeFile(path.join(project, 'force-app', 'contentassets', 'product.asset'), 'asset');
+      await writeFile(path.join(
+        project, 'force-app', 'main', 'default', 'contentassets', 'product.asset',
+      ), 'asset');
       await writeFile(
-        path.join(project, 'force-app', 'contentassets', 'product.asset-meta.xml'),
+        path.join(project, 'force-app', 'main', 'default', 'contentassets', 'product.asset-meta.xml'),
         '<?xml version="1.0"?><ContentAsset xmlns="http://soap.sforce.com/2006/04/metadata"/>',
       );
     }
@@ -95,7 +97,7 @@ describe('전체 배포 가능 메타데이터 manifest', () => {
       directoryName: 'contentassets', suffix: 'asset', xmlName: 'ContentAsset',
     });
     const components = await resolveMetadataComponents(
-      path.join(left, 'force-app'),
+      path.join(left, 'force-app', 'main', 'default'),
       generated.metadataTypes,
     );
     expect(components).toHaveLength(1);
@@ -120,13 +122,56 @@ describe('전체 배포 가능 메타데이터 manifest', () => {
     const content = await readFile(generated.manifestPath, 'utf8');
     expect(content).toContain('<name>CustomLabels</name>');
     expect(content).not.toContain('<name>CustomObject</name>');
+    for (const sourceManifest of generated.sourceManifests) {
+      const sourceContent = await readFile(sourceManifest.manifestPath, 'utf8');
+      expect(sourceContent).toContain('<name>CustomLabels</name>');
+      expect(sourceContent).not.toContain('<name>CustomObject</name>');
+    }
     const orgManifestCalls = sfClient.calls.filter((args) => args.includes('--from-org'));
     expect(orgManifestCalls).toHaveLength(2);
     for (const args of orgManifestCalls) {
       expect(args).toEqual(expect.arrayContaining(['--metadata', 'CustomLabels']));
     }
   });
+
+  it('양쪽에 선택 타입 멤버가 없으면 빈 동적 manifest로 표시한다', async () => {
+    const root = await createProject();
+    const generated = await generateDeployableManifest({
+      sources: [parseSourceSpec('org:left', root), parseSourceSpec('org:right', root)],
+      metadataTypes: ['ApexClass'],
+      outputDirectory: path.join(root, 'empty'),
+      commandProjectPath: root,
+      sfClient: new EmptyManifestSfClient(),
+    });
+
+    expect(generated.empty).toBe(true);
+    expect(generated.sourceManifests).toEqual([
+      expect.objectContaining({ empty: true }),
+      expect.objectContaining({ empty: true }),
+    ]);
+    expect(await readFile(generated.manifestPath, 'utf8')).not.toContain('<types>');
+  });
 });
+
+class EmptyManifestSfClient implements SfClient {
+  public async runJson(args: readonly string[], _options: SfRunOptions): Promise<unknown> {
+    if (args[0] === 'org' && args[1] === 'list' && args[2] === 'metadata-types') {
+      return { result: { metadataObjects: [
+        { directoryName: 'classes', suffix: 'cls', xmlName: 'ApexClass' },
+      ] } };
+    }
+    const outputDirectory = flagValue(args, '--output-dir');
+    const name = flagValue(args, '--name');
+    await mkdir(outputDirectory, { recursive: true });
+    await writeFile(path.join(outputDirectory, name), [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<Package xmlns="http://soap.sforce.com/2006/04/metadata">',
+      '  <version>67.0</version>',
+      '</Package>',
+    ].join('\n'));
+    return { status: 0 };
+  }
+}
 
 class ManifestSfClient implements SfClient {
   public readonly calls: string[][] = [];

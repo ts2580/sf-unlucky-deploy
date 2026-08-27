@@ -87,15 +87,22 @@ export class DryRunService {
       scope,
       metadataType: input.metadataType,
     })).digest('hex');
-    const job = await this.jobs.createDryRun({
-      source,
-      targetAlias,
-      manifestPath,
-      payloadChecksum: requestChecksum,
-      createdBy: input.createdBy,
-      scope: scope === 'all' ? 'ALL' : 'MANIFEST',
-      ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
-    });
+    const releaseSources = this.workspace.pinSources([input.sourceId], input.createdBy);
+    let job: DeploymentJob;
+    try {
+      job = await this.jobs.createDryRun({
+        source,
+        targetAlias,
+        manifestPath,
+        payloadChecksum: requestChecksum,
+        createdBy: input.createdBy,
+        scope: scope === 'all' ? 'ALL' : 'MANIFEST',
+        ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
+      });
+    } catch (error) {
+      releaseSources();
+      throw error;
+    }
 
     void this.coordinator.runDryRun(job.id, async () => {
       try {
@@ -120,7 +127,7 @@ export class DryRunService {
           sfClient: this.sfClient,
           stdout: () => undefined,
         });
-        const payloadChecksum = result.comparison.right.payloadSha256;
+        const payloadChecksum = result.payloadSha256;
         await this.jobs.recordDryRunArtifacts({
           id: job.id,
           payloadChecksum,
@@ -139,7 +146,7 @@ export class DryRunService {
         if (error instanceof Error) error.message = redactSensitiveText(error.message);
         throw error;
       }
-    }).catch(() => undefined);
+    }).finally(releaseSources).catch(() => undefined);
     return job;
   }
 }

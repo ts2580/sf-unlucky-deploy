@@ -48,6 +48,7 @@ export interface DeployCommandDependencies {
 
 export interface DeployCommandResult {
   comparison: ComparisonResult;
+  payloadSha256: string;
   reports: ReportPaths;
   runDirectory: string;
   dryRunResult?: unknown;
@@ -94,6 +95,7 @@ export async function runDeployCommand(
       commandProjectPath,
       sfClient,
       waitMinutes: options.wait ?? 60,
+      ...(generatedManifest?.empty === true ? { empty: true } : {}),
       ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
     }),
     createSnapshot({
@@ -103,6 +105,7 @@ export async function runDeployCommand(
       commandProjectPath,
       sfClient,
       waitMinutes: options.wait ?? 60,
+      ...(generatedManifest?.empty === true ? { empty: true } : {}),
       ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
     }),
   ]);
@@ -115,8 +118,20 @@ export async function runDeployCommand(
       'TARGET ONLY는 target에만 존재하는 차이이며 destructive manifest 없이는 실제로 삭제되지 않습니다.',
     );
   }
+  const deploymentSnapshot = generatedManifest === undefined
+    ? sourceSnapshot
+    : await createSnapshot({
+      source,
+      manifestPath: generatedManifest.sourceManifests[1]!.manifestPath,
+      outputDir: path.join(context.rootDirectory, 'deploy-payload'),
+      commandProjectPath,
+      sfClient,
+      waitMinutes: options.wait ?? 60,
+      metadataTypes: generatedManifest.metadataTypes,
+      ...(generatedManifest.sourceManifests[1]!.empty ? { empty: true } : {}),
+    });
   const testPlan = await selectApexTestPlan(
-    sourceSnapshot.packageRoot,
+    deploymentSnapshot.packageRoot,
     options.testLevel ?? 'auto',
     options.tests ?? [],
   );
@@ -135,30 +150,36 @@ export async function runDeployCommand(
     );
   }
 
-  await assertPayloadUnchanged(sourceSnapshot.packageRoot, sourceSnapshot.payloadSha256);
-  const deployArgs = buildDeployArgs(options, sourceSnapshot.packageRoot, targetAlias, testPlan);
-  const dryRunResult = sanitizeSfOutput(await runDeploymentRequest(
-    sfClient,
-    [...deployArgs, '--dry-run'],
-    commandProjectPath,
-    options.wait,
-  ));
+  await assertPayloadUnchanged(deploymentSnapshot.packageRoot, deploymentSnapshot.payloadSha256);
+  const deployArgs = buildDeployArgs(options, deploymentSnapshot.packageRoot, targetAlias, testPlan);
+  const payloadEmpty = generatedManifest?.sourceManifests[1]?.empty === true;
+  const dryRunResult = payloadEmpty
+    ? emptyDeploymentResult(true)
+    : sanitizeSfOutput(await runDeploymentRequest(
+      sfClient,
+      [...deployArgs, '--dry-run'],
+      commandProjectPath,
+      options.wait,
+    ));
   await writeJson(path.join(context.logsDirectory, 'dry-run.json'), dryRunResult);
 
   let deployResult: unknown;
   if (options.execute) {
-    await assertPayloadUnchanged(sourceSnapshot.packageRoot, sourceSnapshot.payloadSha256);
-    deployResult = sanitizeSfOutput(await runDeploymentRequest(
-      sfClient,
-      deployArgs,
-      commandProjectPath,
-      options.wait,
-    ));
+    await assertPayloadUnchanged(deploymentSnapshot.packageRoot, deploymentSnapshot.payloadSha256);
+    deployResult = payloadEmpty
+      ? emptyDeploymentResult(false)
+      : sanitizeSfOutput(await runDeploymentRequest(
+        sfClient,
+        deployArgs,
+        commandProjectPath,
+        options.wait,
+      ));
     await writeJson(path.join(context.logsDirectory, 'deploy.json'), deployResult);
   }
 
   const result: DeployCommandResult = {
     comparison,
+    payloadSha256: deploymentSnapshot.payloadSha256,
     reports,
     runDirectory: context.rootDirectory,
     dryRunResult,
@@ -171,6 +192,18 @@ export async function runDeployCommand(
   }
   emitJsonIfRequested(options.json, stdout, result);
   return result;
+}
+
+function emptyDeploymentResult(checkOnly: boolean): unknown {
+  return {
+    status: 0,
+    result: {
+      status: 'Succeeded',
+      checkOnly,
+      empty: true,
+      message: '배포할 source 메타데이터가 없어 Salesforce 요청을 생략했습니다.',
+    },
+  };
 }
 
 async function runDeploymentRequest(

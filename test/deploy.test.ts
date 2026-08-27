@@ -115,6 +115,53 @@ describe('deploy command', () => {
     expect(client.calls.filter((call) => call.args.includes('deploy'))).toHaveLength(1);
   });
 
+  it('전체 metadata 비교 합집합과 배포 source manifest를 분리한다', async () => {
+    const fixture = await createDeployFixture(temporaryDirectories);
+    await writeFile(path.join(fixture.projectPath, 'sfdx-project.json'), JSON.stringify({
+      packageDirectories: [{ path: 'force-app' }], sourceApiVersion: '67.0',
+    }));
+    await mkdir(path.join(fixture.projectPath, 'force-app'), { recursive: true });
+    const client = new DeployablePayloadSfClient();
+
+    const result = await runDeployCommand({
+      from: `local:${fixture.projectPath}`,
+      to: 'target',
+      allMetadata: true,
+      reportDir: fixture.runDirectory,
+      dryRun: true,
+      color: false,
+    }, { cwd: fixture.projectPath, sfClient: client, stdout: () => undefined });
+
+    expect(result.comparison.summary).toMatchObject({ added: 1, removed: 1 });
+    expect(client.deployedManifest).toContain('<members>SourceOnly</members>');
+    expect(client.deployedManifest).toContain('<members>Shared</members>');
+    expect(client.deployedManifest).not.toContain('TargetOnly');
+    expect(client.calls.filter((call) => call.args.includes('convert'))).toHaveLength(2);
+    expect(result.payloadSha256).not.toBe(result.comparison.right.payloadSha256);
+  });
+
+  it('동적 source manifest가 비어 있으면 target-only 비교 후 Salesforce 배포를 생략한다', async () => {
+    const fixture = await createDeployFixture(temporaryDirectories);
+    await writeFile(path.join(fixture.projectPath, 'sfdx-project.json'), JSON.stringify({
+      packageDirectories: [{ path: 'force-app' }], sourceApiVersion: '67.0',
+    }));
+    await mkdir(path.join(fixture.projectPath, 'force-app'), { recursive: true });
+    const client = new DeployablePayloadSfClient([], ['TargetOnly']);
+
+    const result = await runDeployCommand({
+      from: `local:${fixture.projectPath}`,
+      to: 'target',
+      allMetadata: true,
+      reportDir: fixture.runDirectory,
+      dryRun: true,
+      color: false,
+    }, { cwd: fixture.projectPath, sfClient: client, stdout: () => undefined });
+
+    expect(result.comparison.summary).toMatchObject({ added: 0, removed: 1 });
+    expect(client.calls.filter((call) => call.args.includes('deploy'))).toHaveLength(0);
+    expect(result.dryRunResult).toMatchObject({ result: { checkOnly: true, empty: true } });
+  });
+
   it('dry-run 뒤 staging payload가 바뀌면 실제 배포를 차단한다', async () => {
     const fixture = await createDeployFixture(temporaryDirectories);
     const client = new DeployFixtureSfClient(true);
@@ -182,6 +229,57 @@ class DeployFixtureSfClient implements SfClient {
   }
 }
 
+class DeployablePayloadSfClient implements SfClient {
+  public readonly calls: Array<{ args: readonly string[]; options: SfRunOptions }> = [];
+  public deployedManifest = '';
+
+  public constructor(
+    private readonly sourceMembers: readonly string[] = ['Shared', 'SourceOnly'],
+    private readonly targetMembers: readonly string[] = ['Shared', 'TargetOnly'],
+  ) {}
+
+  public async runJson(args: readonly string[], options: SfRunOptions): Promise<unknown> {
+    this.calls.push({ args, options });
+    if (args[0] === 'org' && args[1] === 'list' && args[2] === 'metadata-types') {
+      return { result: { metadataObjects: [
+        { directoryName: 'classes', suffix: 'cls', xmlName: 'ApexClass' },
+      ] } };
+    }
+    if (args[0] === 'project' && args[1] === 'generate' && args[2] === 'manifest') {
+      const members = args.includes('--from-org') ? this.targetMembers : this.sourceMembers;
+      await writeFile(
+        path.join(flagValue(args, '--output-dir'), flagValue(args, '--name')),
+        renderApexManifest(members),
+      );
+      return { status: 0 };
+    }
+    if (args.includes('retrieve')) {
+      await writeMetadataPackage(
+        flagValue(args, '--target-metadata-dir'),
+        await readFile(flagValue(args, '--manifest'), 'utf8'),
+        this.targetMembers,
+      );
+      return { status: 0 };
+    }
+    if (args.includes('convert')) {
+      await writeMetadataPackage(
+        flagValue(args, '--output-dir'),
+        await readFile(flagValue(args, '--manifest'), 'utf8'),
+        this.sourceMembers,
+      );
+      return { status: 0 };
+    }
+    if (args.includes('deploy')) {
+      this.deployedManifest = await readFile(
+        path.join(flagValue(args, '--metadata-dir'), 'package.xml'),
+        'utf8',
+      );
+      return { status: 0, result: { id: '0Af-source-only' } };
+    }
+    throw new Error(`예상하지 못한 sf 명령: ${args.join(' ')}`);
+  }
+}
+
 async function writeSnapshot(outputDirectory: string, value: string | null): Promise<void> {
   if (value === null) {
     await writeFixtureFiles(outputDirectory, { 'package.xml': '<Package/>\n' });
@@ -195,6 +293,33 @@ async function writeSnapshot(outputDirectory: string, value: string | null): Pro
     'classes/Hello_Test.cls': 'public class Hello_Test {}\n',
     'classes/Hello_Test.cls-meta.xml': '<?xml version="1.0"?><ApexClass><status>Active</status></ApexClass>',
   });
+}
+
+async function writeMetadataPackage(
+  outputDirectory: string,
+  manifest: string,
+  members: readonly string[],
+): Promise<void> {
+  const files: Record<string, string> = { 'package.xml': manifest };
+  for (const member of members) {
+    files[`classes/${member}.cls`] = `public class ${member} {}\n`;
+    files[`classes/${member}.cls-meta.xml`] = '<ApexClass><status>Active</status></ApexClass>\n';
+  }
+  await writeFixtureFiles(outputDirectory, files);
+}
+
+function renderApexManifest(members: readonly string[]): string {
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<Package xmlns="http://soap.sforce.com/2006/04/metadata">',
+    '  <types>',
+    ...members.map((member) => `    <members>${member}</members>`),
+    '    <name>ApexClass</name>',
+    '  </types>',
+    '  <version>67.0</version>',
+    '</Package>',
+    '',
+  ].join('\n');
 }
 
 async function createDeployFixture(temporaryDirectories: string[]): Promise<{

@@ -51,7 +51,53 @@ describe('compare command', () => {
       access(result.reports.checksums),
     ]);
   });
+
+  it('선택 타입 멤버가 양쪽 모두 없으면 retrieve 없이 0개 차이로 완료한다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-empty-compare-'));
+    temporaryDirectories.push(root);
+    await writeFile(path.join(root, 'sfdx-project.json'), JSON.stringify({
+      packageDirectories: [{ path: 'force-app' }], sourceApiVersion: '67.0',
+    }));
+    const client = new EmptyDynamicCompareSfClient();
+
+    const result = await runCompareCommand({
+      left: 'org:left',
+      right: 'org:right',
+      metadataType: 'ApexClass',
+      reportDir: path.join(root, 'run'),
+      color: false,
+    }, { cwd: root, sfClient: client, stdout: () => undefined });
+
+    expect(result.comparison.summary).toEqual({
+      added: 0, removed: 0, modified: 0, identical: 0, total: 0, different: 0,
+    });
+    expect(client.calls.filter((args) => args.includes('retrieve'))).toHaveLength(0);
+    expect(client.calls.filter((args) => args.includes('manifest'))).toHaveLength(2);
+  });
 });
+
+class EmptyDynamicCompareSfClient implements SfClient {
+  public readonly calls: string[][] = [];
+
+  public async runJson(args: readonly string[], _options: SfRunOptions): Promise<unknown> {
+    this.calls.push([...args]);
+    if (args[0] === 'org' && args[1] === 'list' && args[2] === 'metadata-types') {
+      return { result: { metadataObjects: [
+        { directoryName: 'classes', suffix: 'cls', xmlName: 'ApexClass' },
+      ] } };
+    }
+    if (args[0] === 'project' && args[1] === 'generate' && args[2] === 'manifest') {
+      await writeFile(path.join(flagValue(args, '--output-dir'), flagValue(args, '--name')), [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<Package xmlns="http://soap.sforce.com/2006/04/metadata">',
+        '  <version>67.0</version>',
+        '</Package>',
+      ].join('\n'));
+      return { status: 0 };
+    }
+    throw new Error(`빈 manifest 비교에서 실행되면 안 되는 명령: ${args.join(' ')}`);
+  }
+}
 
 class OrgCompareSfClient implements SfClient {
   public readonly calls: Array<{ args: readonly string[]; options: SfRunOptions }> = [];

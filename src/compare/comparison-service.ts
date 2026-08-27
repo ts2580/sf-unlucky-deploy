@@ -56,18 +56,34 @@ export class ComparisonService {
         requiredProjectId(input.projectId),
         requiredManifest(input.manifest),
       )).path;
-    const job = await this.repository.create({
-      scope: scope === 'all' ? 'ALL' : 'MANIFEST',
-      ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
-      projectPath: project.realPath,
-      manifestPath,
-      leftSource,
-      rightSource,
-      strict: input.strict,
-      showIdentical: input.showIdentical,
-      createdBy: input.createdBy,
-    });
-    void this.queue.enqueue(job.id, async () => this.execute(job.id)).catch(() => undefined);
+    const releaseSources = this.workspace.pinSources(
+      [input.leftSourceId, input.rightSourceId],
+      input.createdBy,
+    );
+    let job: ComparisonJob;
+    try {
+      job = await this.repository.create({
+        scope: scope === 'all' ? 'ALL' : 'MANIFEST',
+        ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
+        projectPath: project.realPath,
+        manifestPath,
+        leftSource,
+        rightSource,
+        strict: input.strict,
+        showIdentical: input.showIdentical,
+        createdBy: input.createdBy,
+      });
+    } catch (error) {
+      releaseSources();
+      throw error;
+    }
+    void this.queue.enqueue(job.id, async () => {
+      try {
+        await this.execute(job.id);
+      } finally {
+        releaseSources();
+      }
+    }).catch(() => releaseSources());
     return job;
   }
 
