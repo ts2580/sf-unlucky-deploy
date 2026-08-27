@@ -47,20 +47,23 @@ export class DryRunService {
       throw new SfudError('INVALID_ARGUMENT', '지원하지 않는 배포 범위입니다.');
     }
     const scope = input.scope ?? 'manifest';
-    const [project, source, targetSource] = await Promise.all([
-      scope === 'all'
-        ? Promise.resolve(this.workspace.defaultProject())
-        : this.workspace.resolveProject(requiredString(input.projectId, '프로젝트')),
-      this.workspace.resolveSource(input.sourceId),
-      this.workspace.resolveSource(input.targetOrgId),
+    const [source, targetSource] = await Promise.all([
+      this.workspace.resolveSource(input.sourceId, input.createdBy),
+      this.workspace.resolveSource(input.targetOrgId, input.createdBy),
     ]);
+    const project = scope === 'all'
+      ? this.workspace.projectForSources([source, targetSource])
+      : await this.workspace.resolveProject(requiredString(input.projectId, '프로젝트'));
     if (!targetSource.startsWith('org:')) throw new Error('dry-run 대상은 Salesforce org여야 합니다.');
     if (source === targetSource) throw new Error('배포 소스와 대상 org는 서로 달라야 합니다.');
     if (scope !== 'all' && input.metadataType !== undefined) {
       throw new Error('Salesforce metadata type은 전체 metadata 범위에서만 선택할 수 있습니다.');
     }
     if (input.metadataType !== undefined) {
-      const availableTypes = await this.workspace.listMetadataTypes([input.sourceId, input.targetOrgId]);
+      const availableTypes = await this.workspace.listMetadataTypes(
+        [input.sourceId, input.targetOrgId],
+        input.createdBy,
+      );
       if (!availableTypes.some((entry) => entry.name === input.metadataType)) {
         throw new Error(`선택한 Salesforce metadata type을 사용할 수 없습니다: ${input.metadataType}`);
       }

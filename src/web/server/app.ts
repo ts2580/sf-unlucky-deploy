@@ -2,6 +2,7 @@ import { access } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import fastifyMultipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import Fastify, { type FastifyInstance } from 'fastify';
 
@@ -12,6 +13,7 @@ import { createWebRuntime, type WebRuntime } from './runtime.js';
 import { registerAuthRoutes } from './auth-routes.js';
 import { registerComparisonRoutes } from './comparison-routes.js';
 import { registerDeploymentRoutes } from './deployment-routes.js';
+import { registerProjectUploadRoutes } from './project-upload-routes.js';
 import type { SfClient } from '../../salesforce/sf-client.js';
 
 declare module 'fastify' {
@@ -45,7 +47,21 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     options.sfClient,
   );
   app.decorate('sfudRuntime', runtime);
-  app.addHook('onClose', async () => runtime.store.close());
+  app.addHook('onClose', async () => {
+    await runtime.workspace.close();
+    await runtime.store.close();
+  });
+
+  await app.register(fastifyMultipart, {
+    preservePath: true,
+    throwFileSizeLimit: true,
+    limits: {
+      fields: 1,
+      files: 2_000,
+      parts: 2_001,
+      fileSize: 10 * 1024 * 1024,
+    },
+  });
 
   app.get('/api/v1/health', async (): Promise<HealthResponse> => ({
     status: 'ok',
@@ -64,6 +80,7 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
   }));
 
   await registerAuthRoutes(app);
+  await registerProjectUploadRoutes(app);
   await registerComparisonRoutes(app);
   await registerDeploymentRoutes(app);
 

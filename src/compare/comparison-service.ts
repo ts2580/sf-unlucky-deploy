@@ -30,13 +30,13 @@ export class ComparisonService {
 
   public async create(input: CreateComparisonInput): Promise<ComparisonJob> {
     const scope = input.scope ?? 'manifest';
-    const [project, leftSource, rightSource] = await Promise.all([
-      scope === 'all'
-        ? Promise.resolve(this.workspace.defaultProject())
-        : this.workspace.resolveProject(requiredProjectId(input.projectId)),
-      this.workspace.resolveSource(input.leftSourceId),
-      this.workspace.resolveSource(input.rightSourceId),
+    const [leftSource, rightSource] = await Promise.all([
+      this.workspace.resolveSource(input.leftSourceId, input.createdBy),
+      this.workspace.resolveSource(input.rightSourceId, input.createdBy),
     ]);
+    const project = scope === 'all'
+      ? this.workspace.projectForSources([leftSource, rightSource])
+      : await this.workspace.resolveProject(requiredProjectId(input.projectId));
     if (leftSource === rightSource) throw new Error('서로 다른 비교 소스를 선택하세요.');
     if (scope !== 'all' && input.metadataType !== undefined) {
       throw new Error('Salesforce metadata type은 전체 metadata 비교에서만 선택할 수 있습니다.');
@@ -45,7 +45,7 @@ export class ComparisonService {
       const availableTypes = await this.workspace.listMetadataTypes([
         input.leftSourceId,
         input.rightSourceId,
-      ]);
+      ], input.createdBy);
       if (!availableTypes.some((entry) => entry.name === input.metadataType)) {
         throw new Error(`선택한 Salesforce metadata type을 사용할 수 없습니다: ${input.metadataType}`);
       }

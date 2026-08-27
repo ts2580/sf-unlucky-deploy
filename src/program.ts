@@ -89,7 +89,7 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
       'bind 포트',
       parsePort,
     )
-    .option('--project <path>', '허용할 Salesforce DX 프로젝트 경로 (반복 가능)', collectOption, [])
+    .option('--project <path>', '서버에서 허용할 Salesforce DX 프로젝트 경로 (반복 가능, 기본 없음)', collectOption, [])
     .option('--data-dir <path>', 'SQLite와 실행 상태를 저장할 디렉터리')
     .option('--no-open', '시작 후 브라우저를 열지 않음')
     .option('--allow-remote', 'loopback 외 주소 bind 허용')
