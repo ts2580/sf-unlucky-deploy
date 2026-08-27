@@ -57,6 +57,38 @@ npm run dev -- compare --help
 npm run dev -- deploy --help
 ```
 
+`compare --all-metadata`는 별도 `package.xml` 없이 `sf project generate manifest`로 양쪽
+소스의 배포 가능 컴포넌트를 조회한다. 각 소스에서 생성한 manifest의 합집합을 공통 범위로
+사용하므로 한쪽에만 있는 컴포넌트도 `ADDED` 또는 `REMOVED`로 탐지한다.
+
+```bash
+npm run dev -- compare \
+  --left org:dev \
+  --right org:prod \
+  --all-metadata \
+  --detail
+```
+
+한 metadata type만 비교하려면 `--metadata-type`을 사용한다. org 소스는 Salesforce 조회
+단계부터 해당 타입으로 제한하고, 로컬 소스도 생성된 manifest에서 같은 타입만 사용한다.
+
+```bash
+npm run dev -- compare \
+  --left org:dev \
+  --right org:prod \
+  --metadata-type ApexClass
+```
+
+org 소스는 현재 인증 사용자가 조회할 수 있고 Salesforce CLI가 manifest로 만들 수 있는
+비패키지 메타데이터를 대상으로 한다. 로컬 소스는 `sfdx-project.json`의 모든
+`packageDirectories`를 대상으로 한다. 생성된 개별 manifest, 합집합 `package.xml`, 타입별
+디렉터리·suffix를 기록한 `metadata-types.json`은 해당 실행의 `generated-manifest/`에 남는다.
+
+비교와 배포 명령은 요청마다 운영체제 임시 디렉터리에 빈 Salesforce DX workspace를 새로
+초기화한다. `sf` 명령은 이 격리된 workspace에서 실행하며 요청의 성공·실패와 관계없이 종료
+시 제거한다. snapshot, staging payload, 리포트와 로그는 승인 및 감사에 필요하므로 기존
+`.sfud/runs/<실행-ID>/`에 보존한다.
+
 빌드 결과는 `dist/`에 생성된다.
 
 ```bash
@@ -196,6 +228,26 @@ npm run dev -- deploy \
 
 배포 전 차이는 `target → desired source` 방향으로 표시한다. `ADDED`는 source에서 target에 추가할 항목이다. `REMOVED`는 target에만 존재하는 항목이지만 destructive manifest를 사용하지 않으므로 자동 삭제되지 않는다.
 
+배포 관점의 UI에서는 이 의미가 더 직접적으로 드러나도록 `ADDED`를 `NEW`, `REMOVED`를
+`TARGET ONLY`로 표시한다. 즉 source에만 있으면 새로 배포할 항목이고, target에만 있으면
+자동 삭제 대상이 아닌 잔존 항목이다.
+
+전체 배포 가능 metadata를 동적으로 검증하려면 manifest 대신 다음 옵션을 사용할 수 있다.
+
+```bash
+npm run dev -- deploy \
+  --from org:dev \
+  --to prod \
+  --all-metadata \
+  --dry-run
+
+npm run dev -- deploy \
+  --from org:dev \
+  --to prod \
+  --metadata-type ApexClass \
+  --dry-run
+```
+
 dry-run 성공 후 실제 배포하려면 다음처럼 실행한다.
 
 ```bash
@@ -314,15 +366,23 @@ proxy_set_header X-Forwarded-Proto $scheme;
 
 인증된 사용자만 배포 작업 이력 API에 접근할 수 있고, 로그아웃을 포함한 상태 변경 요청은 동일 출처와 CSRF 토큰을 모두 검증한다. OIDC는 셀프 호스팅 로컬 계정과 병행할 수 있는 후속 인증 공급자로 추가한다.
 
-### 웹 비교 실행
+### 웹 비교 및 dry-run
 
-`OPERATOR`, `DEPLOYER`, `ADMIN` 사용자는 웹의 **새 비교** 화면에서 연결된 Salesforce org와 허용된 로컬 프로젝트를 LEFT/RIGHT로 선택할 수 있다. 서버는 `sf org list --json` 결과에서 별칭, 표시 이름, edition, 연결 상태만 추출하며 토큰·client ID·키 경로·로컬 절대 경로를 API에 반환하지 않는다.
+`OPERATOR`, `DEPLOYER`, `ADMIN` 사용자는 웹의 **비교 및 배포** 화면에서 desired source와
+target org를 선택하고, 비교가 성공하면 같은 범위로 Salesforce check-only를 실행할 수 있다.
+서버는 `sf org list --json` 결과에서 별칭, 표시 이름, edition, 연결 상태만 추출하며
+토큰·client ID·키 경로·로컬 절대 경로를 API에 반환하지 않는다.
 
-비교 요청은 SQLite에 먼저 `QUEUED` 상태로 기록한 뒤 별도 단일 큐에서 기존 `runCompareCommand` 코어를 실행한다. 브라우저는 작업 상태를 polling하고 완료되면 추가·삭제·변경·동일 요약과 컴포넌트별 파일 diff를 표시한다. 서버가 재시작되면 실행 중이던 비교는 `PROCESS_INTERRUPTED` 실패로 남겨 원인 없이 사라지지 않게 한다.
+기본 비교 범위는 **전체 배포 가능 메타데이터 (SF CLI)**다. 서버가 LEFT와 RIGHT 각각의
+manifest를 동적으로 생성하고 합집합을 사용하므로 로컬 프로젝트의 `package.xml`에 의존하지
+않으며 실행 프로젝트를 선택할 필요도 없다. 비교 범위 combobox는 선택한 org가 지원하는
+Salesforce metadata type 전체를 합집합으로 제공하며 이름 검색과 단일 타입 비교를 지원한다.
 
-### 웹 dry-run
-
-**새 배포** 화면은 허용된 source, target org, manifest와 Apex 테스트 수준을 받아 항상 Salesforce `--dry-run` check-only만 실행한다. `OPERATOR`, `DEPLOYER`, `ADMIN` 역할이 실행할 수 있으며 `VIEWER`는 이력만 조회한다.
+비교 요청은 SQLite에 먼저 `QUEUED` 상태로 기록한 뒤 별도 단일 큐에서 기존
+`runCompareCommand` 코어를 실행한다. 브라우저는 작업 상태를 polling하고 완료되면
+`NEW`·`TARGET ONLY`·`MODIFIED`·`IDENTICAL` 요약과 컴포넌트별 파일 diff를 표시한다.
+Dry-run도 package.xml을 다시 요구하지 않고 선택한 전체 또는 단일 metadata type 범위의
+합집합 manifest를 요청마다 새로 생성한다. `VIEWER`는 이력만 조회한다.
 
 작업은 SQLite의 `QUEUED → DRY_RUN_RUNNING → APPROVAL_PENDING | FAILED | RECONCILE_REQUIRED` 상태를 사용한다. snapshot과 비교가 끝난 실제 staging payload SHA-256, 비교 결과, 자동 또는 명시적으로 선택된 Apex 테스트, 정제된 Salesforce 결과를 함께 저장한다. 준비 전 요청 지문은 API에서 payload checksum으로 노출하지 않으며 `prepared=1`인 성공 작업만 다음 실제 배포 승인 단계로 넘길 수 있다.
 

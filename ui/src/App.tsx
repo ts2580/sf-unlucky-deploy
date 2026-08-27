@@ -74,9 +74,16 @@ interface WorkspaceResponse {
   projects: WorkspaceProject[];
 }
 
+interface MetadataTypeOption {
+  name: string;
+  directoryName: string;
+}
+
 interface ComparisonJobResponse {
   id: string;
   status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
+  scope?: 'all' | 'manifest';
+  metadataType?: string;
   manifest: string;
   left: { id: string; kind: 'org' | 'local'; label: string };
   right: { id: string; kind: 'org' | 'local'; label: string };
@@ -103,6 +110,8 @@ interface DryRunJobResponse {
   source: { id: string; kind: 'org' | 'local'; label: string };
   target: { id: string; kind: 'org'; label: string };
   manifest: string;
+  scope?: 'all' | 'manifest';
+  metadataType?: string;
   prepared: boolean;
   payloadChecksum?: string;
   salesforceDeploymentId?: string;
@@ -125,20 +134,20 @@ interface DashboardRun {
   createdAt: string;
 }
 
-type PageKey = 'home' | 'compare' | 'deploy' | 'runs' | 'settings';
+type PageKey = 'home' | 'deploy' | 'runs' | 'settings';
+
+const ALL_METADATA_LABEL = '전체 메타데이터';
 
 const pageMeta: Record<PageKey, { eyebrow: string; title: string }> = {
   home: { eyebrow: 'METADATA WORKSPACE', title: '배포 대시보드' },
-  compare: { eyebrow: 'COMPARE METADATA', title: '새 비교' },
-  deploy: { eyebrow: 'SAFE DEPLOYMENT', title: '새 배포' },
+  deploy: { eyebrow: 'COMPARE & DEPLOY', title: '비교 및 배포' },
   runs: { eyebrow: 'RUN HISTORY', title: '실행 기록' },
   settings: { eyebrow: 'LOCAL CONFIGURATION', title: '설정' },
 };
 
 const navigation: Array<{ icon: IconName; label: string; page: PageKey; href: string }> = [
   { icon: 'home', label: '홈', page: 'home', href: '/' },
-  { icon: 'compare', label: '새 비교', page: 'compare', href: '/compare' },
-  { icon: 'deploy', label: '새 배포', page: 'deploy', href: '/deploy' },
+  { icon: 'deploy', label: '비교 및 배포', page: 'deploy', href: '/deploy' },
   { icon: 'history', label: '실행 기록', page: 'runs', href: '/runs' },
 ];
 
@@ -296,11 +305,8 @@ export function App() {
               <h2 id="hero-title">변경을 먼저 확인하고,<br />확신이 들 때 배포하세요.</h2>
               <p>두 Salesforce 환경의 메타데이터를 한눈에 비교하고<br className="desktop-only" /> 동일한 payload로 안전하게 검증합니다.</p>
               <div className="hero-actions">
-                <a className="button button-primary" href="/compare">
-                  <Icon name="compare" />새 비교 시작<Icon name="arrow" />
-                </a>
-                <a className="button button-secondary" href="/deploy">
-                  <Icon name="deploy" />Dry-run 배포
+                <a className="button button-primary" href="/deploy">
+                  <Icon name="compare" />비교 및 배포 시작<Icon name="arrow" />
                 </a>
               </div>
             </div>
@@ -317,8 +323,8 @@ export function App() {
                 <EnvironmentBadge label="aladin" subtitle="Sandbox" initials="AL" />
               </div>
               <div className="diff-preview">
-                <div><span className="diff-dot diff-added" />추가<strong>38</strong></div>
-                <div><span className="diff-dot diff-removed" />삭제<strong>5</strong></div>
+                <div><span className="diff-dot diff-added" />NEW<strong>38</strong></div>
+                <div><span className="diff-dot diff-removed" />TARGET ONLY<strong>5</strong></div>
                 <div><span className="diff-dot diff-modified" />변경<strong>0</strong></div>
               </div>
             </div>
@@ -353,7 +359,7 @@ export function App() {
               action="결과 보기"
               tone="green"
             >
-              <div className="success-chip"><Icon name="check" /> {latestRun?.summary ?? '새 비교를 시작하세요'}</div>
+              <div className="success-chip"><Icon name="check" /> {latestRun?.summary ?? '비교 및 배포를 시작하세요'}</div>
             </OverviewCard>
           </section>
 
@@ -374,12 +380,11 @@ export function App() {
             <span className="tip-icon"><Icon name="shield" /></span>
             <div>
               <strong>삭제는 자동으로 실행되지 않습니다.</strong>
-              <p>비교 결과의 <b>REMOVED</b> 항목은 destructive manifest 없이는 대상 org에서 삭제되지 않습니다.</p>
+              <p>비교 결과의 <b>TARGET ONLY</b> 항목은 destructive manifest 없이는 대상 org에서 삭제되지 않습니다.</p>
             </div>
             <button type="button" aria-label="안전 정책 자세히 보기"><Icon name="chevron" /></button>
           </section>
           </>}
-          {currentPage === 'compare' && <ComparePage user={auth.user} />}
           {currentPage === 'deploy' && <DeployPage user={auth.user} />}
           {currentPage === 'runs' && <RunsPage runs={recentRuns} comparisons={recentComparisons} deployments={recentDeployments} />}
           {currentPage === 'settings' && <SettingsPage health={health} remoteAccess={remoteAccess} workspace={dashboardWorkspace} />}
@@ -392,7 +397,7 @@ export function App() {
 function getCurrentPage(): PageKey {
   const routeMap: Record<string, PageKey> = {
     '/': 'home',
-    '/compare': 'compare',
+    '/compare': 'deploy',
     '/deploy': 'deploy',
     '/runs': 'runs',
     '/settings': 'settings',
@@ -402,8 +407,9 @@ function getCurrentPage(): PageKey {
 
 function ComparePage({ user }: { user: ApiUser }) {
   const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null);
-  const [projectId, setProjectId] = useState('');
-  const [manifest, setManifest] = useState('');
+  const [metadataTypes, setMetadataTypes] = useState<MetadataTypeOption[]>([]);
+  const [metadataTypesLoading, setMetadataTypesLoading] = useState(false);
+  const [scopeQuery, setScopeQuery] = useState(ALL_METADATA_LABEL);
   const [leftSourceId, setLeftSourceId] = useState('');
   const [rightSourceId, setRightSourceId] = useState('');
   const [strict, setStrict] = useState(false);
@@ -419,9 +425,6 @@ function ComparePage({ user }: { user: ApiUser }) {
         const data = await response.json() as WorkspaceResponse & { error?: { message: string } };
         if (!response.ok) throw new Error(data.error?.message ?? '작업 공간을 불러오지 못했습니다.');
         setWorkspace(data);
-        const firstProject = data.projects[0];
-        setProjectId(firstProject?.id ?? '');
-        setManifest(firstProject?.manifests[0] ?? '');
         setLeftSourceId(data.sources[0]?.id ?? '');
         setRightSourceId(data.sources[1]?.id ?? '');
       })
@@ -431,6 +434,36 @@ function ComparePage({ user }: { user: ApiUser }) {
       });
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    if (leftSourceId.length === 0 || rightSourceId.length === 0) return;
+    const controller = new AbortController();
+    setMetadataTypesLoading(true);
+    const sourceIds = encodeURIComponent(`${leftSourceId},${rightSourceId}`);
+    fetch(`/api/v1/metadata-types?sourceIds=${sourceIds}`, {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const data = await response.json() as {
+          metadataTypes?: MetadataTypeOption[];
+          error?: { message: string };
+        };
+        if (!response.ok || data.metadataTypes === undefined) {
+          throw new Error(data.error?.message ?? 'Salesforce metadata type을 불러오지 못했습니다.');
+        }
+        setMetadataTypes(data.metadataTypes);
+        setScopeQuery(ALL_METADATA_LABEL);
+      })
+      .catch((caught: unknown) => {
+        if (caught instanceof DOMException && caught.name === 'AbortError') return;
+        setError(caught instanceof Error ? caught.message : 'Salesforce metadata type을 불러오지 못했습니다.');
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setMetadataTypesLoading(false);
+      });
+    return () => controller.abort();
+  }, [leftSourceId, rightSourceId]);
 
   useEffect(() => {
     if (job === null || !['QUEUED', 'RUNNING'].includes(job.status)) return;
@@ -446,13 +479,10 @@ function ComparePage({ user }: { user: ApiUser }) {
     return () => window.clearTimeout(timeout);
   }, [job]);
 
-  const selectedProject = workspace?.projects.find((project) => project.id === projectId);
   const running = job !== null && ['QUEUED', 'RUNNING'].includes(job.status);
-
-  const changeProject = (nextProjectId: string) => {
-    setProjectId(nextProjectId);
-    setManifest(workspace?.projects.find((project) => project.id === nextProjectId)?.manifests[0] ?? '');
-  };
+  const selectedMetadataType = metadataTypes.find((entry) =>
+    entry.name.toLowerCase() === scopeQuery.trim().toLowerCase());
+  const scopeValid = scopeQuery === ALL_METADATA_LABEL || selectedMetadataType !== undefined;
 
   const runComparison = async () => {
     setError('');
@@ -462,7 +492,14 @@ function ComparePage({ user }: { user: ApiUser }) {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'content-type': 'application/json', 'x-sfud-csrf': readCookie('sfud_csrf') ?? '' },
-        body: JSON.stringify({ projectId, manifest, leftSourceId, rightSourceId, strict, showIdentical }),
+        body: JSON.stringify({
+          scope: 'all',
+          ...(selectedMetadataType === undefined ? {} : { metadataType: selectedMetadataType.name }),
+          leftSourceId,
+          rightSourceId,
+          strict,
+          showIdentical,
+        }),
       });
       const data = await response.json() as { job?: ComparisonJobResponse; error?: { message: string } };
       if (!response.ok || data.job === undefined) throw new Error(data.error?.message ?? '비교를 시작하지 못했습니다.');
@@ -477,7 +514,7 @@ function ComparePage({ user }: { user: ApiUser }) {
       <PageIntro
         kicker="NEW COMPARISON"
         title="어떤 환경의 차이를 확인할까요?"
-        description="LEFT에서 RIGHT 방향으로 동일한 manifest 범위를 비교합니다. 아직 어떤 메타데이터도 변경하지 않습니다."
+        description="LEFT와 RIGHT의 배포 가능한 메타데이터를 같은 범위로 비교합니다. 아직 어떤 메타데이터도 변경하지 않습니다."
       />
 
       <section className="workflow-panel" aria-labelledby="source-heading">
@@ -496,18 +533,34 @@ function ComparePage({ user }: { user: ApiUser }) {
       <section className="workflow-panel" aria-labelledby="scope-heading">
         <div className="panel-heading">
           <span className="step-number">02</span>
-          <div><h2 id="scope-heading">비교 범위</h2><p>양쪽 소스에 동일하게 적용할 package.xml입니다.</p></div>
+          <div><h2 id="scope-heading">비교 범위</h2><p>Salesforce metadata type 전체에서 검색하거나 전체 범위를 선택하세요.</p></div>
           <span className="panel-state">필수</span>
         </div>
-        <div className="compare-scope-grid">
-          <label><span className="field-label">프로젝트</span><select value={projectId} onChange={(event) => changeProject(event.target.value)} disabled={workspace === null}>
-            {(workspace?.projects ?? []).map((project) => <option key={project.id} value={project.id}>{project.displayName}</option>)}
-          </select></label>
-          <label><span className="field-label">Manifest</span><select id="compare-manifest" value={manifest} onChange={(event) => setManifest(event.target.value)} disabled={workspace === null}>
-            {(selectedProject?.manifests ?? []).map((entry) => <option key={entry} value={entry}>{entry}</option>)}
-          </select></label>
+        <div className="compare-scope-grid metadata-scope-grid">
+          <label><span className="field-label">Salesforce metadata type</span>
+            <input
+              id="compare-scope"
+              list="salesforce-metadata-types"
+              value={scopeQuery}
+              onChange={(event) => setScopeQuery(event.target.value)}
+              placeholder="metadata type 검색"
+              autoComplete="off"
+              disabled={workspace === null || metadataTypesLoading}
+              aria-invalid={!scopeValid}
+            />
+            <datalist id="salesforce-metadata-types">
+              <option value={ALL_METADATA_LABEL}>모든 배포 가능 metadata</option>
+              {metadataTypes.map((entry) => <option key={entry.name} value={entry.name}>{entry.directoryName}</option>)}
+            </datalist>
+          </label>
         </div>
-        <p className="field-hint"><Icon name="check" />서버 시작 시 허용된 DX 프로젝트 내부 manifest만 표시합니다.</p>
+        <p className={`field-hint${scopeValid ? '' : ' field-hint-error'}`}><Icon name="check" />{
+          metadataTypesLoading
+            ? 'Salesforce metadata type을 불러오는 중입니다.'
+            : scopeValid
+              ? `${metadataTypes.length}개 metadata type 검색 가능 · 양쪽 소스의 합집합으로 비교`
+              : '목록에 있는 Salesforce metadata type을 선택하세요.'
+        }</p>
       </section>
 
       <section className="workflow-panel compact-panel" aria-labelledby="options-heading">
@@ -526,7 +579,7 @@ function ComparePage({ user }: { user: ApiUser }) {
 
       <div className="action-bar">
         <div><Icon name="shield" /><span><strong>읽기 전용 작업</strong>{canRun ? '비교 과정에서는 org를 변경하지 않습니다.' : 'VIEWER 역할은 기존 결과만 조회할 수 있습니다.'}</span></div>
-        <button className="button button-primary" type="button" onClick={() => void runComparison()} disabled={!canRun || running || workspace === null || !projectId || !manifest || !leftSourceId || !rightSourceId}><Icon name={running ? 'refresh' : 'compare'} />{running ? '비교 실행 중……' : '비교 실행'}<Icon name="arrow" /></button>
+        <button className="button button-primary" type="button" onClick={() => void runComparison()} disabled={!canRun || running || workspace === null || metadataTypesLoading || !scopeValid || !leftSourceId || !rightSourceId}><Icon name={running ? 'refresh' : 'compare'} />{running ? '비교 실행 중……' : '비교 실행'}<Icon name="arrow" /></button>
       </div>
     </div>
   );
@@ -534,14 +587,17 @@ function ComparePage({ user }: { user: ApiUser }) {
 
 function DeployPage({ user }: { user: ApiUser }) {
   const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null);
-  const [projectId, setProjectId] = useState('');
-  const [manifest, setManifest] = useState('');
+  const [metadataTypes, setMetadataTypes] = useState<MetadataTypeOption[]>([]);
+  const [metadataTypesLoading, setMetadataTypesLoading] = useState(false);
+  const [scopeQuery, setScopeQuery] = useState(ALL_METADATA_LABEL);
   const [sourceId, setSourceId] = useState('');
   const [targetOrgId, setTargetOrgId] = useState('');
   const [testLevel, setTestLevel] = useState('auto');
   const [tests, setTests] = useState('');
   const [strict, setStrict] = useState(false);
-  const [job, setJob] = useState<DryRunJobResponse | null>(null);
+  const [showIdentical, setShowIdentical] = useState(false);
+  const [comparisonJob, setComparisonJob] = useState<ComparisonJobResponse | null>(null);
+  const [dryRunJob, setDryRunJob] = useState<DryRunJobResponse | null>(null);
   const [error, setError] = useState('');
   const canRun = ['OPERATOR', 'DEPLOYER', 'ADMIN'].includes(user.role);
 
@@ -552,11 +608,12 @@ function DeployPage({ user }: { user: ApiUser }) {
         const data = await response.json() as WorkspaceResponse & { error?: { message: string } };
         if (!response.ok) throw new Error(data.error?.message ?? '작업 공간을 불러오지 못했습니다.');
         setWorkspace(data);
-        const project = data.projects[0];
-        setProjectId(project?.id ?? '');
-        setManifest(project?.manifests[0] ?? '');
-        setSourceId(data.sources.find((source) => source.kind === 'local')?.id ?? data.sources[0]?.id ?? '');
-        setTargetOrgId(data.sources.find((source) => source.kind === 'org')?.id ?? '');
+        const targetId = data.sources.find((source) => source.kind === 'org')?.id ?? '';
+        setTargetOrgId(targetId);
+        setSourceId(data.sources.find((source) => source.kind === 'local')?.id
+          ?? data.sources.find((source) => source.id !== targetId)?.id
+          ?? data.sources[0]?.id
+          ?? '');
       })
       .catch((caught: unknown) => {
         if (caught instanceof DOMException && caught.name === 'AbortError') return;
@@ -566,43 +623,113 @@ function DeployPage({ user }: { user: ApiUser }) {
   }, []);
 
   useEffect(() => {
-    if (job === null || !['QUEUED', 'DRY_RUN_RUNNING'].includes(job.status)) return;
+    if (sourceId.length === 0 || targetOrgId.length === 0) return;
+    const controller = new AbortController();
+    setMetadataTypesLoading(true);
+    fetch(`/api/v1/metadata-types?sourceIds=${encodeURIComponent(`${sourceId},${targetOrgId}`)}`, {
+      credentials: 'same-origin', signal: controller.signal,
+    })
+      .then(async (response) => {
+        const data = await response.json() as { metadataTypes?: MetadataTypeOption[]; error?: { message: string } };
+        if (!response.ok || data.metadataTypes === undefined) {
+          throw new Error(data.error?.message ?? 'Salesforce metadata type을 불러오지 못했습니다.');
+        }
+        setMetadataTypes(data.metadataTypes);
+        setScopeQuery(ALL_METADATA_LABEL);
+      })
+      .catch((caught: unknown) => {
+        if (caught instanceof DOMException && caught.name === 'AbortError') return;
+        setError(caught instanceof Error ? caught.message : 'Salesforce metadata type을 불러오지 못했습니다.');
+      })
+      .finally(() => { if (!controller.signal.aborted) setMetadataTypesLoading(false); });
+    return () => controller.abort();
+  }, [sourceId, targetOrgId]);
+
+  useEffect(() => {
+    setComparisonJob(null);
+    setDryRunJob(null);
+  }, [sourceId, targetOrgId, scopeQuery, strict, showIdentical]);
+
+  useEffect(() => {
+    if (comparisonJob === null || !['QUEUED', 'RUNNING'].includes(comparisonJob.status)) return;
     const timeout = window.setTimeout(() => {
-      fetch(`/api/v1/deployment-jobs/${job.id}`, { credentials: 'same-origin' })
+      fetch(`/api/v1/comparisons/${comparisonJob.id}`, { credentials: 'same-origin' })
+        .then(async (response) => {
+          const data = await response.json() as { job?: ComparisonJobResponse; error?: { message: string } };
+          if (!response.ok || data.job === undefined) throw new Error(data.error?.message ?? '비교 상태를 확인하지 못했습니다.');
+          setComparisonJob(data.job);
+        })
+        .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : '비교 상태를 확인하지 못했습니다.'));
+    }, 900);
+    return () => window.clearTimeout(timeout);
+  }, [comparisonJob]);
+
+  useEffect(() => {
+    if (dryRunJob === null || !['QUEUED', 'DRY_RUN_RUNNING'].includes(dryRunJob.status)) return;
+    const timeout = window.setTimeout(() => {
+      fetch(`/api/v1/deployment-jobs/${dryRunJob.id}`, { credentials: 'same-origin' })
         .then(async (response) => {
           const data = await response.json() as { job?: DryRunJobResponse; error?: { message: string } };
           if (!response.ok || data.job === undefined) throw new Error(data.error?.message ?? 'dry-run 상태를 확인하지 못했습니다.');
-          setJob(data.job);
+          setDryRunJob(data.job);
         })
         .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : 'dry-run 상태를 확인하지 못했습니다.'));
     }, 1_000);
     return () => window.clearTimeout(timeout);
-  }, [job]);
+  }, [dryRunJob]);
 
-  const selectedProject = workspace?.projects.find((project) => project.id === projectId);
   const source = workspace?.sources.find((entry) => entry.id === sourceId);
   const target = workspace?.sources.find((entry) => entry.id === targetOrgId);
-  const running = job !== null && ['QUEUED', 'DRY_RUN_RUNNING'].includes(job.status);
+  const comparing = comparisonJob !== null && ['QUEUED', 'RUNNING'].includes(comparisonJob.status);
+  const dryRunning = dryRunJob !== null && ['QUEUED', 'DRY_RUN_RUNNING'].includes(dryRunJob.status);
   const testNames = tests.split(/[\s,]+/u).map((value) => value.trim()).filter(Boolean);
+  const selectedMetadataType = metadataTypes.find((entry) =>
+    entry.name.toLowerCase() === scopeQuery.trim().toLowerCase());
+  const scopeValid = scopeQuery === ALL_METADATA_LABEL || selectedMetadataType !== undefined;
+  const comparisonReady = comparisonJob?.status === 'SUCCEEDED';
 
-  const changeProject = (nextProjectId: string) => {
-    setProjectId(nextProjectId);
-    setManifest(workspace?.projects.find((project) => project.id === nextProjectId)?.manifests[0] ?? '');
+  const runComparison = async () => {
+    setError('');
+    setComparisonJob(null);
+    setDryRunJob(null);
+    try {
+      const response = await fetch('/api/v1/comparisons', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'content-type': 'application/json', 'x-sfud-csrf': readCookie('sfud_csrf') ?? '' },
+        body: JSON.stringify({
+          scope: 'all',
+          ...(selectedMetadataType === undefined ? {} : { metadataType: selectedMetadataType.name }),
+          leftSourceId: targetOrgId,
+          rightSourceId: sourceId,
+          strict,
+          showIdentical,
+        }),
+      });
+      const data = await response.json() as { job?: ComparisonJobResponse; error?: { message: string } };
+      if (!response.ok || data.job === undefined) throw new Error(data.error?.message ?? '비교를 시작하지 못했습니다.');
+      setComparisonJob(data.job);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '비교를 시작하지 못했습니다.');
+    }
   };
 
   const startDryRun = async () => {
     setError('');
-    setJob(null);
+    setDryRunJob(null);
     try {
       const response = await fetch('/api/v1/deployments/dry-run', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'content-type': 'application/json', 'x-sfud-csrf': readCookie('sfud_csrf') ?? '' },
-        body: JSON.stringify({ projectId, manifest, sourceId, targetOrgId, testLevel, tests: testNames, waitMinutes: 60, strict }),
+        body: JSON.stringify({
+          scope: 'all',
+          ...(selectedMetadataType === undefined ? {} : { metadataType: selectedMetadataType.name }),
+          sourceId, targetOrgId, testLevel, tests: testNames, waitMinutes: 60, strict,
+        }),
       });
       const data = await response.json() as { job?: DryRunJobResponse; error?: { message: string } };
       if (!response.ok || data.job === undefined) throw new Error(data.error?.message ?? 'dry-run을 시작하지 못했습니다.');
-      setJob(data.job);
+      setDryRunJob(data.job);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'dry-run을 시작하지 못했습니다.');
     }
@@ -610,14 +737,14 @@ function DeployPage({ user }: { user: ApiUser }) {
 
   return (
     <div className="page-stack">
-      <PageIntro kicker="DRY-RUN FIRST" title="검증이 끝난 변경만 배포합니다." description="desired source와 target org를 선택하면 차이를 계산하고 Salesforce check-only 배포를 실행합니다.">
-        <div className="stepper" aria-label="배포 단계"><span className="step-active"><i>1</i>대상 선택</span><b /><span><i>2</i>차이 확인</span><b /><span><i>3</i>Dry-run</span><b /><span><i>4</i>배포 승인</span></div>
+      <PageIntro kicker="COMPARE, THEN DRY-RUN" title="한 흐름에서 비교하고 배포를 검증합니다." description="desired source와 target org의 전체 배포 가능 metadata를 비교한 뒤 같은 범위로 Salesforce check-only를 실행합니다.">
+        <div className="stepper" aria-label="배포 단계"><span className="step-active"><i>1</i>범위 선택</span><b /><span className={comparisonReady ? 'step-active' : ''}><i>2</i>차이 확인</span><b /><span className={dryRunJob !== null ? 'step-active' : ''}><i>3</i>Dry-run</span><b /><span><i>4</i>배포 승인</span></div>
       </PageIntro>
 
       <div className="deploy-layout">
         <div className="page-stack">
           <section className="workflow-panel" aria-labelledby="deploy-source-heading">
-            <div className="panel-heading"><span className="step-number">01</span><div><h2 id="deploy-source-heading">소스와 대상</h2><p>target → desired source 방향으로 차이를 표시합니다.</p></div><span className="panel-state">{workspace === null ? '조회 중' : 'CHECK-ONLY'}</span></div>
+            <div className="panel-heading"><span className="step-number">01</span><div><h2 id="deploy-source-heading">소스와 대상</h2><p>배포 기준으로 target → desired source 방향의 차이를 계산합니다.</p></div><span className="panel-state">{workspace === null ? '조회 중' : 'DEPLOY VIEW'}</span></div>
             <div className="deploy-source-grid">
               <WorkspaceSourceSelect side="DESIRED SOURCE" value={sourceId} sources={workspace?.sources ?? []} onChange={setSourceId} tone="violet" />
               <div className="direction-marker"><span>배포 대상</span><Icon name="arrow" /></div>
@@ -626,32 +753,44 @@ function DeployPage({ user }: { user: ApiUser }) {
           </section>
 
           <section className="workflow-panel" aria-labelledby="deploy-scope-heading">
-            <div className="panel-heading"><span className="step-number">02</span><div><h2 id="deploy-scope-heading">프로젝트와 manifest</h2><p>허용 목록 내부의 공통 배포 범위를 선택합니다.</p></div></div>
-            <div className="compare-scope-grid">
-              <label><span className="field-label">프로젝트</span><select value={projectId} onChange={(event) => changeProject(event.target.value)}>{(workspace?.projects ?? []).map((project) => <option key={project.id} value={project.id}>{project.displayName}</option>)}</select></label>
-              <label><span className="field-label">Manifest</span><select value={manifest} onChange={(event) => setManifest(event.target.value)}>{(selectedProject?.manifests ?? []).map((entry) => <option key={entry} value={entry}>{entry}</option>)}</select></label>
+            <div className="panel-heading"><span className="step-number">02</span><div><h2 id="deploy-scope-heading">비교 및 배포 범위</h2><p>Salesforce 전체 metadata type에서 검색하고, 비교와 Dry-run에 같은 범위를 사용합니다.</p></div><span className="panel-state">필수</span></div>
+            <div className="compare-scope-grid metadata-scope-grid">
+              <label><span className="field-label">Salesforce metadata type</span>
+                <input id="deploy-scope" list="salesforce-deploy-metadata-types" value={scopeQuery} onChange={(event) => setScopeQuery(event.target.value)} placeholder="metadata type 검색" autoComplete="off" disabled={workspace === null || metadataTypesLoading} aria-invalid={!scopeValid} />
+                <datalist id="salesforce-deploy-metadata-types">
+                  <option value={ALL_METADATA_LABEL}>모든 배포 가능 metadata</option>
+                  {metadataTypes.map((entry) => <option key={entry.name} value={entry.name}>{entry.directoryName}</option>)}
+                </datalist>
+              </label>
             </div>
+            <p className={`field-hint${scopeValid ? '' : ' field-hint-error'}`}><Icon name="check" />{metadataTypesLoading ? 'Salesforce metadata type을 불러오는 중입니다.' : scopeValid ? `${metadataTypes.length}개 metadata type 검색 가능 · source와 target의 합집합` : '목록에 있는 Salesforce metadata type을 선택하세요.'}</p>
           </section>
 
           <section className="workflow-panel" aria-labelledby="test-heading">
-            <div className="panel-heading"><span className="step-number">03</span><div><h2 id="test-heading">Apex 테스트</h2><p>auto는 staging의 *_Test.cls를 우선 선택하고 없으면 RunLocalTests를 사용합니다.</p></div><span className="auto-badge">{testLevel.toUpperCase()}</span></div>
+            <div className="panel-heading"><span className="step-number">03</span><div><h2 id="test-heading">비교 옵션과 Apex 테스트</h2><p>비교가 완료되면 선택한 테스트 조건으로 Dry-run을 실행할 수 있습니다.</p></div><span className="auto-badge">{testLevel.toUpperCase()}</span></div>
             <div className="select-row">
               <label><span>테스트 수준</span><select value={testLevel} onChange={(event) => setTestLevel(event.target.value)}><option value="auto">Auto · 권장</option><option value="RunSpecifiedTests">RunSpecifiedTests</option><option value="RunLocalTests">RunLocalTests</option><option value="RunAllTestsInOrg">RunAllTestsInOrg</option><option value="RunRelevantTests">RunRelevantTests</option><option value="NoTestRun">NoTestRun</option></select></label>
               <label><span>테스트 클래스</span><input className="tests-input" value={tests} onChange={(event) => setTests(event.target.value)} placeholder="AccountService_Test, Other_Test" disabled={!['auto', 'RunSpecifiedTests'].includes(testLevel)} /></label>
             </div>
-            <label className="deploy-strict"><input type="checkbox" checked={strict} onChange={(event) => setStrict(event.target.checked)} /> XML 원문 차이도 검사</label>
+            <div className="option-grid">
+              <OptionToggle title="Strict 비교" description="XML 원문 형식 차이까지 탐지" checked={strict} onChange={setStrict} />
+              <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} />
+            </div>
           </section>
 
-          {error && <section className="compare-error" role="alert"><strong>dry-run을 실행하지 못했습니다.</strong><p>{error}</p></section>}
-          {job !== null && <DryRunResultPanel job={job} />}
+          {error && <section className="compare-error" role="alert"><strong>비교 및 배포 작업을 실행하지 못했습니다.</strong><p>{error}</p></section>}
+          {comparisonJob !== null && <ComparisonResultPanel job={comparisonJob} deploymentView />}
+          {dryRunJob !== null && <DryRunResultPanel job={dryRunJob} />}
         </div>
 
-        <aside className="deploy-summary" aria-label="Dry-run 요약">
-          <p className="eyebrow">DEPLOYMENT SUMMARY</p><h2>{running ? 'Dry-run 실행 중' : job?.status === 'APPROVAL_PENDING' ? '검증 성공' : 'Dry-run 준비'}</h2>
-          <dl><div><dt>Desired source</dt><dd>{source?.label ?? '선택 대기'}</dd></div><div><dt>Target org</dt><dd>{target?.label ?? '선택 대기'}</dd></div><div><dt>Manifest</dt><dd>{manifest || '선택 대기'}</dd></div><div><dt>Test level</dt><dd>{testLevel}</dd></div></dl>
-          <div className="checksum-preview"><span>PAYLOAD SHA-256</span><code>{job?.payloadChecksum ?? 'dry-run 완료 후 계산'}</code></div>
+        <aside className="deploy-summary" aria-label="비교 및 Dry-run 요약">
+          <p className="eyebrow">DEPLOYMENT WORKFLOW</p><h2>{dryRunning ? 'Dry-run 실행 중' : dryRunJob?.status === 'APPROVAL_PENDING' ? '검증 성공' : comparing ? '비교 실행 중' : comparisonReady ? 'Dry-run 준비' : '비교 준비'}</h2>
+          <dl><div><dt>Desired source</dt><dd>{source?.label ?? '선택 대기'}</dd></div><div><dt>Target org</dt><dd>{target?.label ?? '선택 대기'}</dd></div><div><dt>Metadata scope</dt><dd>{selectedMetadataType?.name ?? ALL_METADATA_LABEL}</dd></div><div><dt>Test level</dt><dd>{testLevel}</dd></div></dl>
+          <div className="checksum-preview"><span>PAYLOAD SHA-256</span><code>{dryRunJob?.payloadChecksum ?? 'dry-run 완료 후 계산'}</code></div>
           <div className="warning-note"><Icon name="shield" /><p><strong>실제 배포가 아닙니다.</strong>이번 요청에는 항상 Salesforce `--dry-run`이 적용됩니다.</p></div>
-          <button className="button button-primary" type="button" onClick={() => void startDryRun()} disabled={!canRun || running || workspace === null || !projectId || !manifest || !sourceId || !targetOrgId}><Icon name={running ? 'refresh' : 'deploy'} />{running ? '검증 중……' : 'Dry-run 시작'}<Icon name="arrow" /></button>
+          {!comparisonReady
+            ? <button className="button button-primary" type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesLoading || !scopeValid || !sourceId || !targetOrgId || sourceId === targetOrgId}><Icon name={comparing ? 'refresh' : 'compare'} />{comparing ? '비교 중……' : '비교 실행'}<Icon name="arrow" /></button>
+            : <button className="button button-primary" type="button" onClick={() => void startDryRun()} disabled={!canRun || dryRunning}><Icon name={dryRunning ? 'refresh' : 'deploy'} />{dryRunning ? '검증 중……' : '같은 범위로 Dry-run'}<Icon name="arrow" /></button>}
         </aside>
       </div>
     </div>
@@ -756,7 +895,7 @@ function WorkspaceSourceSelect({
   );
 }
 
-function ComparisonResultPanel({ job }: { job: ComparisonJobResponse }) {
+function ComparisonResultPanel({ job, deploymentView = false }: { job: ComparisonJobResponse; deploymentView?: boolean }) {
   if (job.status === 'QUEUED' || job.status === 'RUNNING') {
     return <section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? '비교 대기 중' : '메타데이터 비교 중'}</strong><p>{job.left.label} → {job.right.label} · {job.manifest}</p></div></section>;
   }
@@ -772,17 +911,18 @@ function ComparisonResultPanel({ job }: { job: ComparisonJobResponse }) {
         <span className="result-success"><Icon name="check" />비교 완료</span>
       </div>
       <div className="comparison-summary">
-        <div className="summary-added"><span>ADDED</span><strong>{summary.added}</strong></div>
-        <div className="summary-removed"><span>REMOVED</span><strong>{summary.removed}</strong></div>
+        <div className="summary-added"><span>{deploymentView ? 'NEW' : 'ADDED'}</span><strong>{summary.added}</strong></div>
+        <div className="summary-removed"><span>{deploymentView ? 'TARGET ONLY' : 'REMOVED'}</span><strong>{summary.removed}</strong></div>
         <div className="summary-modified"><span>MODIFIED</span><strong>{summary.modified}</strong></div>
         <div><span>IDENTICAL</span><strong>{summary.identical}</strong></div>
       </div>
       {job.result.warnings.map((warning) => <p className="comparison-warning" key={warning}><Icon name="shield" />{warning}</p>)}
+      {deploymentView && summary.removed > 0 && <p className="comparison-warning"><Icon name="shield" />TARGET ONLY 항목은 destructive manifest 없이는 target org에서 삭제되지 않습니다.</p>}
       <div className="component-results">
         {job.result.components.length === 0
           ? <p className="empty-result">표시할 차이가 없습니다. 두 소스가 동일합니다.</p>
           : job.result.components.map((component) => <details key={component.key} className="component-result">
-              <summary><span className={`component-status status-${component.status.toLowerCase()}`}>{component.status}</span><div><strong>{component.fullName}</strong><small>{component.type} · 파일 {component.files.length}개</small></div><Icon name="chevron" /></summary>
+              <summary><span className={`component-status status-${component.status.toLowerCase()}`}>{deploymentView ? deploymentDiffStatusLabel(component.status) : component.status}</span><div><strong>{component.fullName}</strong><small>{component.type} · 파일 {component.files.length}개</small></div><Icon name="chevron" /></summary>
               <div className="component-files">{component.files.map((file) => <article key={file.path}><div><code>{file.path}</code><span>{file.status}</span></div>{file.xmlChanges !== undefined && file.xmlChanges.length > 0 && <p>XML 변경 {file.xmlChanges.length}개</p>}{file.unifiedDiff && <pre>{file.unifiedDiff}</pre>}</article>)}</div>
             </details>)}
       </div>
@@ -802,7 +942,7 @@ function DryRunResultPanel({ job }: { job: DryRunJobResponse }) {
   return (
     <section className="dry-run-result" aria-labelledby="dry-run-result-title">
       <div className="comparison-result-head"><div><p className="eyebrow">CHECK-ONLY COMPLETE</p><h2 id="dry-run-result-title">Salesforce dry-run 성공</h2><small>{job.salesforceDeploymentId ?? 'deployment ID 없음'}</small></div><span className="result-success"><Icon name="check" />검증 성공</span></div>
-      {summary !== undefined && <div className="comparison-summary"><div className="summary-added"><span>ADDED</span><strong>{summary.added}</strong></div><div className="summary-removed"><span>REMOVED</span><strong>{summary.removed}</strong></div><div className="summary-modified"><span>MODIFIED</span><strong>{summary.modified}</strong></div><div><span>TOTAL</span><strong>{summary.total}</strong></div></div>}
+      {summary !== undefined && <div className="comparison-summary"><div className="summary-added"><span>NEW</span><strong>{summary.added}</strong></div><div className="summary-removed"><span>TARGET ONLY</span><strong>{summary.removed}</strong></div><div className="summary-modified"><span>MODIFIED</span><strong>{summary.modified}</strong></div><div><span>TOTAL</span><strong>{summary.total}</strong></div></div>}
       <div className="dry-run-details">
         <div><span className="card-icon icon-green"><Icon name="check" /></span><p><strong>{job.testPlan?.level ?? '테스트 수준 미상'}</strong>{job.testPlan?.tests.length ? job.testPlan.tests.join(', ') : 'Salesforce 구성 테스트'}</p></div>
         <div><span className="card-icon icon-blue"><Icon name="shield" /></span><p><strong>Payload 고정</strong><code>{job.payloadChecksum}</code></p></div>
@@ -810,6 +950,12 @@ function DryRunResultPanel({ job }: { job: DryRunJobResponse }) {
       <div className="approval-preview"><Icon name="shield" /><div><strong>실제 배포는 아직 잠겨 있습니다.</strong><p>다음 단계에서 동일 payload checksum과 대상 org를 다시 확인하고 권한 있는 사용자만 승인할 수 있습니다.</p></div><button className="button button-secondary" type="button" disabled>배포 승인 준비</button></div>
     </section>
   );
+}
+
+function deploymentDiffStatusLabel(status: 'ADDED' | 'REMOVED' | 'MODIFIED' | 'IDENTICAL'): string {
+  if (status === 'ADDED') return 'NEW';
+  if (status === 'REMOVED') return 'TARGET ONLY';
+  return status;
 }
 
 function OptionToggle({ title, description, checked, onChange }: { title: string; description: string; checked: boolean; onChange: (checked: boolean) => void }) {
@@ -895,7 +1041,7 @@ function toDashboardDryRun(job: DryRunJobResponse): DashboardRun {
     target: job.target.label,
     summary: summary === undefined
       ? deploymentStatusLabel(job.status)
-      : `추가 ${summary.added} · 삭제 ${summary.removed} · 변경 ${summary.modified}`,
+      : `NEW ${summary.added} · TARGET ONLY ${summary.removed} · 변경 ${summary.modified}`,
     time: formatRunTime(job.createdAt),
     tone: ['APPROVAL_PENDING', 'SUCCEEDED'].includes(job.status)
       ? 'green'
