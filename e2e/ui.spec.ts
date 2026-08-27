@@ -77,6 +77,9 @@ test('내 단말기의 DX 프로젝트를 임시 소스로 업로드한다', asy
     packageDirectories: [{ path: '.', default: true }],
     sourceApiVersion: '67.0',
   }));
+  await page.route('**/api/v1/workspace', async (route) => route.fulfill({ json: {
+    orgs: [], projects: [], uploads: [], sources: [],
+  } }));
   await login(page, '/deploy');
   const uploadInput = page.locator('.upload-button input[type="file"]');
   await expect(uploadInput).toBeEnabled();
