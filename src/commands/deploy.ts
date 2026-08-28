@@ -8,6 +8,7 @@ import {
   type ApexTestPlan,
   type RequestedTestLevel,
 } from '../deploy/test-plan.js';
+import { requireMinimumApexCoverage } from '../deploy/test-coverage.js';
 import { compareSnapshots, type ComparisonResult } from '../metadata/comparator.js';
 import { generateDeployableManifest } from '../metadata/deployable-manifest.js';
 import { renderTerminalReport } from '../reports/terminal.js';
@@ -31,6 +32,8 @@ export interface DeployCommandOptions {
   reportDir?: string;
   dryRun?: boolean;
   execute?: boolean;
+  skipDryRun?: boolean;
+  minimumCoverage?: number;
   testLevel?: RequestedTestLevel;
   tests?: string[];
   wait?: number;
@@ -153,15 +156,22 @@ export async function runDeployCommand(
   await assertPayloadUnchanged(deploymentSnapshot.packageRoot, deploymentSnapshot.payloadSha256);
   const deployArgs = buildDeployArgs(options, deploymentSnapshot.packageRoot, targetAlias, testPlan);
   const payloadEmpty = generatedManifest?.sourceManifests[1]?.empty === true;
-  const dryRunResult = payloadEmpty
-    ? emptyDeploymentResult(true)
-    : sanitizeSfOutput(await runDeploymentRequest(
-      sfClient,
-      [...deployArgs, '--dry-run'],
-      commandProjectPath,
-      options.wait,
-    ));
-  await writeJson(path.join(context.logsDirectory, 'dry-run.json'), dryRunResult);
+  const dryRunResult = options.skipDryRun === true
+    ? undefined
+    : payloadEmpty
+      ? emptyDeploymentResult(true)
+      : sanitizeSfOutput(await runDeploymentRequest(
+        sfClient,
+        [...deployArgs, '--dry-run'],
+        commandProjectPath,
+        options.wait,
+      ));
+  if (dryRunResult !== undefined) {
+    await writeJson(path.join(context.logsDirectory, 'dry-run.json'), dryRunResult);
+  }
+  if (options.minimumCoverage !== undefined) {
+    requireMinimumApexCoverage(dryRunResult, options.minimumCoverage);
+  }
 
   let deployResult: unknown;
   if (options.execute) {
@@ -182,13 +192,15 @@ export async function runDeployCommand(
     payloadSha256: deploymentSnapshot.payloadSha256,
     reports,
     runDirectory: context.rootDirectory,
-    dryRunResult,
+    ...(dryRunResult === undefined ? {} : { dryRunResult }),
     ...(deployResult === undefined ? {} : { deployResult }),
     executed: options.execute ?? false,
     testPlan,
   };
   if (!options.json) {
-    stdout(options.execute ? 'dry-run 및 실제 배포 완료\n' : 'dry-run 완료 (실제 배포는 실행하지 않음)\n');
+    stdout(options.execute
+      ? options.skipDryRun === true ? '실제 배포 완료\n' : 'dry-run 및 실제 배포 완료\n'
+      : 'dry-run 완료 (실제 배포는 실행하지 않음)\n');
   }
   emitJsonIfRequested(options.json, stdout, result);
   return result;
@@ -258,6 +270,16 @@ function buildDeployArgs(
 function validateDeployOptions(options: DeployCommandOptions): void {
   if (options.dryRun && options.execute) {
     throw new SfudError('INVALID_ARGUMENT', '--dry-run과 --execute는 함께 사용할 수 없습니다.');
+  }
+  if (options.skipDryRun === true && options.execute !== true) {
+    throw new SfudError('INVALID_ARGUMENT', 'dry-run 생략은 실제 배포 실행에서만 사용할 수 있습니다.');
+  }
+  if (options.minimumCoverage !== undefined
+    && (!Number.isFinite(options.minimumCoverage) || options.minimumCoverage < 0 || options.minimumCoverage > 100)) {
+    throw new SfudError('INVALID_ARGUMENT', '최소 Apex 테스트 커버리지는 0부터 100 사이여야 합니다.');
+  }
+  if (options.skipDryRun === true && options.minimumCoverage !== undefined) {
+    throw new SfudError('INVALID_ARGUMENT', '커버리지 검증과 dry-run 생략을 함께 사용할 수 없습니다.');
   }
   if (options.wait !== undefined && (!Number.isInteger(options.wait) || options.wait < 1)) {
     throw new SfudError('INVALID_ARGUMENT', '--wait는 1 이상의 정수여야 합니다.');

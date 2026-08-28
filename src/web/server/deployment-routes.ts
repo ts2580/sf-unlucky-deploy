@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 
 import type { DeploymentJob } from '../../deploy/deployment-job-repository.js';
 import type { RequestedTestLevel } from '../../deploy/test-plan.js';
+import { apexCoverageSummary } from '../../deploy/test-coverage.js';
 import { redactSensitiveText } from '../../salesforce/sf-client.js';
 import { requireAuthenticatedSession } from './auth-routes.js';
 
@@ -23,6 +24,11 @@ interface ExecuteDeploymentBody {
   dryRunJobId?: string;
   payloadChecksum?: string;
   targetAlias?: string;
+  confirmation?: string;
+}
+
+interface CreateDirectDeploymentBody extends CreateDryRunBody {
+  targetConfirmation?: string;
   confirmation?: string;
 }
 
@@ -84,6 +90,41 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
     }
   });
 
+  app.post<{ Body: CreateDirectDeploymentBody }>('/api/v1/deployments/direct', async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply, {
+      csrf: true,
+      roles: ['DEPLOYER', 'ADMIN'],
+    });
+    if (session === undefined) return;
+    try {
+      const job = await app.sfudRuntime.dryRuns.createDirect({
+        ...(request.body?.projectId === undefined ? {} : { projectId: request.body.projectId }),
+        ...(request.body?.manifest === undefined ? {} : { manifest: request.body.manifest }),
+        scope: request.body?.scope ?? 'manifest',
+        ...(request.body?.metadataType === undefined ? {} : {
+          metadataType: requiredMetadataType(request.body.metadataType),
+        }),
+        ...(request.body?.components === undefined ? {} : {
+          components: selectedComponents(request.body.components),
+        }),
+        sourceId: requiredString(request.body?.sourceId, '배포 소스'),
+        targetOrgId: requiredString(request.body?.targetOrgId, '대상 org'),
+        tests: optionalStringArray(request.body?.tests, 'Apex 테스트 클래스'),
+        waitMinutes: request.body?.waitMinutes ?? 60,
+        strict: request.body?.strict === true,
+        targetConfirmation: requiredString(request.body?.targetConfirmation, '대상 org 별칭 확인'),
+        confirmation: requiredString(request.body?.confirmation, '실제 배포 확인 문구'),
+        createdBy: session.user.id,
+      });
+      return reply.code(202).send({ job: publicJob(app, job, false) });
+    } catch (error) {
+      return reply.code(400).send({ error: {
+        code: 'DIRECT_DEPLOYMENT_DENIED',
+        message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
+      } });
+    }
+  });
+
   app.get('/api/v1/deployment-jobs', async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
@@ -110,6 +151,9 @@ function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: b
     left: { ...job.comparisonResult.left, displayName: target.label },
     right: { ...job.comparisonResult.right, displayName: source.label },
   } : undefined;
+  const testCoverage = job.dryRunResult === undefined
+    ? undefined
+    : apexCoverageSummary(job.dryRunResult)?.percentage;
   return {
     id: job.id,
     kind: job.kind,
@@ -129,6 +173,7 @@ function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: b
     ...(job.prepared ? { payloadChecksum: job.payloadChecksum } : {}),
     ...(job.salesforceDeploymentId === undefined ? {} : { salesforceDeploymentId: job.salesforceDeploymentId }),
     ...(job.testPlan === undefined ? {} : { testPlan: job.testPlan }),
+    ...(testCoverage === undefined ? {} : { testCoverage }),
     ...(job.comparisonResult === undefined ? {} : { comparisonSummary: job.comparisonResult.summary }),
     ...(comparison === undefined ? {} : { comparison }),
     ...(includeArtifacts && job.dryRunResult !== undefined ? { dryRunResult: job.dryRunResult } : {}),

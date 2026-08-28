@@ -59,6 +59,13 @@ export interface CreateDryRunJobInput {
   selectedComponents?: SelectedMetadataComponent[];
 }
 
+export interface CreateDirectDeploymentJobInput extends CreateDryRunJobInput {
+  createdBy: string;
+  testPlan: ApexTestPlan;
+  targetConfirmation: string;
+  confirmation: string;
+}
+
 export interface TransitionDetails {
   salesforceDeploymentId?: string;
   errorCode?: string;
@@ -146,6 +153,58 @@ export class DeploymentJobRepository {
       await this.writeAudit(input.createdBy, 'DRY_RUN_QUEUED', id, {
         targetAlias: input.targetAlias,
         payloadChecksum: input.payloadChecksum,
+      }, timestamp);
+    });
+    return this.notify(await this.getRequired(id));
+  }
+
+  public async createDirectDeployment(input: CreateDirectDeploymentJobInput): Promise<DeploymentJob> {
+    if (input.confirmation !== '실제 배포') {
+      throw new SfudError('APPROVAL_DENIED', '실제 배포 확인 문구가 일치하지 않습니다.');
+    }
+    if (input.targetConfirmation !== input.targetAlias) {
+      throw new SfudError('APPROVAL_DENIED', '확인한 대상 org 별칭이 실제 배포 대상과 일치하지 않습니다.');
+    }
+    assertChecksum(input.payloadChecksum);
+    const id = this.createId();
+    const timestamp = this.now();
+    await runInImmediateTransaction(this.database, async () => {
+      const deployer = await this.database.get<{ role: string; disabled_at: string | null }>(
+        'SELECT role, disabled_at FROM users WHERE id = ?',
+        input.createdBy,
+      );
+      if (
+        deployer === undefined
+        || deployer.disabled_at !== null
+        || !['DEPLOYER', 'ADMIN'].includes(deployer.role)
+      ) {
+        throw new SfudError('APPROVAL_DENIED', '실제 배포 권한이 없습니다.');
+      }
+      await this.database.run(`
+        INSERT INTO deployment_jobs (
+          id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
+          run_directory, selected_components_json, test_plan_json, created_by, created_at, updated_at
+        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+        id,
+        input.source,
+        input.targetAlias,
+        input.manifestPath,
+        input.scope ?? 'MANIFEST',
+        input.metadataType ?? null,
+        input.payloadChecksum,
+        input.runDirectory ?? null,
+        input.selectedComponents === undefined ? null : JSON.stringify(input.selectedComponents),
+        JSON.stringify(input.testPlan),
+        input.createdBy,
+        timestamp,
+        timestamp,
+      );
+      await this.writeAudit(input.createdBy, 'DIRECT_DEPLOYMENT_QUEUED', id, {
+        targetAlias: input.targetAlias,
+        payloadChecksum: input.payloadChecksum,
+        testLevel: input.testPlan.level,
+        tests: input.testPlan.tests,
       }, timestamp);
     });
     return this.notify(await this.getRequired(id));
@@ -355,6 +414,45 @@ export class DeploymentJobRepository {
       throw new SfudError('INVALID_JOB_STATE', '실제 배포 결과를 기록할 수 없는 작업 상태입니다.');
     }
     this.notify(await this.getRequired(id));
+  }
+
+  public async recordDirectDeploymentArtifacts(input: {
+    id: string;
+    payloadChecksum: string;
+    runDirectory: string;
+    comparisonResult: ComparisonResult;
+    testPlan: ApexTestPlan;
+    dryRunResult?: unknown;
+    deploymentResult: unknown;
+  }): Promise<void> {
+    assertChecksum(input.payloadChecksum);
+    const timestamp = this.now();
+    const result = await this.database.run(`
+      UPDATE deployment_jobs
+      SET payload_checksum = ?, run_directory = ?, is_prepared = 1,
+          comparison_result_json = ?, test_plan_json = ?, dry_run_result_json = ?,
+          deployment_result_json = ?, updated_at = ?
+      WHERE id = ? AND kind = 'DEPLOY' AND dry_run_job_id IS NULL AND status = 'DEPLOYING'
+    `,
+    input.payloadChecksum,
+    input.runDirectory,
+    JSON.stringify(input.comparisonResult),
+    JSON.stringify(input.testPlan),
+    input.dryRunResult === undefined ? null : JSON.stringify(input.dryRunResult),
+    JSON.stringify(input.deploymentResult),
+    timestamp,
+    input.id);
+    if (result.changes !== 1) {
+      throw new SfudError('INVALID_JOB_STATE', '직접 배포 결과를 기록할 수 없는 작업 상태입니다.');
+    }
+    const job = await this.getRequired(input.id);
+    await this.writeAudit(job.createdBy, 'DIRECT_DEPLOYMENT_ARTIFACTS_RECORDED', input.id, {
+      payloadChecksum: input.payloadChecksum,
+      testLevel: input.testPlan.level,
+      tests: input.testPlan.tests,
+      different: input.comparisonResult.summary.different,
+    }, timestamp);
+    this.notify(await this.getRequired(input.id));
   }
 
   public async recoverInterruptedJobs(): Promise<number> {

@@ -168,6 +168,118 @@ describe('dry-run API', () => {
     }
   });
 
+  it('테스트 미선택 직접 배포는 dry-run 없이 NoTestRun으로 실행한다', async () => {
+    const fixture = await createFixture(new DryRunSfClient());
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ sources: Array<{ id: string; kind: string }> }>();
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      const created = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/direct',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: {
+          scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+          sourceId, targetOrgId: 'org:target', tests: [], targetConfirmation: 'target',
+          confirmation: '실제 배포',
+        },
+      });
+      expect(created.statusCode).toBe(202);
+      const jobId = created.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+
+      const response = await fixture.server.inject({
+        url: `/api/v1/deployment-jobs/${jobId}`, headers: { cookie: auth.cookie },
+      });
+      expect(response.json()).toMatchObject({ job: {
+        kind: 'DEPLOY', status: 'SUCCEEDED', prepared: true,
+        testPlan: { level: 'NoTestRun', tests: [], selection: 'configured' },
+      } });
+      expect((await fixture.server.sfudRuntime.deploymentJobs.getRequired(jobId)).dryRunJobId).toBeUndefined();
+      const deployCalls = fixture.client.calls.filter((call) => call.args.includes('deploy'));
+      expect(deployCalls).toHaveLength(1);
+      expect(deployCalls[0]!.args).not.toContain('--dry-run');
+      expect(deployCalls[0]!.args).toEqual(expect.arrayContaining(['--test-level', 'NoTestRun']));
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('테스트 선택 직접 배포는 75% 커버리지를 확인한 뒤 실행한다', async () => {
+    const fixture = await createFixture(new DryRunSfClient('none', 80));
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ sources: Array<{ id: string; kind: string }> }>();
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      const created = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/direct',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: {
+          scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+          sourceId, targetOrgId: 'org:target', tests: ['CoverageSpec'],
+          targetConfirmation: 'target', confirmation: '실제 배포',
+        },
+      });
+      expect(created.statusCode).toBe(202);
+      const jobId = created.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+
+      const response = await fixture.server.inject({
+        url: `/api/v1/deployment-jobs/${jobId}`, headers: { cookie: auth.cookie },
+      });
+      expect(response.json()).toMatchObject({ job: {
+        kind: 'DEPLOY', status: 'SUCCEEDED', testCoverage: 80,
+        testPlan: { level: 'RunSpecifiedTests', tests: ['CoverageSpec'] },
+      } });
+      const deployCalls = fixture.client.calls.filter((call) => call.args.includes('deploy'));
+      expect(deployCalls).toHaveLength(2);
+      expect(deployCalls[0]!.args).toContain('--dry-run');
+      expect(deployCalls[1]!.args).not.toContain('--dry-run');
+      for (const call of deployCalls) {
+        expect(call.args).toEqual(expect.arrayContaining([
+          '--test-level', 'RunSpecifiedTests', '--tests', 'CoverageSpec',
+        ]));
+      }
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('테스트 선택 직접 배포는 커버리지 75% 미만이면 실제 반영 전에 실패한다', async () => {
+    const fixture = await createFixture(new DryRunSfClient('none', 74));
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ sources: Array<{ id: string; kind: string }> }>();
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      const created = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/direct',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: {
+          scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+          sourceId, targetOrgId: 'org:target', tests: ['CoverageSpec'],
+          targetConfirmation: 'target', confirmation: '실제 배포',
+        },
+      });
+      const jobId = created.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+
+      expect(await fixture.server.sfudRuntime.deploymentJobs.getRequired(jobId)).toMatchObject({
+        status: 'FAILED', errorCode: 'JOB_EXECUTION_FAILED',
+        errorMessage: expect.stringMatching(/74%.*75% 미만/u),
+      });
+      const deployCalls = fixture.client.calls.filter((call) => call.args.includes('deploy'));
+      expect(deployCalls).toHaveLength(1);
+      expect(deployCalls[0]!.args).toContain('--dry-run');
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it('Salesforce 실패를 민감 정보 없이 FAILED로 기록한다', async () => {
     const fixture = await createFixture(new DryRunSfClient('definitive'));
     try {
@@ -259,7 +371,10 @@ describe('dry-run API', () => {
 class DryRunSfClient implements SfClient {
   public readonly calls: Array<{ args: readonly string[]; options: SfRunOptions }> = [];
 
-  public constructor(private readonly failure: 'none' | 'definitive' | 'ambiguous' = 'none') {}
+  public constructor(
+    private readonly failure: 'none' | 'definitive' | 'ambiguous' = 'none',
+    private readonly coverage = 80,
+  ) {}
 
   public async runJson(args: readonly string[], options: SfRunOptions): Promise<unknown> {
     this.calls.push({ args, options });
@@ -301,7 +416,13 @@ class DryRunSfClient implements SfClient {
           'Salesforce 응답 대기 중 연결이 끊겼습니다. deployment 0Af000000000001AAA',
         );
       }
-      return { status: 0, result: { id: '0Af-check-only', accessToken: 'must-not-leak' } };
+      return { status: 0, result: {
+        id: args.includes('--dry-run') ? '0Af-check-only' : '0Af-deploy',
+        accessToken: 'must-not-leak',
+        details: { runTestResult: { codeCoverage: [
+          { name: 'Hello', numLocations: 100, numLocationsNotCovered: 100 - this.coverage },
+        ] } },
+      } };
     }
     throw new Error(`예상하지 못한 sf 명령: ${args.join(' ')}`);
   }

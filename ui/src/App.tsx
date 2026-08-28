@@ -135,6 +135,7 @@ interface DryRunJobResponse {
   payloadChecksum?: string;
   salesforceDeploymentId?: string;
   testPlan?: { level: string; tests: string[]; selection: string };
+  testCoverage?: number;
   comparisonSummary?: { added: number; removed: number; modified: number; identical: number; total: number; different: number };
   comparison?: ComparisonJobResponse['result'];
   errorCode?: string;
@@ -932,9 +933,8 @@ function DeployPage({ user }: { user: ApiUser }) {
   const scopeValid = scopeQuery === ALL_METADATA_LABEL || selectedMetadataType !== undefined;
   const canDeploy = ['DEPLOYER', 'ADMIN'].includes(user.role);
   const targetAlias = targetOrgId.startsWith('org:') ? targetOrgId.slice('org:'.length) : '';
-  const deploymentReady = dryRunJob?.status === 'APPROVAL_PENDING'
-    && dryRunJob.payloadChecksum !== undefined
-    && canDeploy
+  const deploymentReady = canDeploy
+    && deploymentCart.length > 0
     && targetConfirmation === targetAlias
     && deploymentConfirmation === '실제 배포';
 
@@ -1090,28 +1090,47 @@ function DeployPage({ user }: { user: ApiUser }) {
   };
 
   const executeDeployment = async () => {
-    if (!deploymentReady || dryRunJob?.payloadChecksum === undefined) return;
+    if (!deploymentReady) return;
     setError('');
     setDeploymentJob(null);
+    const selectionKey = dryRunSelectionKey;
     const controller = new AbortController();
     deploymentRequestControllerRef.current?.abort();
     deploymentRequestControllerRef.current = controller;
     try {
-      const response = await fetch('/api/v1/deployments/execute', {
+      const approvedDryRun = dryRunJob?.status === 'APPROVAL_PENDING'
+        && dryRunJob.payloadChecksum !== undefined;
+      const response = await fetch(approvedDryRun
+        ? '/api/v1/deployments/execute'
+        : '/api/v1/deployments/direct', {
         method: 'POST',
         credentials: 'same-origin',
         signal: controller.signal,
         headers: { 'content-type': 'application/json', 'x-sfud-csrf': readCookie('sfud_csrf') ?? '' },
-        body: JSON.stringify({
-          dryRunJobId: dryRunJob.id,
-          payloadChecksum: dryRunJob.payloadChecksum,
-          targetAlias,
-          confirmation: deploymentConfirmation,
-        }),
+        body: JSON.stringify(approvedDryRun
+          ? {
+            dryRunJobId: dryRunJob.id,
+            payloadChecksum: dryRunJob.payloadChecksum,
+            targetAlias,
+            confirmation: deploymentConfirmation,
+          }
+          : {
+            scope: 'selected',
+            components: deploymentCart.map(({ type, fullName }) => ({ type, fullName })),
+            sourceId,
+            targetOrgId,
+            tests: testNames,
+            waitMinutes: 60,
+            strict,
+            targetConfirmation,
+            confirmation: deploymentConfirmation,
+          }),
       });
       const data = await response.json() as { job?: DryRunJobResponse; error?: { message: string } };
       if (!response.ok || data.job === undefined) throw new Error(data.error?.message ?? '실제 배포를 시작하지 못했습니다.');
-      if (!controller.signal.aborted) setDeploymentJob(data.job);
+      if (!controller.signal.aborted && dryRunSelectionKeyRef.current === selectionKey) {
+        setDeploymentJob(data.job);
+      }
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === 'AbortError') return;
       setError(caught instanceof Error ? caught.message : '실제 배포를 시작하지 못했습니다.');
@@ -1220,7 +1239,7 @@ function DeployPage({ user }: { user: ApiUser }) {
 
         <aside className="deploy-summary" aria-label="배포 대상">
           <p className="eyebrow">DEPLOYMENT TARGETS</p><h2>{deploying ? '실제 배포 중' : deploymentJob?.status === 'SUCCEEDED' ? '배포 성공' : dryRunning ? 'Dry-run 실행 중' : dryRunJob?.status === 'APPROVAL_PENDING' ? '배포 승인 준비' : comparing ? '메타데이터 검색 중' : deploymentCart.length > 0 ? `${deploymentCart.length}개 선택됨` : '선택된 배포 대상이 없습니다'}</h2>
-          <dl><div><dt>Desired source</dt><dd>{source?.label ?? '선택 대기'}</dd></div><div><dt>Target org</dt><dd>{target?.label ?? '선택 대기'}</dd></div><div><dt>현재 검색</dt><dd>{selectedMetadataType?.name ?? ALL_METADATA_LABEL}</dd></div><div><dt>Test level</dt><dd>{testLevel}</dd></div></dl>
+          <dl><div><dt>Desired source</dt><dd>{source?.label ?? '선택 대기'}</dd></div><div><dt>Target org</dt><dd>{target?.label ?? '선택 대기'}</dd></div><div><dt>현재 검색</dt><dd>{selectedMetadataType?.name ?? ALL_METADATA_LABEL}</dd></div><div><dt>직접 배포 테스트</dt><dd>{testNames.length > 0 ? `RunSpecifiedTests · ${testNames.length}개 · 75%` : 'NoTestRun'}</dd></div></dl>
           <section className="deployment-cart" aria-label="선택한 배포 목록">
             <div className="deployment-cart-head"><strong>배포 대상</strong><span>{deploymentCart.length}개</span></div>
             {deploymentCart.length === 0
@@ -1228,19 +1247,23 @@ function DeployPage({ user }: { user: ApiUser }) {
               : <ul>{deploymentCart.map((item) => <li key={item.key}><span><strong>{item.fullName}</strong><small>{item.type}</small></span><button type="button" disabled={dryRunning || deploying} aria-label={`${item.fullName} 배포 대상에서 제거`} onClick={() => setDeploymentCart((current) => current.filter((entry) => entry.key !== item.key))}><Icon name="trash" /></button></li>)}</ul>}
             {deploymentCart.length > 0 && <button className="cart-clear" type="button" disabled={dryRunning || deploying} onClick={() => setDeploymentCart([])}>배포 대상 비우기</button>}
           </section>
-          <div className="checksum-preview"><span>PAYLOAD SHA-256</span><code>{dryRunJob?.payloadChecksum ?? 'dry-run 완료 후 계산'}</code></div>
+          <div className="checksum-preview"><span>PAYLOAD SHA-256</span><code>{dryRunJob?.payloadChecksum ?? deploymentJob?.payloadChecksum ?? '작업 완료 후 계산'}</code></div>
           <div className="warning-note"><Icon name="shield" /><p><strong>TARGET ONLY는 선택할 수 없습니다.</strong>desired source에 실제로 있는 컴포넌트만 배포 대상으로 지정할 수 있습니다.</p></div>
           <div className="cart-actions">
             <button className="button button-primary" type="button" onClick={() => void startDryRun()} disabled={!canRun || dryRunning || deploying || deploymentCart.length === 0 || !testSelectionValid}><Icon name={dryRunning ? 'refresh' : 'shield'} />{dryRunning ? 'Dry-run 중……' : '배포 대상 Dry-run'}<Icon name="arrow" /></button>
           </div>
-          {dryRunJob?.status === 'APPROVAL_PENDING' && <section className="deployment-approval" aria-label="실제 배포 승인">
+          <section className="deployment-approval" aria-label="실제 배포 승인">
             <strong>실제 배포 승인</strong>
-            <p>dry-run한 동일 payload만 배포합니다. 아래 두 값을 정확히 입력하세요.</p>
+            <p>{dryRunJob?.status === 'APPROVAL_PENDING'
+              ? '성공한 Dry-run의 동일 payload를 배포합니다.'
+              : testNames.length > 0
+                ? '선택한 테스트를 먼저 검증하고 코드 커버리지 75% 이상일 때만 배포합니다.'
+                : '테스트 없이 NoTestRun으로 바로 배포합니다. 프로덕션 org에서는 Salesforce가 거부할 수 있습니다.'} 아래 두 값을 정확히 입력하세요.</p>
             <label><span>대상 org 별칭</span><input value={targetConfirmation} onChange={(event) => setTargetConfirmation(event.target.value)} placeholder={targetAlias} /></label>
             <label><span>확인 문구</span><input value={deploymentConfirmation} onChange={(event) => setDeploymentConfirmation(event.target.value)} placeholder="실제 배포" /></label>
             {!canDeploy && <p className="approval-denied">DEPLOYER 또는 ADMIN 역할만 실제 배포할 수 있습니다.</p>}
-            <button className="button button-danger" type="button" onClick={() => void executeDeployment()} disabled={!deploymentReady || deploying}><Icon name={deploying ? 'refresh' : 'deploy'} />{deploying ? '배포 중……' : '배포 대상 실제 배포'}</button>
-          </section>}
+            <button className="button button-danger" type="button" onClick={() => void executeDeployment()} disabled={!deploymentReady || dryRunning || deploying}><Icon name={deploying ? 'refresh' : 'deploy'} />{deploying ? '배포 중……' : '배포 대상 실제 배포'}</button>
+          </section>
         </aside>
       </div>
     </div>
@@ -1628,7 +1651,9 @@ function DryRunResultPanel({ job }: { job: DryRunJobResponse }) {
     return <section className="compare-error" role="alert"><strong>{job.status === 'FAILED' ? `${job.kind === 'DEPLOY' ? '실제 배포' : 'dry-run'}이 실패했습니다.` : 'Salesforce 상태 재확인이 필요합니다.'}</strong><p>{job.errorMessage ?? '상세 오류가 기록되지 않았습니다.'}</p></section>;
   }
   if (job.kind === 'DEPLOY' && job.status === 'SUCCEEDED') {
-    return <section className="dry-run-result" aria-label="Salesforce 실제 배포 성공"><div className="comparison-result-head"><div><p className="eyebrow">DEPLOYMENT COMPLETE</p><h2>Salesforce 실제 배포 성공</h2><small>{job.salesforceDeploymentId ?? 'deployment ID 없음'}</small></div><span className="result-success"><Icon name="check" />배포 성공</span></div><div className="approval-preview"><Icon name="shield" /><div><strong>선택한 payload 배포를 완료했습니다.</strong><p>dry-run에서 고정한 checksum과 동일한 메타데이터만 target org에 반영했습니다.</p></div></div></section>;
+    return <section className="dry-run-result" aria-label="Salesforce 실제 배포 성공"><div className="comparison-result-head"><div><p className="eyebrow">DEPLOYMENT COMPLETE</p><h2>Salesforce 실제 배포 성공</h2><small>{job.salesforceDeploymentId ?? 'deployment ID 없음'}</small></div><span className="result-success"><Icon name="check" />배포 성공</span></div><div className="approval-preview"><Icon name="shield" /><div><strong>선택한 payload 배포를 완료했습니다.</strong><p>{job.testPlan?.tests.length
+      ? `${job.testPlan.tests.join(', ')} · 코드 커버리지 ${job.testCoverage?.toFixed(2) ?? '확인 완료'}%`
+      : 'NoTestRun · 테스트 없이 target org에 반영했습니다.'}</p></div></div></section>;
   }
   if (job.status !== 'APPROVAL_PENDING') return null;
   const summary = job.comparisonSummary;
@@ -1637,7 +1662,7 @@ function DryRunResultPanel({ job }: { job: DryRunJobResponse }) {
       <div className="comparison-result-head"><div><p className="eyebrow">CHECK-ONLY COMPLETE</p><h2 id="dry-run-result-title">Salesforce dry-run 성공</h2><small>{job.salesforceDeploymentId ?? 'deployment ID 없음'}</small></div><span className="result-success"><Icon name="check" />검증 성공</span></div>
       {summary !== undefined && <div className="comparison-summary"><div className="summary-added"><span>NEW</span><strong>{summary.added}</strong></div><div className="summary-removed"><span>TARGET ONLY</span><strong>{summary.removed}</strong></div><div className="summary-modified"><span>MODIFIED</span><strong>{summary.modified}</strong></div><div><span>TOTAL</span><strong>{summary.total}</strong></div></div>}
       <div className="dry-run-details">
-        <div><span className="card-icon icon-green"><Icon name="check" /></span><p><strong>{job.testPlan?.level ?? '테스트 수준 미상'}</strong>{job.testPlan?.tests.length ? job.testPlan.tests.join(', ') : 'Salesforce 구성 테스트'}</p></div>
+        <div><span className="card-icon icon-green"><Icon name="check" /></span><p><strong>{job.testPlan?.level ?? '테스트 수준 미상'}</strong>{job.testPlan?.tests.length ? `${job.testPlan.tests.join(', ')}${job.testCoverage === undefined ? '' : ` · ${job.testCoverage.toFixed(2)}%`}` : 'Salesforce 구성 테스트'}</p></div>
         <div><span className="card-icon icon-blue"><Icon name="shield" /></span><p><strong>Payload 고정</strong><code>{job.payloadChecksum}</code></p></div>
       </div>
       <div className="approval-preview"><Icon name="shield" /><div><strong>실제 배포 승인 준비가 완료되었습니다.</strong><p>오른쪽 배포 대상에서 동일 payload checksum과 대상 org를 다시 확인한 뒤 배포할 수 있습니다.</p></div></div>

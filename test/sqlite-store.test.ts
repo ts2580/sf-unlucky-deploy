@@ -3,6 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { open } from 'sqlite';
+import sqlite3 from 'sqlite3';
 
 import {
   DeploymentCoordinator,
@@ -11,6 +13,7 @@ import {
 import { DeploymentJobRepository } from '../src/deploy/deployment-job-repository.js';
 import { SingleJobQueue } from '../src/deploy/single-job-queue.js';
 import { openSqliteStore, type SqliteStore } from '../src/storage/sqlite-store.js';
+import { applyMigrations } from '../src/storage/migrations.js';
 import { UserRepository } from '../src/storage/user-repository.js';
 import type { ComparisonResult } from '../src/metadata/comparator.js';
 
@@ -42,10 +45,58 @@ describe('SQLite 저장소', () => {
     expect(await store.database.get('PRAGMA journal_mode')).toEqual({ journal_mode: 'wal' });
     expect(await store.database.get('PRAGMA busy_timeout')).toEqual({ timeout: 5_000 });
     expect(await store.database.get('SELECT COUNT(*) count FROM schema_migrations'))
-      .toEqual({ count: 8 });
+      .toEqual({ count: 9 });
     expect((await stat(path.dirname(databasePath))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
     await expect(readFile(databasePath)).resolves.toBeInstanceOf(Buffer);
+  });
+
+  it('v8 승인 이력을 보존하면서 직접 배포를 허용하는 v9로 마이그레이션한다', async () => {
+    const database = await open({ filename: ':memory:', driver: sqlite3.Database });
+    try {
+      await database.exec('PRAGMA foreign_keys = ON');
+      await applyMigrations(database, fixedNow, 8);
+      await database.run(`
+        INSERT INTO users (id, email, display_name, role, created_at, updated_at)
+        VALUES ('migration-user', 'migration@example.com', 'Migration', 'DEPLOYER', ?, ?)
+      `, fixedNow(), fixedNow());
+      await database.run(`
+        INSERT INTO deployment_jobs (
+          id, kind, status, source, target_alias, manifest_path, payload_checksum,
+          created_by, created_at, updated_at, is_prepared, scope
+        ) VALUES ('migration-dry', 'DRY_RUN', 'APPROVAL_PENDING', 'local:source', 'target',
+          'manifest.xml', ?, 'migration-user', ?, ?, 1, 'MANIFEST')
+      `, checksum, fixedNow(), fixedNow());
+      await database.run(`
+        INSERT INTO deployment_jobs (
+          id, kind, status, source, target_alias, manifest_path, payload_checksum,
+          dry_run_job_id, created_by, created_at, updated_at, is_prepared, scope
+        ) VALUES ('migration-deploy', 'DEPLOY', 'SUCCEEDED', 'local:source', 'target',
+          'manifest.xml', ?, 'migration-dry', 'migration-user', ?, ?, 0, 'MANIFEST')
+      `, checksum, fixedNow(), fixedNow());
+      await database.run(`
+        INSERT INTO deployment_approvals (
+          id, dry_run_job_id, deploy_job_id, approved_by, payload_checksum, target_alias, approved_at
+        ) VALUES ('migration-approval', 'migration-dry', 'migration-deploy',
+          'migration-user', ?, 'target', ?)
+      `, checksum, fixedNow());
+
+      await applyMigrations(database, fixedNow, 9);
+      await expect(database.all('PRAGMA foreign_key_check')).resolves.toEqual([]);
+      await expect(database.get('SELECT COUNT(*) count FROM deployment_approvals'))
+        .resolves.toEqual({ count: 1 });
+      await expect(database.get('SELECT COUNT(*) count FROM deployment_jobs'))
+        .resolves.toEqual({ count: 2 });
+      await expect(database.run(`
+        INSERT INTO deployment_jobs (
+          id, kind, status, source, target_alias, manifest_path, payload_checksum,
+          created_by, created_at, updated_at, is_prepared, scope
+        ) VALUES ('migration-direct', 'DEPLOY', 'QUEUED', 'local:source', 'target',
+          'manifest.xml', ?, 'migration-user', ?, ?, 0, 'MANIFEST')
+      `, checksum, fixedNow(), fixedNow())).resolves.toMatchObject({ changes: 1 });
+    } finally {
+      await database.close();
+    }
   });
 
   it('성공한 dry-run의 동일 payload만 권한 있는 사용자가 승인한다', async () => {
@@ -141,6 +192,34 @@ describe('SQLite 저장소', () => {
       targetAlias: 'stdOrg',
       confirmation: '실제 배포',
     })).rejects.toThrow(/승인 권한/u);
+  });
+
+  it('성공한 dry-run 없이도 권한과 확인 문구를 검증해 직접 배포를 기록한다', async () => {
+    const store = await openMemoryStore();
+    const ids = ['direct-deployer', 'direct-deploy-1'];
+    const users = new UserRepository(store.database, fixedNow, () => ids.shift()!);
+    const jobs = new DeploymentJobRepository(store.database, fixedNow, () => ids.shift()!);
+    const deployer = await users.create({
+      email: 'direct@example.com', displayName: '직접 배포자', role: 'DEPLOYER',
+    });
+
+    const deploy = await jobs.createDirectDeployment({
+      source: 'local:sf-project', targetAlias: 'sandbox', targetConfirmation: 'sandbox',
+      confirmation: '실제 배포', manifestPath: 'manifest/package.xml', payloadChecksum: checksum,
+      createdBy: deployer.id, testPlan: { level: 'NoTestRun', tests: [], selection: 'configured' },
+      selectedComponents: [{ type: 'CustomObject', fullName: 'Book__c' }],
+    });
+
+    expect(deploy).toMatchObject({
+      id: 'direct-deploy-1', kind: 'DEPLOY', status: 'QUEUED', targetAlias: 'sandbox',
+      testPlan: { level: 'NoTestRun', tests: [] },
+    });
+    expect(deploy.dryRunJobId).toBeUndefined();
+    await expect(jobs.createDirectDeployment({
+      source: 'local:sf-project', targetAlias: 'sandbox', targetConfirmation: 'production',
+      confirmation: '실제 배포', manifestPath: 'manifest/package.xml', payloadChecksum: checksum,
+      createdBy: deployer.id, testPlan: { level: 'NoTestRun', tests: [], selection: 'configured' },
+    })).rejects.toThrow(/대상 org 별칭/u);
   });
 
   it('재시작 시 실행 중 작업을 재확인 필요 상태로 전환한다', async () => {

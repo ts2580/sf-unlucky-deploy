@@ -284,11 +284,28 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
     });
     await route.fulfill({ status: 202, json: { job: deploymentFixture('QUEUED') } });
   });
+  await page.route('**/api/v1/deployments/direct', async (route) => {
+    expect(route.request().postDataJSON()).toMatchObject({
+      scope: 'selected',
+      components: [{ type: 'ApexClass', fullName: 'NewClass' }],
+      sourceId: 'project:project-1', targetOrgId: 'org:target', tests: ['Hello_Test'],
+      targetConfirmation: 'target', confirmation: '실제 배포',
+    });
+    await route.fulfill({ status: 202, json: { job: directDeploymentFixture('QUEUED') } });
+  });
   let dryRunPolls = 0;
   let deploymentPolls = 0;
+  let directDeploymentPolls = 0;
   await page.route('**/api/v1/deployment-jobs**', async (route) => {
     if (new URL(route.request().url()).pathname === '/api/v1/deployment-jobs') {
       await route.fulfill({ json: { jobs: [] } });
+      return;
+    }
+    if (new URL(route.request().url()).pathname.endsWith('/direct-deploy-1')) {
+      directDeploymentPolls += 1;
+      await route.fulfill({ json: { job: directDeploymentFixture(
+        directDeploymentPolls > 1 ? 'SUCCEEDED' : 'DEPLOYING',
+      ) } });
       return;
     }
     if (new URL(route.request().url()).pathname.endsWith('/deploy-1')) {
@@ -309,6 +326,9 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await page.getByLabel('NewClass 배포 대상으로 선택').check();
   await expect(page.getByLabel('OldClass 배포 대상으로 선택')).toBeDisabled();
   await expect(page.getByLabel('배포 대상').getByText('NewClass', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeDisabled();
   const apexTests = page.getByRole('region', { name: 'Apex 테스트 클래스 선택' });
   await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toBeVisible();
   await page.getByLabel('테스트 클래스 검색').fill('validation');
@@ -321,6 +341,13 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await apexTests.getByRole('checkbox', { name: 'Hello_Test' }).check();
   await expect(page.getByLabel('테스트 클래스 직접 입력')).toHaveValue('Hello_Test');
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeEnabled();
+  await expect(page.getByText('코드 커버리지 75% 이상일 때만 배포합니다.')).toBeVisible();
+  await page.getByLabel('대상 org 별칭').fill('target');
+  await page.getByLabel('확인 문구').fill('실제 배포');
+  await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
+  await expect(page.getByText('Salesforce 실제 배포 중')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Salesforce 실제 배포 성공' })).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByText(/Hello_Test · 코드 커버리지 80.00%/u)).toBeVisible();
   await page.getByRole('combobox', { name: 'Salesforce metadata type' }).fill('CustomObject');
   await expect(page.getByLabel('배포 대상').getByText('NewClass', { exact: true })).toBeVisible();
   await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toBeChecked();
@@ -453,5 +480,14 @@ function deploymentFixture(status: 'QUEUED' | 'DEPLOYING' | 'SUCCEEDED') {
     manifest: 'selected.xml', scope: 'selected', prepared: false,
     createdAt: '2026-08-23T06:01:00.000Z',
     ...(status !== 'SUCCEEDED' ? {} : { salesforceDeploymentId: '0Af-deploy' }),
+  };
+}
+
+function directDeploymentFixture(status: 'QUEUED' | 'DEPLOYING' | 'SUCCEEDED') {
+  return {
+    ...deploymentFixture(status),
+    id: 'direct-deploy-1',
+    testPlan: { level: 'RunSpecifiedTests', tests: ['Hello_Test'], selection: 'explicit' },
+    ...(status === 'SUCCEEDED' ? { testCoverage: 80 } : {}),
   };
 }
