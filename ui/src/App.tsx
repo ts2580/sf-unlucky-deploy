@@ -1124,10 +1124,6 @@ function DeployPage({ user }: { user: ApiUser }) {
               <div className="direction-marker"><span>배포 대상</span><Icon name="arrow" /></div>
               <WorkspaceSourceSelect side="TARGET ORG" value={targetOrgId} sources={(workspace?.sources ?? []).filter((entry) => entry.kind === 'org')} onChange={setTargetOrgId} tone="blue" />
             </div>
-            <div className="project-source-actions">
-              <div><strong>새 프로젝트 소스가 필요한가요?</strong><p>서버 프로젝트 등록과 내 단말기 DX 프로젝트 업로드는 <b>설정</b>에서 관리합니다.</p></div>
-              <a className="small-button" href="/settings"><Icon name="settings" />프로젝트 설정</a>
-            </div>
           </section>
 
           <section className="workflow-panel" aria-labelledby="deploy-scope-heading">

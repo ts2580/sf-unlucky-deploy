@@ -135,7 +135,7 @@ test('설정에서 내 단말기의 DX 프로젝트를 임시 소스로 업로�
   await expect(page.getByText('DX 프로젝트 업로드', { exact: true })).toBeVisible();
   await page.getByRole('link', { name: '비교 및 배포', exact: true }).click();
   await expect(page.locator('.upload-button input[type="file"]')).toHaveCount(0);
-  await expect(page.getByRole('link', { name: '프로젝트 설정' })).toBeVisible();
+  await expect(page.getByText('새 프로젝트 소스가 필요한가요?')).toHaveCount(0);
 });
 
 test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', async ({ page }) => {
