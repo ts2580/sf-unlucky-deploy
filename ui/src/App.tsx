@@ -136,6 +136,16 @@ interface DryRunJobResponse {
   createdAt: string;
 }
 
+interface WorkflowEventMessage {
+  resource: 'comparison' | 'deployment';
+  jobId: string;
+  kind: string;
+  status: string;
+  updatedAt: string;
+}
+
+type LiveStatus = 'connecting' | 'connected' | 'reconnecting';
+
 interface DashboardRun {
   id: string;
   kind: string;
@@ -618,6 +628,7 @@ function DeployPage({ user }: { user: ApiUser }) {
   const [error, setError] = useState('');
   const [uploading, setUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState('');
+  const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
   const comparisonRequestControllerRef = useRef<AbortController | null>(null);
   const dryRunRequestControllerRef = useRef<AbortController | null>(null);
   const deploymentRequestControllerRef = useRef<AbortController | null>(null);
@@ -628,8 +639,14 @@ function DeployPage({ user }: { user: ApiUser }) {
   const dryRunSelectionKey = [sourceId, targetOrgId, cartSelectionKey, testLevel, tests, strict].join('\u0000');
   const workflowSelectionKeyRef = useRef(workflowSelectionKey);
   const dryRunSelectionKeyRef = useRef(dryRunSelectionKey);
+  const comparisonJobRef = useRef(comparisonJob);
+  const dryRunJobRef = useRef(dryRunJob);
+  const deploymentJobRef = useRef(deploymentJob);
   workflowSelectionKeyRef.current = workflowSelectionKey;
   dryRunSelectionKeyRef.current = dryRunSelectionKey;
+  comparisonJobRef.current = comparisonJob;
+  dryRunJobRef.current = dryRunJob;
+  deploymentJobRef.current = deploymentJob;
   const canRun = ['OPERATOR', 'DEPLOYER', 'ADMIN'].includes(user.role);
 
   useEffect(() => {
@@ -695,6 +712,73 @@ function DeployPage({ user }: { user: ApiUser }) {
   useEffect(() => {
     setDeploymentCart([]);
   }, [sourceId, targetOrgId]);
+
+  useEffect(() => {
+    const events = new EventSource('/api/v1/workflow/events');
+    setLiveStatus('connecting');
+    events.onopen = () => setLiveStatus('connected');
+    events.onerror = () => setLiveStatus('reconnecting');
+    const handleWorkflowEvent = (rawEvent: Event) => {
+      if (!(rawEvent instanceof MessageEvent) || typeof rawEvent.data !== 'string') return;
+      let event: WorkflowEventMessage;
+      try {
+        event = JSON.parse(rawEvent.data) as WorkflowEventMessage;
+      } catch {
+        return;
+      }
+
+      if (event.resource === 'comparison' && comparisonJobRef.current?.id === event.jobId) {
+        const selectionKey = comparisonJobSelectionKeyRef.current;
+        if (selectionKey === null || selectionKey !== workflowSelectionKeyRef.current) return;
+        void fetch(`/api/v1/comparisons/${event.jobId}`, { credentials: 'same-origin' })
+          .then(async (response) => {
+            const data = await response.json() as { job?: ComparisonJobResponse };
+            if (
+              response.ok
+              && data.job !== undefined
+              && comparisonJobRef.current?.id === event.jobId
+              && comparisonJobSelectionKeyRef.current === selectionKey
+              && workflowSelectionKeyRef.current === selectionKey
+            ) setComparisonJob(data.job);
+          })
+          .catch(() => undefined);
+        return;
+      }
+
+      if (event.resource !== 'deployment') return;
+      if (dryRunJobRef.current?.id === event.jobId) {
+        const selectionKey = dryRunJobSelectionKeyRef.current;
+        if (selectionKey === null || selectionKey !== dryRunSelectionKeyRef.current) return;
+        void fetch(`/api/v1/deployment-jobs/${event.jobId}`, { credentials: 'same-origin' })
+          .then(async (response) => {
+            const data = await response.json() as { job?: DryRunJobResponse };
+            if (
+              response.ok
+              && data.job !== undefined
+              && dryRunJobRef.current?.id === event.jobId
+              && dryRunJobSelectionKeyRef.current === selectionKey
+              && dryRunSelectionKeyRef.current === selectionKey
+            ) setDryRunJob(data.job);
+          })
+          .catch(() => undefined);
+      }
+      if (deploymentJobRef.current?.id === event.jobId) {
+        void fetch(`/api/v1/deployment-jobs/${event.jobId}`, { credentials: 'same-origin' })
+          .then(async (response) => {
+            const data = await response.json() as { job?: DryRunJobResponse };
+            if (response.ok && data.job !== undefined && deploymentJobRef.current?.id === event.jobId) {
+              setDeploymentJob(data.job);
+            }
+          })
+          .catch(() => undefined);
+      }
+    };
+    events.addEventListener('workflow', handleWorkflowEvent);
+    return () => {
+      events.removeEventListener('workflow', handleWorkflowEvent);
+      events.close();
+    };
+  }, []);
 
   useEffect(() => {
     if (comparisonJob === null || !['QUEUED', 'RUNNING'].includes(comparisonJob.status)) return;
@@ -1020,7 +1104,18 @@ function DeployPage({ user }: { user: ApiUser }) {
               <OptionToggle title="Strict 비교" description="XML 원문 형식 차이까지 탐지" checked={strict} onChange={setStrict} />
               <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} />
             </div>
+            <div className="comparison-action">
+              <div><Icon name="shield" /><span><strong>읽기 전용 비교</strong>현재 metadata type과 옵션으로 source와 target을 비교합니다.</span></div>
+              <button className="button button-secondary" type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesLoading || !scopeValid || !sourceId || !targetOrgId || sourceId === targetOrgId}><Icon name={comparing ? 'refresh' : 'compare'} />{comparing ? '비교 실행 중……' : '현재 type 비교 실행'}</button>
+            </div>
           </section>
+
+          <WorkflowStatusPanel
+            liveStatus={liveStatus}
+            comparisonJob={comparisonJob}
+            dryRunJob={dryRunJob}
+            deploymentJob={deploymentJob}
+          />
 
           {error && <section className="compare-error" role="alert"><strong>비교 및 배포 작업을 실행하지 못했습니다.</strong><p>{error}</p></section>}
           {comparisonJob !== null && <ComparisonResultPanel
@@ -1047,7 +1142,6 @@ function DeployPage({ user }: { user: ApiUser }) {
           <div className="checksum-preview"><span>PAYLOAD SHA-256</span><code>{dryRunJob?.payloadChecksum ?? 'dry-run 완료 후 계산'}</code></div>
           <div className="warning-note"><Icon name="shield" /><p><strong>TARGET ONLY는 선택할 수 없습니다.</strong>desired source에 실제로 있는 컴포넌트만 배포 대상으로 지정할 수 있습니다.</p></div>
           <div className="cart-actions">
-            <button className="button button-secondary" type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesLoading || !scopeValid || !sourceId || !targetOrgId || sourceId === targetOrgId}><Icon name={comparing ? 'refresh' : 'compare'} />{comparing ? '비교 실행 중……' : '현재 type 비교 실행'}</button>
             <button className="button button-primary" type="button" onClick={() => void startDryRun()} disabled={!canRun || dryRunning || deploying || deploymentCart.length === 0}><Icon name={dryRunning ? 'refresh' : 'shield'} />{dryRunning ? 'Dry-run 중……' : '배포 대상 Dry-run'}<Icon name="arrow" /></button>
           </div>
           {dryRunJob?.status === 'APPROVAL_PENDING' && <section className="deployment-approval" aria-label="실제 배포 승인">
@@ -1062,6 +1156,66 @@ function DeployPage({ user }: { user: ApiUser }) {
       </div>
     </div>
   );
+}
+
+function WorkflowStatusPanel({
+  liveStatus,
+  comparisonJob,
+  dryRunJob,
+  deploymentJob,
+}: {
+  liveStatus: LiveStatus;
+  comparisonJob: ComparisonJobResponse | null;
+  dryRunJob: DryRunJobResponse | null;
+  deploymentJob: DryRunJobResponse | null;
+}) {
+  const connectionLabel = liveStatus === 'connected'
+    ? '실시간 연결'
+    : liveStatus === 'reconnecting'
+      ? '재연결 중'
+      : '연결 중';
+  const items = [
+    workflowStatusItem('비교', comparisonJob?.id, comparisonJob?.status),
+    workflowStatusItem('Dry-run', dryRunJob?.id, dryRunJob?.status),
+    workflowStatusItem('실제 배포', deploymentJob?.id, deploymentJob?.status),
+  ];
+  return (
+    <section className="workflow-status-panel" aria-labelledby="workflow-status-heading" aria-live="polite">
+      <div className="workflow-status-head">
+        <div><span className="card-icon icon-blue"><Icon name="activity" /></span><span><h2 id="workflow-status-heading">실행 현황</h2><p>비교부터 배포까지 서버 작업 상태를 실시간으로 표시합니다.</p></span></div>
+        <span className={`live-status live-status-${liveStatus}`}><i />{connectionLabel}</span>
+      </div>
+      <div className="workflow-status-grid">
+        {items.map((item) => <article className={`workflow-status-card workflow-status-${item.tone}`} key={item.title} aria-label={`${item.title} 현황`}>
+          <span>{item.title}</span>
+          <strong>{item.label}</strong>
+          <small>{item.jobId === undefined ? '아직 실행되지 않음' : `Job ${item.jobId.slice(0, 12)}`}</small>
+        </article>)}
+      </div>
+      <p className="workflow-status-note">SSE 연결이 끊기면 자동 재연결하며, polling으로 상태 확인을 계속합니다.</p>
+    </section>
+  );
+}
+
+function workflowStatusItem(
+  title: string,
+  jobId: string | undefined,
+  status: ComparisonJobResponse['status'] | DryRunJobResponse['status'] | undefined,
+): { title: string; jobId?: string; label: string; tone: 'idle' | 'pending' | 'success' | 'error' } {
+  if (status === undefined) return { title, label: '대기', tone: 'idle' };
+  if (status === 'QUEUED') return { title, jobId, label: '대기열', tone: 'pending' };
+  if (['RUNNING', 'DRY_RUN_RUNNING', 'DEPLOYING'].includes(status)) {
+    return { title, jobId, label: '진행 중', tone: 'pending' };
+  }
+  if (status === 'FAILED' || status === 'RECONCILE_REQUIRED') {
+    return { title, jobId, label: status === 'FAILED' ? '실패' : '확인 필요', tone: 'error' };
+  }
+  return {
+    title,
+    jobId,
+    label: status === 'APPROVAL_PENDING' ? '승인 대기' : '완료',
+    tone: 'success',
+  };
 }
 
 function RunsPage({ runs, comparisons, deployments }: { runs: DashboardRun[]; comparisons: ComparisonJobResponse[]; deployments: DryRunJobResponse[] }) {

@@ -139,9 +139,17 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(page.locator('#salesforce-deploy-metadata-types option')).toHaveCount(4);
   await scopeCombobox.fill('ApexClass');
   await expect(page.getByText('3개 metadata type 검색 가능 · source와 target의 합집합')).toBeVisible();
-  await page.getByRole('button', { name: /비교 실행$/u }).click();
+  const comparisonOptions = page.getByRole('region', { name: '비교 옵션과 Apex 테스트' });
+  await expect(comparisonOptions.getByRole('button', { name: /비교 실행$/u })).toBeVisible();
+  await expect(page.getByRole('complementary', { name: '배포 대상' }).getByRole('button', { name: /비교 실행/u })).toHaveCount(0);
+  const workflowStatus = page.getByRole('region', { name: '실행 현황' });
+  await expect(workflowStatus).toBeVisible();
+  await expect(workflowStatus.getByText('실시간 연결')).toBeVisible();
+  await comparisonOptions.getByRole('button', { name: /비교 실행$/u }).click();
+  await expect(page.getByLabel('비교 현황')).toContainText(/대기열|진행 중/u);
   await expect(page.getByText('메타데이터 비교 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'left → right' })).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByLabel('비교 현황')).toContainText('완료');
   await expect(page.getByText('Hello', { exact: true })).toBeVisible();
   await expect(page.locator('.component-status', { hasText: 'MODIFIED' })).toBeVisible();
 });
@@ -262,16 +270,20 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await page.getByRole('combobox', { name: 'Salesforce metadata type' }).fill('CustomObject');
   await expect(page.getByLabel('배포 대상').getByText('NewClass', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '배포 대상 Dry-run' }).click();
+  await expect(page.getByLabel('Dry-run 현황')).toContainText(/대기열|진행 중/u);
   await expect(page.getByText('Salesforce check-only 실행 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Salesforce dry-run 성공' })).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByLabel('Dry-run 현황')).toContainText('승인 대기');
   const result = page.getByLabel('Salesforce dry-run 성공');
   await expect(result.getByText('RunSpecifiedTests', { exact: true })).toBeVisible();
   await expect(result.getByText(/Hello_Test/u)).toBeVisible();
   await page.getByLabel('대상 org 별칭').fill('target');
   await page.getByLabel('확인 문구').fill('실제 배포');
   await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
+  await expect(page.getByLabel('실제 배포 현황')).toContainText(/대기열|진행 중/u);
   await expect(page.getByText('Salesforce 실제 배포 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Salesforce 실제 배포 성공' })).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByLabel('실제 배포 현황')).toContainText('완료');
 
   await page.setViewportSize({ width: 390, height: 844 });
   const hasHorizontalOverflow = await page.evaluate(

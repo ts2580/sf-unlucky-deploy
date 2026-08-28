@@ -69,6 +69,7 @@ export class ComparisonJobRepository {
     private readonly database: Database,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly createId: () => string = randomUUID,
+    private readonly onChanged?: (job: ComparisonJob) => void,
   ) {}
 
   public async create(input: CreateComparisonJobInput): Promise<ComparisonJob> {
@@ -88,7 +89,7 @@ export class ComparisonJobRepository {
         right: input.rightSource,
       }, timestamp);
     });
-    return this.getRequired(id);
+    return this.notify(await this.getRequired(id));
   }
 
   public async get(id: string): Promise<ComparisonJob | undefined> {
@@ -109,6 +110,7 @@ export class ComparisonJobRepository {
       WHERE id = ? AND status = 'QUEUED'
     `, timestamp, timestamp, id);
     if (result.changes !== 1) throw new Error(`실행할 수 없는 비교 작업입니다: ${id}`);
+    this.notify(await this.getRequired(id));
   }
 
   public async markSucceeded(id: string, resultValue: ComparisonResult, runDirectory: string): Promise<void> {
@@ -123,10 +125,12 @@ export class ComparisonJobRepository {
       const job = await this.getRequired(id);
       await this.writeAudit(job.createdBy, 'COMPARISON_SUCCEEDED', id, { ...resultValue.summary }, timestamp);
     });
+    this.notify(await this.getRequired(id));
   }
 
   public async markFailed(id: string, code: string, message: string): Promise<void> {
     const timestamp = this.now();
+    let changed = false;
     await runInImmediateTransaction(this.database, async () => {
       const result = await this.database.run(`
         UPDATE comparison_jobs
@@ -134,9 +138,11 @@ export class ComparisonJobRepository {
         WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
       `, code, message, timestamp, timestamp, id);
       if (result.changes !== 1) return;
+      changed = true;
       const job = await this.getRequired(id);
       await this.writeAudit(job.createdBy, 'COMPARISON_FAILED', id, { code }, timestamp);
     });
+    if (changed) this.notify(await this.getRequired(id));
   }
 
   public async recoverInterrupted(): Promise<number> {
@@ -155,6 +161,11 @@ export class ComparisonJobRepository {
     return (await this.database.all<ComparisonJobRow[]>(`
       SELECT * FROM comparison_jobs ORDER BY created_at DESC, id DESC LIMIT ?
     `, Math.min(Math.max(limit, 1), 100))).map(mapRow);
+  }
+
+  private notify(job: ComparisonJob): ComparisonJob {
+    this.onChanged?.(job);
+    return job;
   }
 
   private async writeAudit(

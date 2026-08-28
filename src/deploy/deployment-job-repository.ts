@@ -116,6 +116,7 @@ export class DeploymentJobRepository {
     private readonly database: Database,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly createId: () => string = randomUUID,
+    private readonly onChanged?: (job: DeploymentJob) => void,
   ) {}
 
   public async createDryRun(input: CreateDryRunJobInput): Promise<DeploymentJob> {
@@ -147,7 +148,7 @@ export class DeploymentJobRepository {
         payloadChecksum: input.payloadChecksum,
       }, timestamp);
     });
-    return this.getRequired(id);
+    return this.notify(await this.getRequired(id));
   }
 
   public async get(id: string): Promise<DeploymentJob | undefined> {
@@ -210,7 +211,7 @@ export class DeploymentJobRepository {
         ...(details.errorCode === undefined ? {} : { errorCode: details.errorCode }),
       }, timestamp);
     });
-    return this.getRequired(id);
+    return this.notify(await this.getRequired(id));
   }
 
   public async recordDryRunArtifacts(input: {
@@ -247,6 +248,7 @@ export class DeploymentJobRepository {
         different: input.comparisonResult.summary.different,
       }, timestamp);
     });
+    this.notify(await this.getRequired(input.id));
   }
 
   public async approveAndQueueDeployment(input: ApproveDeploymentInput): Promise<DeploymentJob> {
@@ -339,7 +341,7 @@ export class DeploymentJobRepository {
       }
       throw error;
     }
-    return this.getRequired(deployJobId);
+    return this.notify(await this.getRequired(deployJobId));
   }
 
   public async recordDeploymentResult(id: string, deploymentResult: unknown): Promise<void> {
@@ -352,6 +354,7 @@ export class DeploymentJobRepository {
     if (result.changes !== 1) {
       throw new SfudError('INVALID_JOB_STATE', '실제 배포 결과를 기록할 수 없는 작업 상태입니다.');
     }
+    this.notify(await this.getRequired(id));
   }
 
   public async recoverInterruptedJobs(): Promise<number> {
@@ -389,6 +392,11 @@ export class DeploymentJobRepository {
     return (await this.database.all<DeploymentJobRow[]>(`
       SELECT * FROM deployment_jobs ORDER BY created_at DESC, id DESC LIMIT ?
     `, limit)).map(mapDeploymentJob);
+  }
+
+  private notify(job: DeploymentJob): DeploymentJob {
+    this.onChanged?.(job);
+    return job;
   }
 
   private async writeAudit(

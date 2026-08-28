@@ -14,6 +14,7 @@ import { registerAuthRoutes } from './auth-routes.js';
 import { registerComparisonRoutes } from './comparison-routes.js';
 import { registerDeploymentRoutes } from './deployment-routes.js';
 import { registerProjectUploadRoutes } from './project-upload-routes.js';
+import { registerWorkflowEventRoutes } from './workflow-events.js';
 import type { SfClient } from '../../salesforce/sf-client.js';
 
 declare module 'fastify' {
@@ -83,6 +84,7 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
   await registerProjectUploadRoutes(app);
   await registerComparisonRoutes(app);
   await registerDeploymentRoutes(app);
+  await registerWorkflowEventRoutes(app);
 
   if (await hasBuiltUi(assetsDirectory)) {
     await app.register(fastifyStatic, {
