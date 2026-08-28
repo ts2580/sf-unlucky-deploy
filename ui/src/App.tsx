@@ -967,8 +967,8 @@ function DeployPage({ user }: { user: ApiUser }) {
 
   return (
     <div className="page-stack">
-      <PageIntro kicker="COMPARE, CART, DEPLOY" title="검색한 메타데이터를 장바구니에 담아 배포합니다." description="metadata type을 바꿔가며 필요한 컴포넌트를 모으고, 장바구니 목록만 Salesforce dry-run한 뒤 동일 payload를 배포합니다.">
-        <div className="stepper" aria-label="배포 단계"><span className="step-active"><i>1</i>검색</span><b /><span className={deploymentCart.length > 0 ? 'step-active' : ''}><i>2</i>장바구니</span><b /><span className={dryRunJob !== null ? 'step-active' : ''}><i>3</i>Dry-run</span><b /><span className={deploymentJob !== null ? 'step-active' : ''}><i>4</i>배포</span></div>
+      <PageIntro kicker="COMPARE, SELECT, DEPLOY" title="검색한 메타데이터를 배포 대상으로 선택합니다." description="metadata type을 바꿔가며 필요한 컴포넌트를 선택하고, 배포 대상 목록만 Salesforce dry-run한 뒤 동일 payload를 배포합니다.">
+        <div className="stepper" aria-label="배포 단계"><span className="step-active"><i>1</i>검색</span><b /><span className={deploymentCart.length > 0 ? 'step-active' : ''}><i>2</i>배포 대상</span><b /><span className={dryRunJob !== null ? 'step-active' : ''}><i>3</i>Dry-run</span><b /><span className={deploymentJob !== null ? 'step-active' : ''}><i>4</i>배포</span></div>
       </PageIntro>
 
       <div className="deploy-layout">
@@ -997,7 +997,7 @@ function DeployPage({ user }: { user: ApiUser }) {
           </section>
 
           <section className="workflow-panel" aria-labelledby="deploy-scope-heading">
-            <div className="panel-heading"><span className="step-number">02</span><div><h2 id="deploy-scope-heading">메타데이터 검색</h2><p>type별 비교 결과에서 체크한 컴포넌트가 배포 장바구니에 누적됩니다.</p></div><span className="panel-state">검색</span></div>
+            <div className="panel-heading"><span className="step-number">02</span><div><h2 id="deploy-scope-heading">메타데이터 검색</h2><p>type별 비교 결과에서 체크한 컴포넌트가 배포 대상 목록에 누적됩니다.</p></div><span className="panel-state">검색</span></div>
             <div className="compare-scope-grid metadata-scope-grid">
               <label><span className="field-label">Salesforce metadata type</span>
                 <input id="deploy-scope" list="salesforce-deploy-metadata-types" value={scopeQuery} onChange={(event) => setScopeQuery(event.target.value)} placeholder="metadata type 검색" autoComplete="off" disabled={workspace === null || metadataTypesLoading} aria-invalid={!scopeValid} />
@@ -1034,21 +1034,21 @@ function DeployPage({ user }: { user: ApiUser }) {
           {deploymentJob !== null && <DryRunResultPanel job={deploymentJob} />}
         </div>
 
-        <aside className="deploy-summary" aria-label="배포 장바구니">
-          <p className="eyebrow">DEPLOYMENT CART</p><h2>{deploying ? '실제 배포 중' : deploymentJob?.status === 'SUCCEEDED' ? '배포 성공' : dryRunning ? 'Dry-run 실행 중' : dryRunJob?.status === 'APPROVAL_PENDING' ? '배포 승인 준비' : comparing ? '메타데이터 검색 중' : deploymentCart.length > 0 ? `${deploymentCart.length}개 선택됨` : '장바구니가 비어 있습니다'}</h2>
+        <aside className="deploy-summary" aria-label="배포 대상">
+          <p className="eyebrow">DEPLOYMENT TARGETS</p><h2>{deploying ? '실제 배포 중' : deploymentJob?.status === 'SUCCEEDED' ? '배포 성공' : dryRunning ? 'Dry-run 실행 중' : dryRunJob?.status === 'APPROVAL_PENDING' ? '배포 승인 준비' : comparing ? '메타데이터 검색 중' : deploymentCart.length > 0 ? `${deploymentCart.length}개 선택됨` : '선택된 배포 대상이 없습니다'}</h2>
           <dl><div><dt>Desired source</dt><dd>{source?.label ?? '선택 대기'}</dd></div><div><dt>Target org</dt><dd>{target?.label ?? '선택 대기'}</dd></div><div><dt>현재 검색</dt><dd>{selectedMetadataType?.name ?? ALL_METADATA_LABEL}</dd></div><div><dt>Test level</dt><dd>{testLevel}</dd></div></dl>
           <section className="deployment-cart" aria-label="선택한 배포 목록">
-            <div className="deployment-cart-head"><strong>배포 목록</strong><span>{deploymentCart.length}개</span></div>
+            <div className="deployment-cart-head"><strong>배포 대상</strong><span>{deploymentCart.length}개</span></div>
             {deploymentCart.length === 0
               ? <p>비교 결과에서 metadata를 체크하면 여기에 보존됩니다.</p>
-              : <ul>{deploymentCart.map((item) => <li key={item.key}><span><strong>{item.fullName}</strong><small>{item.type}</small></span><button type="button" disabled={dryRunning || deploying} aria-label={`${item.fullName} 장바구니에서 삭제`} onClick={() => setDeploymentCart((current) => current.filter((entry) => entry.key !== item.key))}><Icon name="trash" /></button></li>)}</ul>}
-            {deploymentCart.length > 0 && <button className="cart-clear" type="button" disabled={dryRunning || deploying} onClick={() => setDeploymentCart([])}>장바구니 비우기</button>}
+              : <ul>{deploymentCart.map((item) => <li key={item.key}><span><strong>{item.fullName}</strong><small>{item.type}</small></span><button type="button" disabled={dryRunning || deploying} aria-label={`${item.fullName} 배포 대상에서 제거`} onClick={() => setDeploymentCart((current) => current.filter((entry) => entry.key !== item.key))}><Icon name="trash" /></button></li>)}</ul>}
+            {deploymentCart.length > 0 && <button className="cart-clear" type="button" disabled={dryRunning || deploying} onClick={() => setDeploymentCart([])}>배포 대상 비우기</button>}
           </section>
           <div className="checksum-preview"><span>PAYLOAD SHA-256</span><code>{dryRunJob?.payloadChecksum ?? 'dry-run 완료 후 계산'}</code></div>
-          <div className="warning-note"><Icon name="shield" /><p><strong>TARGET ONLY는 담을 수 없습니다.</strong>장바구니는 desired source에 실제로 있는 컴포넌트만 배포합니다.</p></div>
+          <div className="warning-note"><Icon name="shield" /><p><strong>TARGET ONLY는 선택할 수 없습니다.</strong>desired source에 실제로 있는 컴포넌트만 배포 대상으로 지정할 수 있습니다.</p></div>
           <div className="cart-actions">
             <button className="button button-secondary" type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesLoading || !scopeValid || !sourceId || !targetOrgId || sourceId === targetOrgId}><Icon name={comparing ? 'refresh' : 'compare'} />{comparing ? '비교 실행 중……' : '현재 type 비교 실행'}</button>
-            <button className="button button-primary" type="button" onClick={() => void startDryRun()} disabled={!canRun || dryRunning || deploying || deploymentCart.length === 0}><Icon name={dryRunning ? 'refresh' : 'shield'} />{dryRunning ? 'Dry-run 중……' : '장바구니 Dry-run'}<Icon name="arrow" /></button>
+            <button className="button button-primary" type="button" onClick={() => void startDryRun()} disabled={!canRun || dryRunning || deploying || deploymentCart.length === 0}><Icon name={dryRunning ? 'refresh' : 'shield'} />{dryRunning ? 'Dry-run 중……' : '배포 대상 Dry-run'}<Icon name="arrow" /></button>
           </div>
           {dryRunJob?.status === 'APPROVAL_PENDING' && <section className="deployment-approval" aria-label="실제 배포 승인">
             <strong>실제 배포 승인</strong>
@@ -1056,7 +1056,7 @@ function DeployPage({ user }: { user: ApiUser }) {
             <label><span>대상 org 별칭</span><input value={targetConfirmation} onChange={(event) => setTargetConfirmation(event.target.value)} placeholder={targetAlias} /></label>
             <label><span>확인 문구</span><input value={deploymentConfirmation} onChange={(event) => setDeploymentConfirmation(event.target.value)} placeholder="실제 배포" /></label>
             {!canDeploy && <p className="approval-denied">DEPLOYER 또는 ADMIN 역할만 실제 배포할 수 있습니다.</p>}
-            <button className="button button-danger" type="button" onClick={() => void executeDeployment()} disabled={!deploymentReady || deploying}><Icon name={deploying ? 'refresh' : 'deploy'} />{deploying ? '배포 중……' : '장바구니 실제 배포'}</button>
+            <button className="button button-danger" type="button" onClick={() => void executeDeployment()} disabled={!deploymentReady || deploying}><Icon name={deploying ? 'refresh' : 'deploy'} />{deploying ? '배포 중……' : '배포 대상 실제 배포'}</button>
           </section>}
         </aside>
       </div>
@@ -1208,7 +1208,7 @@ function ComparisonResultPanel({
               <summary>{deploymentView && <label className={`component-cart-check${component.status === 'REMOVED' || selectionDisabled ? ' component-cart-disabled' : ''}`} onClick={(event) => event.stopPropagation()}>
                 <input
                   type="checkbox"
-                  aria-label={`${component.fullName} 배포 장바구니`}
+                  aria-label={`${component.fullName} 배포 대상으로 선택`}
                   checked={selectedKeys.has(component.key)}
                   disabled={component.status === 'REMOVED' || selectionDisabled}
                   onChange={(event) => onSelectionChange?.(component, event.target.checked)}
@@ -1233,7 +1233,7 @@ function DryRunResultPanel({ job }: { job: DryRunJobResponse }) {
     return <section className="compare-error" role="alert"><strong>{job.status === 'FAILED' ? `${job.kind === 'DEPLOY' ? '실제 배포' : 'dry-run'}이 실패했습니다.` : 'Salesforce 상태 재확인이 필요합니다.'}</strong><p>{job.errorMessage ?? '상세 오류가 기록되지 않았습니다.'}</p></section>;
   }
   if (job.kind === 'DEPLOY' && job.status === 'SUCCEEDED') {
-    return <section className="dry-run-result" aria-label="Salesforce 실제 배포 성공"><div className="comparison-result-head"><div><p className="eyebrow">DEPLOYMENT COMPLETE</p><h2>Salesforce 실제 배포 성공</h2><small>{job.salesforceDeploymentId ?? 'deployment ID 없음'}</small></div><span className="result-success"><Icon name="check" />배포 성공</span></div><div className="approval-preview"><Icon name="shield" /><div><strong>장바구니 payload 배포를 완료했습니다.</strong><p>dry-run에서 고정한 checksum과 동일한 메타데이터만 target org에 반영했습니다.</p></div></div></section>;
+    return <section className="dry-run-result" aria-label="Salesforce 실제 배포 성공"><div className="comparison-result-head"><div><p className="eyebrow">DEPLOYMENT COMPLETE</p><h2>Salesforce 실제 배포 성공</h2><small>{job.salesforceDeploymentId ?? 'deployment ID 없음'}</small></div><span className="result-success"><Icon name="check" />배포 성공</span></div><div className="approval-preview"><Icon name="shield" /><div><strong>선택한 payload 배포를 완료했습니다.</strong><p>dry-run에서 고정한 checksum과 동일한 메타데이터만 target org에 반영했습니다.</p></div></div></section>;
   }
   if (job.status !== 'APPROVAL_PENDING') return null;
   const summary = job.comparisonSummary;
@@ -1245,7 +1245,7 @@ function DryRunResultPanel({ job }: { job: DryRunJobResponse }) {
         <div><span className="card-icon icon-green"><Icon name="check" /></span><p><strong>{job.testPlan?.level ?? '테스트 수준 미상'}</strong>{job.testPlan?.tests.length ? job.testPlan.tests.join(', ') : 'Salesforce 구성 테스트'}</p></div>
         <div><span className="card-icon icon-blue"><Icon name="shield" /></span><p><strong>Payload 고정</strong><code>{job.payloadChecksum}</code></p></div>
       </div>
-      <div className="approval-preview"><Icon name="shield" /><div><strong>실제 배포 승인 준비가 완료되었습니다.</strong><p>오른쪽 장바구니에서 동일 payload checksum과 대상 org를 다시 확인한 뒤 배포할 수 있습니다.</p></div></div>
+      <div className="approval-preview"><Icon name="shield" /><div><strong>실제 배포 승인 준비가 완료되었습니다.</strong><p>오른쪽 배포 대상에서 동일 payload checksum과 대상 org를 다시 확인한 뒤 배포할 수 있습니다.</p></div></div>
     </section>
   );
 }

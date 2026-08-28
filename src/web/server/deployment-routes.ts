@@ -163,7 +163,7 @@ function requiredMetadataType(value: unknown): string {
 }
 
 function selectedComponents(value: unknown): Array<{ type: string; fullName: string }> {
-  if (!Array.isArray(value)) throw new Error('배포 장바구니 항목은 배열이어야 합니다.');
+  if (!Array.isArray(value)) throw new Error('배포 대상 항목은 배열이어야 합니다.');
   return value.map((entry) => {
     if (
       typeof entry !== 'object'
@@ -173,7 +173,7 @@ function selectedComponents(value: unknown): Array<{ type: string; fullName: str
       || typeof entry.type !== 'string'
       || typeof entry.fullName !== 'string'
     ) {
-      throw new Error('배포 장바구니 항목 형식이 올바르지 않습니다.');
+      throw new Error('배포 대상 항목 형식이 올바르지 않습니다.');
     }
     return { type: entry.type, fullName: entry.fullName };
   });

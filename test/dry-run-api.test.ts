@@ -110,7 +110,7 @@ describe('dry-run API', () => {
     }
   });
 
-  it('장바구니 metadata만 dry-run하고 승인된 동일 payload를 실제 배포한다', async () => {
+  it('선택한 배포 대상 metadata만 dry-run하고 승인된 동일 payload를 실제 배포한다', async () => {
     const fixture = await createFixture(new DryRunSfClient());
     try {
       const auth = await bootstrap(fixture.server);

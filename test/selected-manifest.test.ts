@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { normalizeSelectedComponents, renderSelectedManifest } from '../src/deploy/selected-manifest.js';
 
-describe('배포 장바구니 manifest', () => {
+describe('선택한 배포 대상 manifest', () => {
   it('type별로 중복을 제거하고 결정적인 package.xml을 만든다', () => {
     const components = normalizeSelectedComponents([
       { type: 'CustomField', fullName: 'Account.Label__c' },

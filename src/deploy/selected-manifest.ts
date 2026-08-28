@@ -12,7 +12,7 @@ export interface SelectedMetadataComponent {
 
 export function normalizeSelectedComponents(value: readonly SelectedMetadataComponent[]): SelectedMetadataComponent[] {
   if (value.length === 0 || value.length > 2_000) {
-    throw new SfudError('INVALID_ARGUMENT', '배포 장바구니에는 1개부터 2,000개까지 담을 수 있습니다.');
+    throw new SfudError('INVALID_ARGUMENT', '배포 대상은 1개부터 2,000개까지 선택할 수 있습니다.');
   }
   const unique = new Map<string, SelectedMetadataComponent>();
   for (const component of value) {

@@ -58,7 +58,7 @@ test('390px 모바일 화면에서 body 수평 overflow가 없다', async ({ pag
 
 test('메뉴마다 독립 URL과 화면을 제공한다', async ({ page }) => {
   await login(page, '/compare');
-  await expect(page.getByRole('heading', { name: '검색한 메타데이터를 장바구니에 담아 배포합니다.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '검색한 메타데이터를 배포 대상으로 선택합니다.' })).toBeVisible();
   await expect(page.getByRole('link', { name: '비교 및 배포', exact: true })).toHaveAttribute('aria-current', 'page');
 
   await page.getByRole('link', { name: '실행 기록', exact: true }).click();
@@ -256,12 +256,12 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await page.getByRole('button', { name: /비교 실행/u }).click();
   await expect(page.getByText('메타데이터 비교 중')).toBeVisible();
   await expect(page.getByText('NEW', { exact: true }).first()).toBeVisible({ timeout: 5_000 });
-  await page.getByLabel('NewClass 배포 장바구니').check();
-  await expect(page.getByLabel('OldClass 배포 장바구니')).toBeDisabled();
-  await expect(page.getByLabel('배포 장바구니').getByText('NewClass', { exact: true })).toBeVisible();
+  await page.getByLabel('NewClass 배포 대상으로 선택').check();
+  await expect(page.getByLabel('OldClass 배포 대상으로 선택')).toBeDisabled();
+  await expect(page.getByLabel('배포 대상').getByText('NewClass', { exact: true })).toBeVisible();
   await page.getByRole('combobox', { name: 'Salesforce metadata type' }).fill('CustomObject');
-  await expect(page.getByLabel('배포 장바구니').getByText('NewClass', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '장바구니 Dry-run' }).click();
+  await expect(page.getByLabel('배포 대상').getByText('NewClass', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '배포 대상 Dry-run' }).click();
   await expect(page.getByText('Salesforce check-only 실행 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Salesforce dry-run 성공' })).toBeVisible({ timeout: 5_000 });
   const result = page.getByLabel('Salesforce dry-run 성공');
@@ -269,7 +269,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(result.getByText(/Hello_Test/u)).toBeVisible();
   await page.getByLabel('대상 org 별칭').fill('target');
   await page.getByLabel('확인 문구').fill('실제 배포');
-  await page.getByRole('button', { name: '장바구니 실제 배포' }).click();
+  await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
   await expect(page.getByText('Salesforce 실제 배포 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Salesforce 실제 배포 성공' })).toBeVisible({ timeout: 5_000 });
 
@@ -278,13 +278,13 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
     () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
   );
   const resultBox = await result.boundingBox();
-  const summaryBox = await page.getByRole('complementary', { name: '배포 장바구니' }).boundingBox();
+  const summaryBox = await page.getByRole('complementary', { name: '배포 대상' }).boundingBox();
 
   expect(hasHorizontalOverflow).toBe(false);
   expect(resultBox).not.toBeNull();
   expect(summaryBox).not.toBeNull();
   expect(summaryBox!.y).toBeGreaterThan(resultBox!.y + resultBox!.height);
-  await expect(page.getByRole('button', { name: '장바구니 실제 배포' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeVisible();
 });
 
 test('제품 파비콘을 제공한다', async ({ page, request }) => {

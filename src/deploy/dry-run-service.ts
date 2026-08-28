@@ -66,7 +66,7 @@ export class DryRunService {
       throw new Error('Salesforce metadata type은 전체 metadata 범위에서만 선택할 수 있습니다.');
     }
     if (scope !== 'selected' && input.components !== undefined) {
-      throw new Error('배포 장바구니 항목은 선택한 metadata 범위에서만 사용할 수 있습니다.');
+      throw new Error('배포 대상 항목은 선택한 metadata 범위에서만 사용할 수 있습니다.');
     }
     const selectedComponents = scope === 'selected'
       ? normalizeSelectedComponents(input.components ?? [])
