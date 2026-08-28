@@ -330,6 +330,20 @@ npm run build
 node dist/cli.js ui --no-open
 ```
 
+프로젝트 루트의 로컬 실행 스크립트는 기본 포트 `27546`을 점유한 기존 LISTEN 프로세스를
+종료한 뒤 UI를 시작한다. 빌드 결과가 없으면 자동 빌드하지 않고 먼저 `npm run build`를
+실행하라는 오류를 표시한다.
+
+```bash
+./start-local.sh
+
+# 다른 로컬 주소나 포트 사용
+SFUD_UI_HOST=192.168.0.62 SFUD_UI_PORT=27546 ./start-local.sh
+```
+
+loopback이 아닌 주소에는 스크립트가 `--allow-remote`를 자동으로 추가한다. 추가 CLI 옵션은
+스크립트 뒤에 그대로 전달할 수 있다. 예: `./start-local.sh --project /path/to/project`.
+
 셀프 호스팅에서는 영속 volume의 디렉터리를 명시한다.
 
 ```bash
@@ -342,7 +356,18 @@ node dist/cli.js ui \
   --no-open
 ```
 
-`--project`는 반복해서 지정할 수 있으며 웹 API는 이 allowlist 밖의 로컬 경로와 manifest를 거부한다. 옵션을 생략하면 서버를 시작한 현재 Salesforce DX 프로젝트만 허용한다. `SFUD_DATA_DIR` 환경변수로도 저장 위치를 지정할 수 있다. 데이터 디렉터리는 `0700`, DB 파일은 `0600` 권한으로 제한하며 다음 설정을 적용한다.
+`--project`는 반복해서 지정할 수 있으며 이 경로만 **서버 프로젝트**로 노출된다. 옵션을
+생략하면 등록되는 서버 프로젝트가 없으며, 서버를 시작한 현재 디렉터리를 자동으로 비교
+소스에 넣지 않는다. 웹 API는 allowlist 밖의 서버 경로와 manifest를 거부한다.
+
+브라우저의 **내 프로젝트 업로드**는 접속한 단말기에서 선택한 Salesforce DX 폴더를 서버의
+사용자별 임시 디렉터리로 전송한다. 업로드 프로젝트는 마지막 비교 또는 dry-run 사용 후
+4시간이 지나거나 서버 프로세스가 종료되면 제거된다. 업로드는 파일 2,000개, 파일당 10MB,
+전체 100MB로 제한하며 `.git`, `.sf`, `.sfdx`, `node_modules`, `.env`와 일반적인 비밀키 파일은
+받지 않는다. 서버 프로젝트는 경로 참조이고 업로드 프로젝트는 임시 복사본이므로 서로 다른
+소스 유형이다.
+
+`SFUD_DATA_DIR` 환경변수로도 저장 위치를 지정할 수 있다. 데이터 디렉터리는 `0700`, DB 파일은 `0600` 권한으로 제한하며 다음 설정을 적용한다.
 
 ```text
 foreign_keys = ON
@@ -359,6 +384,12 @@ node dist/cli.js ui --no-open
 
 최초 관리자가 생성되면 해당 코드는 더 이상 사용할 수 없다. 비밀번호는 `scrypt`로 해시하고 세션·CSRF 토큰은 SHA-256 해시만 SQLite에 저장한다. 세션 쿠키는 `HttpOnly`, `SameSite=Strict`이며 HTTPS reverse proxy에서는 `Secure` 속성도 적용된다. Nginx 등 reverse proxy는 원래 `Host`와 `X-Forwarded-Proto` 헤더를 전달해야 한다.
 
+`ADMIN` 계정에는 **사용자 관리** 메뉴가 표시된다. 이 화면에서 초기 비밀번호와 함께 사용자를
+생성하고 `VIEWER`, `OPERATOR`, `DEPLOYER`, `ADMIN` 역할을 지정하거나 계정을 비활성화·재활성화할
+수 있다. 비활성화 시 기존 세션도 즉시 폐기된다. 자기 역할 변경, 자기 계정 비활성화와 마지막
+활성 `ADMIN` 제거는 서버에서 차단하며 생성·역할 변경·활성 상태 변경은 모두 감사 로그에 남긴다.
+사용자 목록과 변경 API인 `/api/v1/admin/users`도 `ADMIN` 세션 및 상태 변경 시 CSRF 검증을 요구한다.
+
 ```nginx
 proxy_set_header Host $host;
 proxy_set_header X-Forwarded-Proto $scheme;
@@ -370,6 +401,32 @@ proxy_set_header X-Forwarded-Proto $scheme;
 
 `OPERATOR`, `DEPLOYER`, `ADMIN` 사용자는 웹의 **비교 및 배포** 화면에서 desired source와
 target org를 선택하고, 비교가 성공하면 같은 범위로 Salesforce check-only를 실행할 수 있다.
+desired source는 `--project`로 등록한 서버 프로젝트, 브라우저에서 임시 업로드한 내 단말기
+프로젝트, 또는 다른 Salesforce org 중에서 선택한다.
+
+비교 결과의 체크박스로 metadata 컴포넌트를 **배포 대상**으로 선택할 수 있다. metadata type을
+바꿔 검색해도 같은 desired source와 target org를 사용하는 동안 선택 목록은 유지된다.
+체크를 해제하거나 배포 대상의 제거 버튼을 누르면 목록에서 빠진다. target에만 존재하는
+`TARGET ONLY` 항목은 desired source에 payload가 없으므로 선택할 수 없다.
+
+배포 대상에 `ApexClass`가 포함되면 **Apex 테스트 클래스** 선택기가 열린다. 로컬·업로드 DX
+프로젝트는 package directory에서, org 소스는 Tooling API에서 활성 Apex Class를 조회해
+접미사와 무관하게 모든 클래스 후보를 표시한다. 이름으로 후보를 검색하고 여러 개 체크하거나
+클래스명을 직접 입력할 수 있으며, 선택 값은 `auto` 또는 `RunSpecifiedTests`와 함께 Dry-run에 전달된다.
+`RunSpecifiedTests`는 테스트 클래스가 하나 이상 선택되기 전까지 Dry-run을 시작할 수 없다.
+
+배포 대상의 **Dry-run**과 **실제 배포** 버튼은 처음부터 함께 표시된다. Dry-run은 선택한
+컴포넌트만 포함한 전용 `package.xml`을 만들고 Salesforce check-only를 실행하며, 성공하면 staging
+payload와 SHA-256을 고정한다. 성공한 Dry-run 뒤 실제 배포하면 서버가 동일 payload SHA-256을
+다시 확인한다.
+
+Dry-run 없이 바로 실제 배포할 수도 있다. 테스트 클래스를 선택했다면 서버가
+`RunSpecifiedTests` check-only를 먼저 실행하고 응답에 보고된 각 Apex 클래스·트리거의 라인
+커버리지가 모두 75% 이상일 때만 실제 배포한다. 테스트를 선택하지 않았다면 `NoTestRun`으로
+check-only 없이 배포한다. 프로덕션
+org처럼 `NoTestRun`을 허용하지 않는 대상은 Salesforce가 거부하며 실패 상태로 기록된다.
+`DEPLOYER` 또는 `ADMIN` 사용자가 대상 org 별칭과 `실제 배포` 확인 문구를 정확히 입력해야 실제
+배포 버튼이 활성화된다.
 서버는 `sf org list --json` 결과에서 별칭, 표시 이름, edition, 연결 상태만 추출하며
 토큰·client ID·키 경로·로컬 절대 경로를 API에 반환하지 않는다.
 
@@ -379,8 +436,11 @@ manifest를 동적으로 생성하고 합집합을 사용하므로 로컬 프로
 Salesforce metadata type 전체를 합집합으로 제공하며 이름 검색과 단일 타입 비교를 지원한다.
 
 비교 요청은 SQLite에 먼저 `QUEUED` 상태로 기록한 뒤 별도 단일 큐에서 기존
-`runCompareCommand` 코어를 실행한다. 브라우저는 작업 상태를 polling하고 완료되면
-`NEW`·`TARGET ONLY`·`MODIFIED`·`IDENTICAL` 요약과 컴포넌트별 파일 diff를 표시한다.
+`runCompareCommand` 코어를 실행한다. **비교 옵션과 Apex 테스트** 섹션에서 비교를 시작하며,
+별도 **실행 현황** 섹션이 비교·Dry-run·실제 배포 상태를 함께 표시한다. 인증된
+`GET /api/v1/workflow/events` SSE는 job ID·종류·상태만 전달하고, 브라우저는 이벤트를 받으면
+해당 작업 상세를 다시 조회한다. SSE 연결이 끊겨도 기존 polling이 최종 상태 확인을 계속한다.
+완료되면 `NEW`·`TARGET ONLY`·`MODIFIED`·`IDENTICAL` 요약과 컴포넌트별 파일 diff를 표시한다.
 Dry-run도 package.xml을 다시 요구하지 않고 선택한 전체 또는 단일 metadata type 범위의
 합집합 manifest를 요청마다 새로 생성한다. `VIEWER`는 이력만 조회한다.
 

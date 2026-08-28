@@ -16,6 +16,21 @@ export interface AuthenticatedSession {
   sessionToken: string;
 }
 
+export interface CreateManagedUserInput {
+  actorUserId: string;
+  email: string;
+  displayName: string;
+  role: UserRole;
+  password: string;
+}
+
+export interface UpdateManagedUserInput {
+  actorUserId: string;
+  userId: string;
+  role?: UserRole;
+  disabled?: boolean;
+}
+
 interface SessionRow {
   session_id: string;
   user_id: string;
@@ -136,6 +151,124 @@ export class AuthService {
     return csrfToken !== undefined && safeSecretEquals(hashSecret(csrfToken), expectedHash);
   }
 
+  public async listUsers(): Promise<SfudUser[]> {
+    const rows = await this.database.all<Array<{
+      id: string;
+      email: string;
+      display_name: string;
+      role: UserRole;
+      disabled_at: string | null;
+      created_at: string;
+      updated_at: string;
+    }>>(`
+      SELECT id, email, display_name, role, disabled_at, created_at, updated_at
+      FROM users
+      ORDER BY disabled_at IS NOT NULL, display_name COLLATE NOCASE, email COLLATE NOCASE
+    `);
+    return rows.map((row) => ({
+      id: row.id,
+      email: row.email,
+      displayName: row.display_name,
+      role: row.role,
+      ...(row.disabled_at === null ? {} : { disabledAt: row.disabled_at }),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  public async createManagedUser(input: CreateManagedUserInput): Promise<SfudUser> {
+    const email = normalizeEmail(input.email);
+    const displayName = normalizeDisplayName(input.displayName);
+    assertUserRole(input.role);
+    const passwordDigest = await hashPassword(input.password);
+    const userId = this.createId();
+    const timestamp = this.now().toISOString();
+    await runInImmediateTransaction(this.database, async () => {
+      const existing = await this.database.get<{ id: string }>('SELECT id FROM users WHERE email = ?', email);
+      if (existing !== undefined) {
+        throw new UserAdministrationError('EMAIL_EXISTS', '이미 등록된 이메일입니다.');
+      }
+      await this.database.run(`
+        INSERT INTO users (id, email, display_name, role, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `, userId, email, displayName, input.role, timestamp, timestamp);
+      await this.database.run(`
+        INSERT INTO password_credentials (user_id, password_digest, updated_at)
+        VALUES (?, ?, ?)
+      `, userId, passwordDigest, timestamp);
+      await this.writeUserAudit(input.actorUserId, 'USER_CREATED', userId, {
+        email,
+        displayName,
+        role: input.role,
+      }, timestamp);
+    });
+    return this.getUserRequired(userId);
+  }
+
+  public async updateManagedUser(input: UpdateManagedUserInput): Promise<SfudUser> {
+    if (input.role !== undefined) assertUserRole(input.role);
+    if (input.role === undefined && input.disabled === undefined) {
+      throw new UserAdministrationError('NO_CHANGES', '변경할 사용자 설정이 없습니다.');
+    }
+    const timestamp = this.now().toISOString();
+    await runInImmediateTransaction(this.database, async () => {
+      const current = await this.database.get<{
+        id: string;
+        role: UserRole;
+        disabled_at: string | null;
+      }>('SELECT id, role, disabled_at FROM users WHERE id = ?', input.userId);
+      if (current === undefined) {
+        throw new UserAdministrationError('USER_NOT_FOUND', '사용자를 찾을 수 없습니다.');
+      }
+      const nextRole = input.role ?? current.role;
+      const nextDisabled = input.disabled ?? (current.disabled_at !== null);
+      if (input.actorUserId === input.userId && nextRole !== current.role) {
+        throw new UserAdministrationError('SELF_ROLE_CHANGE_DENIED', '자기 자신의 역할은 변경할 수 없습니다.');
+      }
+      if (input.actorUserId === input.userId && nextDisabled) {
+        throw new UserAdministrationError('SELF_DISABLE_DENIED', '자기 자신의 계정은 비활성화할 수 없습니다.');
+      }
+      if (
+        current.role === 'ADMIN'
+        && current.disabled_at === null
+        && (nextRole !== 'ADMIN' || nextDisabled)
+      ) {
+        const others = await this.database.get<{ count: number }>(`
+          SELECT COUNT(*) count FROM users
+          WHERE id <> ? AND role = 'ADMIN' AND disabled_at IS NULL
+        `, input.userId);
+        if ((others?.count ?? 0) === 0) {
+          throw new UserAdministrationError('LAST_ADMIN_REQUIRED', '마지막 활성 ADMIN은 변경할 수 없습니다.');
+        }
+      }
+      const disabledAt = nextDisabled ? current.disabled_at ?? timestamp : null;
+      await this.database.run(`
+        UPDATE users SET role = ?, disabled_at = ?, updated_at = ? WHERE id = ?
+      `, nextRole, disabledAt, timestamp, input.userId);
+      if (nextDisabled && current.disabled_at === null) {
+        await this.database.run(`
+          UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL
+        `, timestamp, input.userId);
+      }
+      if (nextRole !== current.role) {
+        await this.writeUserAudit(input.actorUserId, 'USER_ROLE_CHANGED', input.userId, {
+          previousRole: current.role,
+          role: nextRole,
+        }, timestamp);
+      }
+      if (nextDisabled !== (current.disabled_at !== null)) {
+        await this.writeUserAudit(
+          input.actorUserId,
+          nextDisabled ? 'USER_DISABLED' : 'USER_ENABLED',
+          input.userId,
+          {},
+          timestamp,
+        );
+      }
+    });
+    return this.getUserRequired(input.userId);
+  }
+
   private async createSession(userId: string): Promise<AuthenticatedSession> {
     const sessionToken = this.createSecret();
     const csrfToken = this.createSecret();
@@ -189,12 +322,42 @@ export class AuthService {
       VALUES (?, ?, 'AUTH', ?, ?, ?)
     `, actorUserId, eventType, entityId, JSON.stringify(detail), timestamp);
   }
+
+  private async writeUserAudit(
+    actorUserId: string,
+    eventType: string,
+    entityId: string,
+    detail: Record<string, unknown>,
+    timestamp: string,
+  ): Promise<void> {
+    await this.database.run(`
+      INSERT INTO audit_events (actor_user_id, event_type, entity_type, entity_id, detail_json, created_at)
+      VALUES (?, ?, 'USER', ?, ?, ?)
+    `, actorUserId, eventType, entityId, JSON.stringify(detail), timestamp);
+  }
 }
 
 export class AuthError extends Error {
   public constructor(public readonly code: 'BOOTSTRAP_DENIED' | 'INVALID_CREDENTIALS', message: string) {
     super(message);
     this.name = 'AuthError';
+  }
+}
+
+export class UserAdministrationError extends Error {
+  public constructor(
+    public readonly code:
+      | 'EMAIL_EXISTS'
+      | 'INVALID_ROLE'
+      | 'LAST_ADMIN_REQUIRED'
+      | 'NO_CHANGES'
+      | 'SELF_DISABLE_DENIED'
+      | 'SELF_ROLE_CHANGE_DENIED'
+      | 'USER_NOT_FOUND',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'UserAdministrationError';
   }
 }
 
@@ -222,6 +385,12 @@ function normalizeDisplayName(value: string): string {
     throw new Error('표시 이름은 1자 이상 80자 이하여야 합니다.');
   }
   return displayName;
+}
+
+function assertUserRole(value: string): asserts value is UserRole {
+  if (!['VIEWER', 'OPERATOR', 'DEPLOYER', 'ADMIN'].includes(value)) {
+    throw new UserAdministrationError('INVALID_ROLE', '지원하지 않는 사용자 역할입니다.');
+  }
 }
 
 function mapUser(row: SessionRow): SfudUser {

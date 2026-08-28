@@ -6,6 +6,7 @@ import { SfudError } from '../core/errors.js';
 import { runInImmediateTransaction } from '../storage/transaction.js';
 import type { ComparisonResult } from '../metadata/comparator.js';
 import type { ApexTestPlan } from './test-plan.js';
+import type { SelectedMetadataComponent } from './selected-manifest.js';
 
 export type DeploymentJobKind = 'DRY_RUN' | 'DEPLOY';
 export type DeploymentScope = 'MANIFEST' | 'ALL';
@@ -42,6 +43,8 @@ export interface DeploymentJob {
   comparisonResult?: ComparisonResult;
   testPlan?: ApexTestPlan;
   dryRunResult?: unknown;
+  selectedComponents?: SelectedMetadataComponent[];
+  deploymentResult?: unknown;
 }
 
 export interface CreateDryRunJobInput {
@@ -53,6 +56,14 @@ export interface CreateDryRunJobInput {
   payloadChecksum: string;
   runDirectory?: string;
   createdBy?: string;
+  selectedComponents?: SelectedMetadataComponent[];
+}
+
+export interface CreateDirectDeploymentJobInput extends CreateDryRunJobInput {
+  createdBy: string;
+  testPlan: ApexTestPlan;
+  targetConfirmation: string;
+  confirmation: string;
 }
 
 export interface TransitionDetails {
@@ -93,6 +104,8 @@ interface DeploymentJobRow {
   comparison_result_json: string | null;
   test_plan_json: string | null;
   dry_run_result_json: string | null;
+  selected_components_json: string | null;
+  deployment_result_json: string | null;
 }
 
 const ALLOWED_TRANSITIONS: Record<DeploymentJobStatus, ReadonlySet<DeploymentJobStatus>> = {
@@ -110,6 +123,7 @@ export class DeploymentJobRepository {
     private readonly database: Database,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly createId: () => string = randomUUID,
+    private readonly onChanged?: (job: DeploymentJob) => void,
   ) {}
 
   public async createDryRun(input: CreateDryRunJobInput): Promise<DeploymentJob> {
@@ -120,8 +134,8 @@ export class DeploymentJobRepository {
       await this.database.run(`
         INSERT INTO deployment_jobs (
           id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
-          run_directory, created_by, created_at, updated_at
-        ) VALUES (?, 'DRY_RUN', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          run_directory, selected_components_json, created_by, created_at, updated_at
+        ) VALUES (?, 'DRY_RUN', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         id,
         input.source,
@@ -131,6 +145,7 @@ export class DeploymentJobRepository {
         input.metadataType ?? null,
         input.payloadChecksum,
         input.runDirectory ?? null,
+        input.selectedComponents === undefined ? null : JSON.stringify(input.selectedComponents),
         input.createdBy ?? null,
         timestamp,
         timestamp,
@@ -140,7 +155,59 @@ export class DeploymentJobRepository {
         payloadChecksum: input.payloadChecksum,
       }, timestamp);
     });
-    return this.getRequired(id);
+    return this.notify(await this.getRequired(id));
+  }
+
+  public async createDirectDeployment(input: CreateDirectDeploymentJobInput): Promise<DeploymentJob> {
+    if (input.confirmation !== '실제 배포') {
+      throw new SfudError('APPROVAL_DENIED', '실제 배포 확인 문구가 일치하지 않습니다.');
+    }
+    if (input.targetConfirmation !== input.targetAlias) {
+      throw new SfudError('APPROVAL_DENIED', '확인한 대상 org 별칭이 실제 배포 대상과 일치하지 않습니다.');
+    }
+    assertChecksum(input.payloadChecksum);
+    const id = this.createId();
+    const timestamp = this.now();
+    await runInImmediateTransaction(this.database, async () => {
+      const deployer = await this.database.get<{ role: string; disabled_at: string | null }>(
+        'SELECT role, disabled_at FROM users WHERE id = ?',
+        input.createdBy,
+      );
+      if (
+        deployer === undefined
+        || deployer.disabled_at !== null
+        || !['DEPLOYER', 'ADMIN'].includes(deployer.role)
+      ) {
+        throw new SfudError('APPROVAL_DENIED', '실제 배포 권한이 없습니다.');
+      }
+      await this.database.run(`
+        INSERT INTO deployment_jobs (
+          id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
+          run_directory, selected_components_json, test_plan_json, created_by, created_at, updated_at
+        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+        id,
+        input.source,
+        input.targetAlias,
+        input.manifestPath,
+        input.scope ?? 'MANIFEST',
+        input.metadataType ?? null,
+        input.payloadChecksum,
+        input.runDirectory ?? null,
+        input.selectedComponents === undefined ? null : JSON.stringify(input.selectedComponents),
+        JSON.stringify(input.testPlan),
+        input.createdBy,
+        timestamp,
+        timestamp,
+      );
+      await this.writeAudit(input.createdBy, 'DIRECT_DEPLOYMENT_QUEUED', id, {
+        targetAlias: input.targetAlias,
+        payloadChecksum: input.payloadChecksum,
+        testLevel: input.testPlan.level,
+        tests: input.testPlan.tests,
+      }, timestamp);
+    });
+    return this.notify(await this.getRequired(id));
   }
 
   public async get(id: string): Promise<DeploymentJob | undefined> {
@@ -203,7 +270,7 @@ export class DeploymentJobRepository {
         ...(details.errorCode === undefined ? {} : { errorCode: details.errorCode }),
       }, timestamp);
     });
-    return this.getRequired(id);
+    return this.notify(await this.getRequired(id));
   }
 
   public async recordDryRunArtifacts(input: {
@@ -240,6 +307,7 @@ export class DeploymentJobRepository {
         different: input.comparisonResult.summary.different,
       }, timestamp);
     });
+    this.notify(await this.getRequired(input.id));
   }
 
   public async approveAndQueueDeployment(input: ApproveDeploymentInput): Promise<DeploymentJob> {
@@ -289,8 +357,8 @@ export class DeploymentJobRepository {
         await this.database.run(`
         INSERT INTO deployment_jobs (
           id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
-          run_directory, dry_run_job_id, created_by, created_at, updated_at
-        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          run_directory, selected_components_json, dry_run_job_id, created_by, created_at, updated_at
+        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         deployJobId,
         dryRun.source,
@@ -300,6 +368,7 @@ export class DeploymentJobRepository {
         dryRun.metadataType ?? null,
         dryRun.payloadChecksum,
         dryRun.runDirectory ?? null,
+        dryRun.selectedComponents === undefined ? null : JSON.stringify(dryRun.selectedComponents),
         dryRun.id,
         input.approvedBy,
         timestamp,
@@ -331,7 +400,59 @@ export class DeploymentJobRepository {
       }
       throw error;
     }
-    return this.getRequired(deployJobId);
+    return this.notify(await this.getRequired(deployJobId));
+  }
+
+  public async recordDeploymentResult(id: string, deploymentResult: unknown): Promise<void> {
+    const timestamp = this.now();
+    const result = await this.database.run(`
+      UPDATE deployment_jobs
+      SET deployment_result_json = ?, updated_at = ?
+      WHERE id = ? AND kind = 'DEPLOY' AND status = 'DEPLOYING'
+    `, JSON.stringify(deploymentResult), timestamp, id);
+    if (result.changes !== 1) {
+      throw new SfudError('INVALID_JOB_STATE', '실제 배포 결과를 기록할 수 없는 작업 상태입니다.');
+    }
+    this.notify(await this.getRequired(id));
+  }
+
+  public async recordDirectDeploymentArtifacts(input: {
+    id: string;
+    payloadChecksum: string;
+    runDirectory: string;
+    comparisonResult: ComparisonResult;
+    testPlan: ApexTestPlan;
+    dryRunResult?: unknown;
+    deploymentResult: unknown;
+  }): Promise<void> {
+    assertChecksum(input.payloadChecksum);
+    const timestamp = this.now();
+    const result = await this.database.run(`
+      UPDATE deployment_jobs
+      SET payload_checksum = ?, run_directory = ?, is_prepared = 1,
+          comparison_result_json = ?, test_plan_json = ?, dry_run_result_json = ?,
+          deployment_result_json = ?, updated_at = ?
+      WHERE id = ? AND kind = 'DEPLOY' AND dry_run_job_id IS NULL AND status = 'DEPLOYING'
+    `,
+    input.payloadChecksum,
+    input.runDirectory,
+    JSON.stringify(input.comparisonResult),
+    JSON.stringify(input.testPlan),
+    input.dryRunResult === undefined ? null : JSON.stringify(input.dryRunResult),
+    JSON.stringify(input.deploymentResult),
+    timestamp,
+    input.id);
+    if (result.changes !== 1) {
+      throw new SfudError('INVALID_JOB_STATE', '직접 배포 결과를 기록할 수 없는 작업 상태입니다.');
+    }
+    const job = await this.getRequired(input.id);
+    await this.writeAudit(job.createdBy, 'DIRECT_DEPLOYMENT_ARTIFACTS_RECORDED', input.id, {
+      payloadChecksum: input.payloadChecksum,
+      testLevel: input.testPlan.level,
+      tests: input.testPlan.tests,
+      different: input.comparisonResult.summary.different,
+    }, timestamp);
+    this.notify(await this.getRequired(input.id));
   }
 
   public async recoverInterruptedJobs(): Promise<number> {
@@ -369,6 +490,11 @@ export class DeploymentJobRepository {
     return (await this.database.all<DeploymentJobRow[]>(`
       SELECT * FROM deployment_jobs ORDER BY created_at DESC, id DESC LIMIT ?
     `, limit)).map(mapDeploymentJob);
+  }
+
+  private notify(job: DeploymentJob): DeploymentJob {
+    this.onChanged?.(job);
+    return job;
   }
 
   private async writeAudit(
@@ -439,5 +565,11 @@ function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
       : { comparisonResult: JSON.parse(row.comparison_result_json) as ComparisonResult }),
     ...(row.test_plan_json === null ? {} : { testPlan: JSON.parse(row.test_plan_json) as ApexTestPlan }),
     ...(row.dry_run_result_json === null ? {} : { dryRunResult: JSON.parse(row.dry_run_result_json) as unknown }),
+    ...(row.selected_components_json === null
+      ? {}
+      : { selectedComponents: JSON.parse(row.selected_components_json) as SelectedMetadataComponent[] }),
+    ...(row.deployment_result_json === null
+      ? {}
+      : { deploymentResult: JSON.parse(row.deployment_result_json) as unknown }),
   };
 }

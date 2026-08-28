@@ -13,12 +13,16 @@ describe('비교 API', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-comparison-api-'));
     const projectPath = path.join(root, 'project');
     const manifestDirectory = path.join(projectPath, 'manifest');
+    const classesDirectory = path.join(projectPath, 'force-app', 'main', 'default', 'classes');
     await mkdir(manifestDirectory, { recursive: true });
+    await mkdir(classesDirectory, { recursive: true });
     await writeFile(path.join(projectPath, 'sfdx-project.json'), JSON.stringify({
       packageDirectories: [{ path: 'force-app', default: true }],
       sourceApiVersion: '64.0',
     }));
     await writeFile(path.join(manifestDirectory, 'package.xml'), '<Package/>\n');
+    await writeFile(path.join(classesDirectory, 'Local_Test.cls'), '@IsTest private class Local_Test {}\n');
+    await writeFile(path.join(classesDirectory, 'Helper.cls'), 'public class Helper {}\n');
     const sfClient = new ComparisonSfClient();
     const server = await createWebServer({
       host: '127.0.0.1',
@@ -71,6 +75,19 @@ describe('비교 API', () => {
       for (const args of metadataTypeCalls) {
         expect(args).toEqual(expect.arrayContaining(['--api-version', '64.0']));
       }
+      const orgTests = await server.inject({
+        url: '/api/v1/apex-test-classes?sourceId=org%3Aleft', headers: { cookie },
+      });
+      expect(orgTests.statusCode).toBe(200);
+      expect(orgTests.json()).toEqual({ testClasses: ['Account_Test', 'Helper', 'Order_test'] });
+      expect(sfClient.calls).toContainEqual(expect.arrayContaining([
+        'data', 'query', '--use-tooling-api', '--target-org', 'left', '--api-version', '64.0',
+      ]));
+      const localTests = await server.inject({
+        url: `/api/v1/apex-test-classes?sourceId=project%3A${projectId}`, headers: { cookie },
+      });
+      expect(localTests.statusCode).toBe(200);
+      expect(localTests.json()).toEqual({ testClasses: ['Helper', 'Local_Test'] });
       const comparisonPayload = {
         projectId,
         manifest: 'manifest/package.xml',
@@ -163,6 +180,8 @@ describe('비교 API', () => {
     try {
       expect((await server.inject({ method: 'POST', url: '/api/v1/comparisons', payload: {} })).statusCode)
         .toBe(401);
+      expect((await server.inject({ url: '/api/v1/apex-test-classes?sourceId=org%3Aleft' })).statusCode)
+        .toBe(401);
     } finally {
       await server.close();
     }
@@ -189,6 +208,13 @@ class ComparisonSfClient implements SfClient {
           ],
         },
       };
+    }
+    if (args[0] === 'data' && args[1] === 'query') {
+      return { status: 0, result: { records: [
+        { Name: 'Account_Test' },
+        { Name: 'Helper' },
+        { Name: 'Order_test' },
+      ] } };
     }
     if (args[0] === 'project' && args[1] === 'generate' && args[2] === 'manifest') {
       const outputDirectory = flagValue(args, '--output-dir');

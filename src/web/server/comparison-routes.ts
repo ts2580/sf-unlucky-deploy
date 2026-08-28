@@ -19,30 +19,45 @@ interface MetadataTypesQuery {
   sourceIds?: string;
 }
 
+interface ApexTestClassesQuery {
+  sourceId?: string;
+}
+
 export async function registerComparisonRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/v1/workspace', async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
     try {
-      const [orgs, projects] = await Promise.all([
+      const [orgs, projects, uploads] = await Promise.all([
         app.sfudRuntime.workspace.listOrgs(),
         Promise.resolve(app.sfudRuntime.workspace.listProjects()),
+        Promise.resolve(app.sfudRuntime.workspace.listUploadedProjects(session.user.id)),
       ]);
       return reply.send({
         orgs,
         projects,
+        uploads,
         sources: [
           ...orgs.filter((org) => org.connected).map((org) => ({
             id: org.id,
             kind: 'org' as const,
+            location: 'org' as const,
             label: org.alias,
             detail: [org.label, org.edition].filter(Boolean).join(' · '),
           })),
           ...projects.map((project) => ({
             id: `project:${project.id}`,
             kind: 'local' as const,
+            location: 'server' as const,
             label: project.displayName,
-            detail: 'Local DX project',
+            detail: '서버에 명시적으로 등록된 DX 프로젝트',
+          })),
+          ...uploads.map((project) => ({
+            id: `upload:${project.id}`,
+            kind: 'local' as const,
+            location: 'upload' as const,
+            label: project.displayName,
+            detail: '내 단말기에서 임시 업로드 · 마지막 사용 후 4시간',
           })),
         ],
       });
@@ -60,11 +75,26 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     try {
       const sourceIds = (request.query.sourceIds ?? '').split(',').filter((value) => value.length > 0);
       if (sourceIds.length > 2) throw new Error('metadata type 조회 소스는 최대 2개입니다.');
-      const metadataTypes = await app.sfudRuntime.workspace.listMetadataTypes(sourceIds);
+      const metadataTypes = await app.sfudRuntime.workspace.listMetadataTypes(sourceIds, session.user.id);
       return reply.send({ metadataTypes });
     } catch (error) {
       return reply.code(400).send({ error: {
         code: 'METADATA_TYPES_LOAD_FAILED',
+        message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
+      } });
+    }
+  });
+
+  app.get<{ Querystring: ApexTestClassesQuery }>('/api/v1/apex-test-classes', async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply);
+    if (session === undefined) return;
+    try {
+      const sourceId = requiredString(request.query.sourceId, '배포 소스');
+      const testClasses = await app.sfudRuntime.workspace.listApexTestClasses(sourceId, session.user.id);
+      return reply.send({ testClasses });
+    } catch (error) {
+      return reply.code(400).send({ error: {
+        code: 'APEX_TEST_CLASSES_LOAD_FAILED',
         message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
       } });
     }
