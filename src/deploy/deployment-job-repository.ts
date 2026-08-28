@@ -7,6 +7,7 @@ import { runInImmediateTransaction } from '../storage/transaction.js';
 import type { ComparisonResult } from '../metadata/comparator.js';
 import type { ApexTestPlan } from './test-plan.js';
 import type { SelectedMetadataComponent } from './selected-manifest.js';
+import type { SalesforceDeploymentProgress } from './salesforce-deployment.js';
 
 export type DeploymentJobKind = 'DRY_RUN' | 'DEPLOY';
 export type DeploymentScope = 'MANIFEST' | 'ALL';
@@ -45,6 +46,7 @@ export interface DeploymentJob {
   dryRunResult?: unknown;
   selectedComponents?: SelectedMetadataComponent[];
   deploymentResult?: unknown;
+  progress?: SalesforceDeploymentProgress;
 }
 
 export interface CreateDryRunJobInput {
@@ -106,6 +108,7 @@ interface DeploymentJobRow {
   dry_run_result_json: string | null;
   selected_components_json: string | null;
   deployment_result_json: string | null;
+  progress_json: string | null;
 }
 
 const ALLOWED_TRANSITIONS: Record<DeploymentJobStatus, ReadonlySet<DeploymentJobStatus>> = {
@@ -416,6 +419,22 @@ export class DeploymentJobRepository {
     this.notify(await this.getRequired(id));
   }
 
+  public async recordSalesforceProgress(
+    id: string,
+    progress: SalesforceDeploymentProgress,
+  ): Promise<void> {
+    const timestamp = this.now();
+    const result = await this.database.run(`
+      UPDATE deployment_jobs
+      SET progress_json = ?, salesforce_deployment_id = ?, updated_at = ?
+      WHERE id = ? AND status IN ('DRY_RUN_RUNNING', 'DEPLOYING')
+    `, JSON.stringify(progress), progress.deploymentId, timestamp, id);
+    if (result.changes !== 1) {
+      throw new SfudError('INVALID_JOB_STATE', 'Salesforce 배포 진행 상태를 기록할 수 없는 작업 상태입니다.');
+    }
+    this.notify(await this.getRequired(id));
+  }
+
   public async recordDirectDeploymentArtifacts(input: {
     id: string;
     payloadChecksum: string;
@@ -571,5 +590,8 @@ function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
     ...(row.deployment_result_json === null
       ? {}
       : { deploymentResult: JSON.parse(row.deployment_result_json) as unknown }),
+    ...(row.progress_json === null
+      ? {}
+      : { progress: JSON.parse(row.progress_json) as SalesforceDeploymentProgress }),
   };
 }

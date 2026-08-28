@@ -15,10 +15,13 @@ import { renderTerminalReport } from '../reports/terminal.js';
 import { writeComparisonReports, type ReportPaths } from '../reports/writer.js';
 import {
   ProcessSfClient,
-  isAmbiguousSalesforceFailure,
   sanitizeSfOutput,
   type SfClient,
 } from '../salesforce/sf-client.js';
+import {
+  runAsyncSalesforceDeployment,
+  type SalesforceDeploymentProgress,
+} from '../deploy/salesforce-deployment.js';
 import { parseSourceSpec } from '../sources/source-spec.js';
 import { createSnapshot } from '../sources/snapshot.js';
 import { createRunContext, writeRunMetadata } from './run-context.js';
@@ -47,6 +50,7 @@ export interface DeployCommandDependencies {
   sfClient?: SfClient;
   stdout?: (value: string) => void;
   requestWorkspacePath?: string;
+  onDeploymentProgress?: (progress: SalesforceDeploymentProgress) => Promise<void> | void;
 }
 
 export interface DeployCommandResult {
@@ -163,8 +167,11 @@ export async function runDeployCommand(
       : sanitizeSfOutput(await runDeploymentRequest(
         sfClient,
         [...deployArgs, '--dry-run'],
+        targetAlias,
         commandProjectPath,
         options.wait,
+        'DRY_RUN',
+        dependencies.onDeploymentProgress,
       ));
   if (dryRunResult !== undefined) {
     await writeJson(path.join(context.logsDirectory, 'dry-run.json'), dryRunResult);
@@ -181,8 +188,11 @@ export async function runDeployCommand(
       : sanitizeSfOutput(await runDeploymentRequest(
         sfClient,
         deployArgs,
+        targetAlias,
         commandProjectPath,
         options.wait,
+        'DEPLOY',
+        dependencies.onDeploymentProgress,
       ));
     await writeJson(path.join(context.logsDirectory, 'deploy.json'), deployResult);
   }
@@ -221,25 +231,21 @@ function emptyDeploymentResult(checkOnly: boolean): unknown {
 async function runDeploymentRequest(
   sfClient: SfClient,
   args: readonly string[],
+  targetAlias: string,
   cwd: string,
   waitMinutes = 60,
+  phase: 'DRY_RUN' | 'DEPLOY',
+  onProgress?: (progress: SalesforceDeploymentProgress) => Promise<void> | void,
 ): Promise<unknown> {
-  try {
-    return await sfClient.runJson(args, {
-      cwd,
-      timeoutMs: (waitMinutes + 5) * 60 * 1_000,
-    });
-  } catch (error) {
-    if (isAmbiguousSalesforceFailure(error)) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new SfudError(
-        'SF_EXTERNAL_STATE_UNKNOWN',
-        `Salesforce 배포 요청의 최종 상태를 확인할 수 없습니다: ${message}`,
-        { cause: error },
-      );
-    }
-    throw error;
-  }
+  return await runAsyncSalesforceDeployment({
+    sfClient,
+    startArgs: args,
+    targetAlias,
+    cwd,
+    waitMinutes,
+    phase,
+    ...(onProgress === undefined ? {} : { onProgress }),
+  });
 }
 
 function buildDeployArgs(
@@ -256,8 +262,6 @@ function buildDeployArgs(
     targetAlias,
     '--metadata-dir',
     metadataDirectory,
-    '--wait',
-    String(options.wait ?? 60),
     '--test-level',
     testPlan.level,
   ];

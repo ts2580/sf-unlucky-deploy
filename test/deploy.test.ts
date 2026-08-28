@@ -30,9 +30,11 @@ describe('deploy command', () => {
     );
 
     expect(result.executed).toBe(false);
-    const deployCalls = client.calls.filter((call) => call.args.includes('deploy'));
+    const deployCalls = deploymentStartCalls(client.calls);
     expect(deployCalls).toHaveLength(1);
     expect(deployCalls[0]?.args).toContain('--dry-run');
+    expect(deployCalls[0]?.args).toContain('--async');
+    expect(deployCalls[0]?.args).not.toContain('--wait');
     expect(deployCalls[0]?.args).not.toContain('--single-package');
     expect(deployCalls[0]?.args).toEqual(
       expect.arrayContaining(['--test-level', 'RunSpecifiedTests', '--tests', 'Hello_Test']),
@@ -89,7 +91,7 @@ describe('deploy command', () => {
     );
 
     expect(result.executed).toBe(true);
-    const deployCalls = client.calls.filter((call) => call.args.includes('deploy'));
+    const deployCalls = deploymentStartCalls(client.calls);
     expect(deployCalls).toHaveLength(2);
     expect(deployCalls[0]?.args).toContain('--dry-run');
     expect(deployCalls[1]?.args).not.toContain('--dry-run');
@@ -112,7 +114,7 @@ describe('deploy command', () => {
     );
 
     expect(result.comparison.summary.different).toBe(0);
-    expect(client.calls.filter((call) => call.args.includes('deploy'))).toHaveLength(1);
+    expect(deploymentStartCalls(client.calls)).toHaveLength(1);
   });
 
   it('전체 metadata 비교 합집합과 배포 source manifest를 분리한다', async () => {
@@ -158,7 +160,7 @@ describe('deploy command', () => {
     }, { cwd: fixture.projectPath, sfClient: client, stdout: () => undefined });
 
     expect(result.comparison.summary).toMatchObject({ added: 0, removed: 1 });
-    expect(client.calls.filter((call) => call.args.includes('deploy'))).toHaveLength(0);
+    expect(deploymentStartCalls(client.calls)).toHaveLength(0);
     expect(result.dryRunResult).toMatchObject({ result: { checkOnly: true, empty: true } });
   });
 
@@ -180,7 +182,7 @@ describe('deploy command', () => {
       ),
     ).rejects.toMatchObject({ code: 'PAYLOAD_CHANGED' } satisfies Partial<SfudError>);
 
-    expect(client.calls.filter((call) => call.args.includes('deploy'))).toHaveLength(1);
+    expect(deploymentStartCalls(client.calls)).toHaveLength(1);
   });
 
   it('--dry-run과 --execute를 동시에 지정하면 실행 전에 거부한다', async () => {
@@ -221,11 +223,16 @@ class DeployFixtureSfClient implements SfClient {
       await writeSnapshot(flagValue(args, '--output-dir'), 'source');
     } else if (args.includes('retrieve')) {
       await writeSnapshot(flagValue(args, '--target-metadata-dir'), this.targetValue);
-    } else if (args.includes('deploy') && args.includes('--dry-run') && this.mutateAfterDryRun) {
+    } else if (args[0] === 'project' && args[1] === 'deploy' && args[2] === 'start' && args.includes('--dry-run') && this.mutateAfterDryRun) {
       await writeFile(path.join(flagValue(args, '--metadata-dir'), 'classes', 'Hello.cls'), 'changed after dry-run\n');
     }
-
-    return { status: 0, result: { id: '0Af-safe', accessToken: 'must-not-leak' } };
+    if (args[0] === 'project' && args[1] === 'deploy' && args[2] === 'start') {
+      return { status: 0, result: { id: '0Af-safe', status: 'Queued', done: false } };
+    }
+    if (args[0] === 'project' && args[1] === 'deploy' && args[2] === 'report') {
+      return { status: 0, result: { id: '0Af-safe', status: 'Succeeded', done: true, success: true, accessToken: 'must-not-leak' } };
+    }
+    return { status: 0, result: {} };
   }
 }
 
@@ -269,12 +276,15 @@ class DeployablePayloadSfClient implements SfClient {
       );
       return { status: 0 };
     }
-    if (args.includes('deploy')) {
+    if (args[0] === 'project' && args[1] === 'deploy' && args[2] === 'start') {
       this.deployedManifest = await readFile(
         path.join(flagValue(args, '--metadata-dir'), 'package.xml'),
         'utf8',
       );
-      return { status: 0, result: { id: '0Af-source-only' } };
+      return { status: 0, result: { id: '0Af-source-only', status: 'Queued', done: false } };
+    }
+    if (args[0] === 'project' && args[1] === 'deploy' && args[2] === 'report') {
+      return { status: 0, result: { id: '0Af-source-only', status: 'Succeeded', done: true, success: true } };
     }
     throw new Error(`예상하지 못한 sf 명령: ${args.join(' ')}`);
   }
@@ -344,4 +354,8 @@ function flagValue(args: readonly string[], flag: string): string {
     throw new Error(`${flag} argument missing`);
   }
   return value;
+}
+
+function deploymentStartCalls<T extends { args: readonly string[] }>(calls: readonly T[]): T[] {
+  return calls.filter((call) => call.args[0] === 'project' && call.args[1] === 'deploy' && call.args[2] === 'start');
 }

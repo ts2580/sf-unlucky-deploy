@@ -370,6 +370,8 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await page.getByLabel('확인 문구').fill('실제 배포');
   await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
   await expect(page.getByText('Salesforce 실제 배포 중')).toBeVisible();
+  await expect(page.getByLabel('실제 배포 현황')).toContainText(/InProgress · \d+초/u);
+  await expect(page.getByLabel('실제 배포 현황')).toContainText('컴포넌트 1/2');
   await expect(page.getByRole('heading', { name: 'Salesforce 실제 배포 성공' })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByText(/Hello_Test · 코드 커버리지 80.00%/u)).toBeVisible();
   await page.getByRole('combobox', { name: 'Salesforce metadata type' }).fill('CustomObject');
@@ -488,6 +490,14 @@ function dryRunFixture(status: 'QUEUED' | 'DRY_RUN_RUNNING' | 'APPROVAL_PENDING'
     target: { id: 'org:target', kind: 'org', label: 'target' },
     manifest: 'manifest/package.xml', prepared: status === 'APPROVAL_PENDING',
     createdAt: '2026-08-23T06:00:00.000Z',
+    ...(status === 'DRY_RUN_RUNNING' ? {
+      startedAt: new Date(Date.now() - 2_000).toISOString(),
+      progress: {
+        phase: 'DRY_RUN', deploymentId: '0Af-check-only', status: 'InProgress', done: false,
+        numberComponentsDeployed: 1, numberComponentsTotal: 2,
+        numberTestsCompleted: 0, numberTestsTotal: 1, checkedAt: new Date().toISOString(),
+      },
+    } : {}),
     ...(status !== 'APPROVAL_PENDING' ? {} : {
       payloadChecksum: 'b'.repeat(64), salesforceDeploymentId: '0Af-check-only',
       testPlan: { level: 'RunSpecifiedTests', tests: ['Hello_Test'], selection: 'suffix' },
@@ -503,6 +513,14 @@ function deploymentFixture(status: 'QUEUED' | 'DEPLOYING' | 'SUCCEEDED') {
     target: { id: 'org:target', kind: 'org', label: 'target' },
     manifest: 'selected.xml', scope: 'selected', prepared: false,
     createdAt: '2026-08-23T06:01:00.000Z',
+    ...(status === 'DEPLOYING' ? {
+      startedAt: new Date(Date.now() - 2_000).toISOString(),
+      progress: {
+        phase: 'DEPLOY', deploymentId: '0Af-deploy', status: 'InProgress', done: false,
+        numberComponentsDeployed: 1, numberComponentsTotal: 2,
+        numberTestsCompleted: 0, numberTestsTotal: 1, checkedAt: new Date().toISOString(),
+      },
+    } : {}),
     ...(status !== 'SUCCEEDED' ? {} : { salesforceDeploymentId: '0Af-deploy' }),
   };
 }
