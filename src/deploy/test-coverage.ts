@@ -4,6 +4,7 @@ export interface ApexCoverageSummary {
   coveredLocations: number;
   totalLocations: number;
   percentage: number;
+  minimumPercentage: number;
 }
 
 export function requireMinimumApexCoverage(
@@ -13,12 +14,15 @@ export function requireMinimumApexCoverage(
   const entries = findCodeCoverage(deploymentResult);
   let totalLocations = 0;
   let coveredLocations = 0;
+  const percentages: number[] = [];
   for (const entry of entries) {
     const locations = numericField(entry, 'numLocations');
     const uncovered = numericField(entry, 'numLocationsNotCovered');
     if (locations === undefined || uncovered === undefined || locations <= 0) continue;
     totalLocations += locations;
-    coveredLocations += Math.max(0, locations - uncovered);
+    const covered = Math.max(0, locations - uncovered);
+    coveredLocations += covered;
+    percentages.push((covered / locations) * 100);
   }
   if (totalLocations === 0) {
     throw new SfudError(
@@ -27,13 +31,14 @@ export function requireMinimumApexCoverage(
     );
   }
   const percentage = (coveredLocations / totalLocations) * 100;
-  if (percentage < minimumPercentage) {
+  const lowestPercentage = Math.min(...percentages);
+  if (lowestPercentage < minimumPercentage) {
     throw new SfudError(
       'DEPLOY_FAILED',
-      `선택한 Apex 테스트의 코드 커버리지가 ${formatPercentage(percentage)}%로 ${minimumPercentage}% 미만입니다.`,
+      `선택한 Apex 테스트의 클래스별 최저 코드 커버리지가 ${formatPercentage(lowestPercentage)}%로 ${minimumPercentage}% 미만입니다.`,
     );
   }
-  return { coveredLocations, totalLocations, percentage };
+  return { coveredLocations, totalLocations, percentage, minimumPercentage: lowestPercentage };
 }
 
 export function apexCoverageSummary(deploymentResult: unknown): ApexCoverageSummary | undefined {

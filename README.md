@@ -421,8 +421,9 @@ payload와 SHA-256을 고정한다. 성공한 Dry-run 뒤 실제 배포하면 �
 다시 확인한다.
 
 Dry-run 없이 바로 실제 배포할 수도 있다. 테스트 클래스를 선택했다면 서버가
-`RunSpecifiedTests` check-only를 먼저 실행하고 응답의 전체 Apex 라인 커버리지가 75% 이상일 때만
-실제 배포한다. 테스트를 선택하지 않았다면 `NoTestRun`으로 check-only 없이 배포한다. 프로덕션
+`RunSpecifiedTests` check-only를 먼저 실행하고 응답에 보고된 각 Apex 클래스·트리거의 라인
+커버리지가 모두 75% 이상일 때만 실제 배포한다. 테스트를 선택하지 않았다면 `NoTestRun`으로
+check-only 없이 배포한다. 프로덕션
 org처럼 `NoTestRun`을 허용하지 않는 대상은 Salesforce가 거부하며 실패 상태로 기록된다.
 `DEPLOYER` 또는 `ADMIN` 사용자가 대상 org 별칭과 `실제 배포` 확인 문구를 정확히 입력해야 실제
 배포 버튼이 활성화된다.

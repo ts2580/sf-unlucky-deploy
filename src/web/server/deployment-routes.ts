@@ -153,7 +153,7 @@ function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: b
   } : undefined;
   const testCoverage = job.dryRunResult === undefined
     ? undefined
-    : apexCoverageSummary(job.dryRunResult)?.percentage;
+    : apexCoverageSummary(job.dryRunResult)?.minimumPercentage;
   return {
     id: job.id,
     kind: job.kind,
