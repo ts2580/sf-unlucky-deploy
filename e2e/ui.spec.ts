@@ -259,9 +259,12 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
       { name: 'CustomObject', directoryName: 'objects' },
     ],
   } }));
-  await page.route('**/api/v1/apex-test-classes**', async (route) => route.fulfill({ json: {
-    testClasses: ['Hello_Test', 'Order_Test', 'PaymentValidationSpec'],
-  } }));
+  await page.route('**/api/v1/apex-test-classes**', async (route) => {
+    expect(new URL(route.request().url()).searchParams.get('sourceId')).toBe('project:project-1');
+    await route.fulfill({ json: {
+      testClasses: ['Hello_Test', 'Order_Test', 'PaymentValidationSpec'],
+    } });
+  });
   let comparisonPolls = 0;
   await page.route('**/api/v1/comparisons**', async (route) => {
     if (route.request().method() === 'POST') {
@@ -330,6 +333,17 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await login(page, '/deploy');
   await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue('project:project-1');
   await expect(page.getByLabel('TARGET ORG 비교 소스')).toHaveValue('org:target');
+  const directTestInput = page.getByLabel('테스트 클래스 직접 입력');
+  await directTestInput.fill('Hello_Test, pay');
+  const directTestSuggestions = page.getByRole('listbox', { name: 'source 테스트 클래스 검색 결과' });
+  const paymentSuggestion = directTestSuggestions.getByRole('option', { name: 'PaymentValidationSpec' });
+  await expect(paymentSuggestion).toBeVisible();
+  await expect(directTestSuggestions.getByRole('option', { name: 'Hello_Test' })).toHaveCount(0);
+  await directTestInput.press('Tab');
+  await expect(paymentSuggestion).toBeFocused();
+  await paymentSuggestion.press('Enter');
+  await expect(directTestInput).toHaveValue('Hello_Test, PaymentValidationSpec');
+  await directTestInput.clear();
   await page.getByRole('button', { name: /비교 실행/u }).click();
   await expect(page.getByText('메타데이터 비교 중')).toBeVisible();
   await expect(page.getByText('NEW', { exact: true }).first()).toBeVisible({ timeout: 5_000 });

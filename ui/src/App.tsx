@@ -642,6 +642,7 @@ function DeployPage({ user }: { user: ApiUser }) {
   const [apexTestClassQuery, setApexTestClassQuery] = useState('');
   const [apexTestClassesLoading, setApexTestClassesLoading] = useState(false);
   const [apexTestClassesError, setApexTestClassesError] = useState('');
+  const [testInputFocused, setTestInputFocused] = useState(false);
   const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
   const comparisonRequestControllerRef = useRef<AbortController | null>(null);
   const dryRunRequestControllerRef = useRef<AbortController | null>(null);
@@ -729,10 +730,14 @@ function DeployPage({ user }: { user: ApiUser }) {
   }, [sourceId, targetOrgId]);
 
   useEffect(() => {
-    if (!hasApexDeployment || sourceId.length === 0) {
+    if (sourceId.length === 0) {
       setApexTestClasses([]);
       setApexTestClassQuery('');
       setApexTestClassesError('');
+      setApexTestClassesLoading(false);
+      return;
+    }
+    if (!hasApexDeployment && !testInputFocused) {
       setApexTestClassesLoading(false);
       return;
     }
@@ -758,7 +763,7 @@ function DeployPage({ user }: { user: ApiUser }) {
       })
       .finally(() => { if (!controller.signal.aborted) setApexTestClassesLoading(false); });
     return () => controller.abort();
-  }, [hasApexDeployment, sourceId]);
+  }, [hasApexDeployment, sourceId, testInputFocused]);
 
   useEffect(() => {
     const events = new EventSource('/api/v1/workflow/events');
@@ -922,6 +927,16 @@ function DeployPage({ user }: { user: ApiUser }) {
   const normalizedApexTestClassQuery = apexTestClassQuery.trim().toLocaleLowerCase();
   const filteredApexTestClasses = apexTestClasses.filter((testClass) =>
     testClass.toLocaleLowerCase().includes(normalizedApexTestClassQuery));
+  const currentTestToken = tests.match(/[^\s,]*$/u)?.[0] ?? '';
+  const normalizedCurrentTestToken = currentTestToken.toLocaleLowerCase();
+  const directInputSuggestions = normalizedCurrentTestToken.length === 0
+    ? []
+    : apexTestClasses.filter((testClass) =>
+      testClass.toLocaleLowerCase().includes(normalizedCurrentTestToken)
+      && !selectedTestNames.has(testClass)).slice(0, 8);
+  const directInputSearchOpen = testInputFocused
+    && currentTestToken.length > 0
+    && ['auto', 'RunSpecifiedTests'].includes(testLevel);
   const testSelectionValid = testLevel !== 'RunSpecifiedTests' || testNames.length > 0;
   const selectedMetadataType = metadataTypes.find((entry) =>
     entry.name.toLowerCase() === scopeQuery.trim().toLowerCase());
@@ -946,6 +961,11 @@ function DeployPage({ user }: { user: ApiUser }) {
     if (selected && !['auto', 'RunSpecifiedTests'].includes(testLevel)) {
       setTestLevel('RunSpecifiedTests');
     }
+  };
+
+  const selectDirectTestClass = (testClass: string) => {
+    const tokenStart = tests.search(/[^\s,]*$/u);
+    setTests(`${tokenStart < 0 ? '' : tests.slice(0, tokenStart)}${testClass}`);
   };
 
   const setComponentInCart = (component: ComparisonComponent, selected: boolean) => {
@@ -1128,7 +1148,37 @@ function DeployPage({ user }: { user: ApiUser }) {
             <div className="panel-heading"><span className="step-number">03</span><div><h2 id="test-heading">Apex 테스트와 표시 옵션</h2><p>비교가 완료되면 선택한 테스트 조건으로 Dry-run을 실행할 수 있습니다.</p></div><span className="auto-badge">{testLevel.toUpperCase()}</span></div>
             <div className="select-row">
               <label><span>테스트 수준</span><select value={testLevel} onChange={(event) => changeTestLevel(event.target.value)}><option value="auto">Auto · 권장</option><option value="RunSpecifiedTests">RunSpecifiedTests</option><option value="RunLocalTests">RunLocalTests</option><option value="RunAllTestsInOrg">RunAllTestsInOrg</option><option value="RunRelevantTests">RunRelevantTests</option><option value="NoTestRun">NoTestRun</option></select></label>
-              <label><span>테스트 클래스 직접 입력</span><input className="tests-input" value={tests} onChange={(event) => setTests(event.target.value)} placeholder="AccountService_Test, Other_Test" disabled={!['auto', 'RunSpecifiedTests'].includes(testLevel)} /></label>
+              <div
+                className="test-class-input"
+                onFocus={() => setTestInputFocused(true)}
+                onBlur={(event) => {
+                  if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) {
+                    setTestInputFocused(false);
+                  }
+                }}
+              >
+                <label><span>테스트 클래스 직접 입력</span><input
+                  className="tests-input"
+                  value={tests}
+                  onChange={(event) => setTests(event.target.value)}
+                  placeholder="AccountService_Test, Other_Test"
+                  disabled={!['auto', 'RunSpecifiedTests'].includes(testLevel)}
+                  role="combobox"
+                  aria-autocomplete="list"
+                  aria-expanded={directInputSearchOpen}
+                  aria-controls="source-apex-test-suggestions"
+                /></label>
+                {directInputSearchOpen && <div id="source-apex-test-suggestions" className="test-class-suggestions" role="listbox" aria-label="source 테스트 클래스 검색 결과">
+                  <div className="test-class-suggestions-head"><span>{source?.label ?? 'source'}에서 검색</span><small>최대 8개</small></div>
+                  {apexTestClassesLoading
+                    ? <p><Icon name="refresh" />Apex 클래스 검색 중……</p>
+                    : apexTestClassesError
+                      ? <p className="test-class-suggestions-error">{apexTestClassesError}</p>
+                      : directInputSuggestions.length === 0
+                        ? <p>일치하는 source Apex 클래스가 없습니다.</p>
+                        : directInputSuggestions.map((testClass) => <button key={testClass} type="button" role="option" aria-selected="false" onClick={() => selectDirectTestClass(testClass)}><Icon name="code" />{testClass}</button>)}
+                </div>}
+              </div>
             </div>
             {hasApexDeployment
               ? <section className="apex-test-picker" aria-label="Apex 테스트 클래스 선택">
