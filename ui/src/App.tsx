@@ -643,6 +643,7 @@ function DeployPage({ user }: { user: ApiUser }) {
   const [uploading, setUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState('');
   const [apexTestClasses, setApexTestClasses] = useState<string[]>([]);
+  const [apexTestClassQuery, setApexTestClassQuery] = useState('');
   const [apexTestClassesLoading, setApexTestClassesLoading] = useState(false);
   const [apexTestClassesError, setApexTestClassesError] = useState('');
   const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
@@ -734,11 +735,13 @@ function DeployPage({ user }: { user: ApiUser }) {
   useEffect(() => {
     if (!hasApexDeployment || sourceId.length === 0) {
       setApexTestClasses([]);
+      setApexTestClassQuery('');
       setApexTestClassesError('');
       setApexTestClassesLoading(false);
       return;
     }
     const controller = new AbortController();
+    setApexTestClassQuery('');
     setApexTestClassesLoading(true);
     setApexTestClassesError('');
     fetch(`/api/v1/apex-test-classes?sourceId=${encodeURIComponent(sourceId)}`, {
@@ -920,6 +923,9 @@ function DeployPage({ user }: { user: ApiUser }) {
   const deploying = deploymentJob !== null && ['QUEUED', 'DEPLOYING'].includes(deploymentJob.status);
   const testNames = tests.split(/[\s,]+/u).map((value) => value.trim()).filter(Boolean);
   const selectedTestNames = new Set(testNames);
+  const normalizedApexTestClassQuery = apexTestClassQuery.trim().toLocaleLowerCase();
+  const filteredApexTestClasses = apexTestClasses.filter((testClass) =>
+    testClass.toLocaleLowerCase().includes(normalizedApexTestClassQuery));
   const testSelectionValid = testLevel !== 'RunSpecifiedTests' || testNames.length > 0;
   const selectedMetadataType = metadataTypes.find((entry) =>
     entry.name.toLowerCase() === scopeQuery.trim().toLowerCase());
@@ -1167,14 +1173,19 @@ function DeployPage({ user }: { user: ApiUser }) {
             </div>
             {hasApexDeployment
               ? <section className="apex-test-picker" aria-label="Apex 테스트 클래스 선택">
-                <div className="apex-test-picker-head"><div><strong>Apex 테스트 클래스</strong><p>desired source의 <code>*_Test.cls</code> 후보를 복수 선택할 수 있습니다.</p></div><span>{testNames.length}개 선택</span></div>
+                <div className="apex-test-picker-head"><div><strong>Apex 테스트 클래스</strong><p>명명 규칙과 무관하게 desired source의 모든 Apex Class를 표시합니다. 실제 테스트 클래스만 선택하세요.</p></div><span>{testNames.length}개 선택</span></div>
                 {apexTestClassesLoading
                   ? <p className="apex-test-message"><Icon name="refresh" />테스트 클래스 조회 중……</p>
                   : apexTestClassesError
                     ? <p className="apex-test-message apex-test-error">{apexTestClassesError} 직접 입력은 계속 사용할 수 있습니다.</p>
                     : apexTestClasses.length === 0
-                      ? <p className="apex-test-message"><code>*_Test.cls</code> 이름의 후보가 없습니다. 필요한 클래스는 직접 입력하세요.</p>
-                      : <div className="apex-test-options">{apexTestClasses.map((testClass) => <label key={testClass}><input type="checkbox" checked={selectedTestNames.has(testClass)} disabled={dryRunning || deploying || !['auto', 'RunSpecifiedTests'].includes(testLevel)} onChange={(event) => setApexTestSelected(testClass, event.target.checked)} /><span><Icon name="check" />{testClass}</span></label>)}</div>}
+                      ? <p className="apex-test-message">Apex Class 후보가 없습니다. 필요한 클래스는 직접 입력하세요.</p>
+                      : <>
+                        <label className="apex-test-search"><span>테스트 클래스 검색</span><input value={apexTestClassQuery} onChange={(event) => setApexTestClassQuery(event.target.value)} placeholder="클래스 이름 검색" autoComplete="off" /><small>{filteredApexTestClasses.length} / {apexTestClasses.length}개 표시</small></label>
+                        {filteredApexTestClasses.length === 0
+                          ? <p className="apex-test-message">검색 조건과 일치하는 Apex Class가 없습니다.</p>
+                          : <div className="apex-test-options">{filteredApexTestClasses.map((testClass) => <label key={testClass}><input type="checkbox" checked={selectedTestNames.has(testClass)} disabled={dryRunning || deploying || !['auto', 'RunSpecifiedTests'].includes(testLevel)} onChange={(event) => setApexTestSelected(testClass, event.target.checked)} /><span><Icon name="check" />{testClass}</span></label>)}</div>}
+                      </>}
               </section>
               : <p className="apex-test-empty"><Icon name="code" />Apex Class를 배포 대상에 추가하면 테스트 클래스 선택 목록을 불러옵니다.</p>}
             {!testSelectionValid && <p className="apex-test-validation" role="alert">RunSpecifiedTests는 테스트 클래스를 하나 이상 선택하거나 입력해야 합니다.</p>}

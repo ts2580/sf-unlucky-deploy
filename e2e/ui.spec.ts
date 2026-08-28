@@ -250,7 +250,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
     ],
   } }));
   await page.route('**/api/v1/apex-test-classes**', async (route) => route.fulfill({ json: {
-    testClasses: ['Hello_Test', 'Order_Test'],
+    testClasses: ['Hello_Test', 'Order_Test', 'PaymentValidationSpec'],
   } }));
   let comparisonPolls = 0;
   await page.route('**/api/v1/comparisons**', async (route) => {
@@ -311,6 +311,11 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByLabel('배포 대상').getByText('NewClass', { exact: true })).toBeVisible();
   const apexTests = page.getByRole('region', { name: 'Apex 테스트 클래스 선택' });
   await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toBeVisible();
+  await page.getByLabel('테스트 클래스 검색').fill('validation');
+  await expect(apexTests.getByRole('checkbox', { name: 'PaymentValidationSpec' })).toBeVisible();
+  await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toHaveCount(0);
+  await expect(apexTests.getByText('1 / 3개 표시')).toBeVisible();
+  await page.getByLabel('테스트 클래스 검색').fill('');
   await page.getByLabel('테스트 수준').selectOption('RunSpecifiedTests');
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeDisabled();
   await apexTests.getByRole('checkbox', { name: 'Hello_Test' }).check();

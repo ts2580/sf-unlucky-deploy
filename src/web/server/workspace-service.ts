@@ -223,7 +223,7 @@ export class WorkspaceService {
     const records = isRecord(raw) && isRecord(raw.result) && Array.isArray(raw.result.records)
       ? raw.result.records
       : [];
-    return normalizeApexTestClasses(records.flatMap((entry) =>
+    return normalizeApexClassCandidates(records.flatMap((entry) =>
       isRecord(entry) && typeof entry.Name === 'string' ? [entry.Name] : []));
   }
 
@@ -448,7 +448,7 @@ async function listLocalApexTestClasses(projectPath: string): Promise<string[]> 
       if (match?.[1] !== undefined) names.push(match[1]);
     }
   }
-  return normalizeApexTestClasses(names);
+  return normalizeApexClassCandidates(names);
 }
 
 async function readPackageDirectories(projectPath: string, configurationPath: string): Promise<string[]> {
@@ -480,9 +480,9 @@ async function readPackageDirectories(projectPath: string, configurationPath: st
   return resolved;
 }
 
-function normalizeApexTestClasses(values: readonly string[]): string[] {
+function normalizeApexClassCandidates(values: readonly string[]): string[] {
   return [...new Set(values.filter((value) =>
-    /^[A-Za-z_][A-Za-z0-9_]*_Test$/iu.test(value)))].sort((left, right) => left.localeCompare(right));
+    /^[A-Za-z_][A-Za-z0-9_]*$/u.test(value)))].sort((left, right) => left.localeCompare(right));
 }
 
 function normalizeUploadLabel(value: string | undefined): string | undefined {

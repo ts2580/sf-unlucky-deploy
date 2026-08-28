@@ -411,8 +411,8 @@ desired source는 `--project`로 등록한 서버 프로젝트, 브라우저에�
 
 배포 대상에 `ApexClass`가 포함되면 **Apex 테스트 클래스** 선택기가 열린다. 로컬·업로드 DX
 프로젝트는 package directory에서, org 소스는 Tooling API에서 활성 Apex Class를 조회해
-`*_Test.cls` 명명 규칙의 후보를 표시한다. 후보를 여러 개 체크하거나 클래스명을 직접 입력할
-수 있으며, 선택 값은 `auto` 또는 `RunSpecifiedTests`와 함께 Dry-run에 전달된다.
+접미사와 무관하게 모든 클래스 후보를 표시한다. 이름으로 후보를 검색하고 여러 개 체크하거나
+클래스명을 직접 입력할 수 있으며, 선택 값은 `auto` 또는 `RunSpecifiedTests`와 함께 Dry-run에 전달된다.
 `RunSpecifiedTests`는 테스트 클래스가 하나 이상 선택되기 전까지 Dry-run을 시작할 수 없다.
 
 배포 대상의 **Dry-run** 버튼은 선택한 컴포넌트만 포함한 전용 `package.xml`을 만들고 Salesforce

@@ -79,7 +79,7 @@ describe('비교 API', () => {
         url: '/api/v1/apex-test-classes?sourceId=org%3Aleft', headers: { cookie },
       });
       expect(orgTests.statusCode).toBe(200);
-      expect(orgTests.json()).toEqual({ testClasses: ['Account_Test', 'Order_test'] });
+      expect(orgTests.json()).toEqual({ testClasses: ['Account_Test', 'Helper', 'Order_test'] });
       expect(sfClient.calls).toContainEqual(expect.arrayContaining([
         'data', 'query', '--use-tooling-api', '--target-org', 'left', '--api-version', '64.0',
       ]));
@@ -87,7 +87,7 @@ describe('비교 API', () => {
         url: `/api/v1/apex-test-classes?sourceId=project%3A${projectId}`, headers: { cookie },
       });
       expect(localTests.statusCode).toBe(200);
-      expect(localTests.json()).toEqual({ testClasses: ['Local_Test'] });
+      expect(localTests.json()).toEqual({ testClasses: ['Helper', 'Local_Test'] });
       const comparisonPayload = {
         projectId,
         manifest: 'manifest/package.xml',
