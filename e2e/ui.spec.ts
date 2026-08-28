@@ -211,6 +211,9 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
       { name: 'CustomObject', directoryName: 'objects' },
     ],
   } }));
+  await page.route('**/api/v1/apex-test-classes**', async (route) => route.fulfill({ json: {
+    testClasses: ['Hello_Test', 'Order_Test'],
+  } }));
   let comparisonPolls = 0;
   await page.route('**/api/v1/comparisons**', async (route) => {
     if (route.request().method() === 'POST') {
@@ -232,6 +235,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
       scope: 'selected',
       components: [{ type: 'ApexClass', fullName: 'NewClass' }],
       sourceId: 'project:project-1', targetOrgId: 'org:target',
+      testLevel: 'RunSpecifiedTests', tests: ['Hello_Test'],
     });
     expect(route.request().postDataJSON()).not.toHaveProperty('manifest');
     await route.fulfill({ status: 202, json: { job: dryRunFixture('QUEUED') } });
@@ -267,8 +271,16 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await page.getByLabel('NewClass 배포 대상으로 선택').check();
   await expect(page.getByLabel('OldClass 배포 대상으로 선택')).toBeDisabled();
   await expect(page.getByLabel('배포 대상').getByText('NewClass', { exact: true })).toBeVisible();
+  const apexTests = page.getByRole('region', { name: 'Apex 테스트 클래스 선택' });
+  await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toBeVisible();
+  await page.getByLabel('테스트 수준').selectOption('RunSpecifiedTests');
+  await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeDisabled();
+  await apexTests.getByRole('checkbox', { name: 'Hello_Test' }).check();
+  await expect(page.getByLabel('테스트 클래스 직접 입력')).toHaveValue('Hello_Test');
+  await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeEnabled();
   await page.getByRole('combobox', { name: 'Salesforce metadata type' }).fill('CustomObject');
   await expect(page.getByLabel('배포 대상').getByText('NewClass', { exact: true })).toBeVisible();
+  await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toBeChecked();
   await page.getByRole('button', { name: '배포 대상 Dry-run' }).click();
   await expect(page.getByLabel('Dry-run 현황')).toContainText(/대기열|진행 중/u);
   await expect(page.getByText('Salesforce check-only 실행 중')).toBeVisible();

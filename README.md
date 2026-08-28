@@ -403,6 +403,12 @@ desired source는 `--project`로 등록한 서버 프로젝트, 브라우저에�
 체크를 해제하거나 배포 대상의 제거 버튼을 누르면 목록에서 빠진다. target에만 존재하는
 `TARGET ONLY` 항목은 desired source에 payload가 없으므로 선택할 수 없다.
 
+배포 대상에 `ApexClass`가 포함되면 **Apex 테스트 클래스** 선택기가 열린다. 로컬·업로드 DX
+프로젝트는 package directory에서, org 소스는 Tooling API에서 활성 Apex Class를 조회해
+`*_Test.cls` 명명 규칙의 후보를 표시한다. 후보를 여러 개 체크하거나 클래스명을 직접 입력할
+수 있으며, 선택 값은 `auto` 또는 `RunSpecifiedTests`와 함께 Dry-run에 전달된다.
+`RunSpecifiedTests`는 테스트 클래스가 하나 이상 선택되기 전까지 Dry-run을 시작할 수 없다.
+
 배포 대상의 **Dry-run** 버튼은 선택한 컴포넌트만 포함한 전용 `package.xml`을 만들고 Salesforce
 check-only를 실행한다. 성공한 dry-run은 staging payload와 SHA-256을 고정한다. `DEPLOYER` 또는
 `ADMIN` 사용자가 대상 org 별칭과 `실제 배포` 확인 문구를 입력한 경우에만 실제 배포 버튼이

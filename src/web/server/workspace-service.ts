@@ -3,6 +3,7 @@ import { access, chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm } from '
 import os from 'node:os';
 import path from 'node:path';
 
+import { listFiles } from '../../core/files.js';
 import { readProjectApiVersion, withRequestWorkspace } from '../../core/request-workspace.js';
 import type { SfClient } from '../../salesforce/sf-client.js';
 
@@ -49,6 +50,8 @@ export class WorkspaceService {
   private orgRequest: Promise<WorkspaceOrg[]> | undefined;
   private readonly metadataTypeCache = new Map<string, { expiresAt: number; value: WorkspaceMetadataType[] }>();
   private readonly metadataTypeRequests = new Map<string, Promise<WorkspaceMetadataType[]>>();
+  private readonly apexTestClassCache = new Map<string, { expiresAt: number; value: string[] }>();
+  private readonly apexTestClassRequests = new Map<string, Promise<string[]>>();
   private readonly uploadedProjects = new Map<string, UploadedProject>();
   private readonly uploadExpirationTimers = new Map<string, NodeJS.Timeout>();
   private readonly uploadPins = new Map<string, number>();
@@ -187,6 +190,41 @@ export class WorkspaceService {
     const unique = new Map<string, WorkspaceMetadataType>();
     for (const value of values.flat()) unique.set(value.name, value);
     return [...unique.values()].sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  public async listApexTestClasses(sourceId: string, ownerUserId?: string): Promise<string[]> {
+    const source = await this.resolveSource(sourceId, ownerUserId);
+    const cached = this.apexTestClassCache.get(source);
+    if (cached !== undefined && cached.expiresAt > Date.now()) return cached.value;
+    const pending = this.apexTestClassRequests.get(source);
+    if (pending !== undefined) return pending;
+    const request = source.startsWith('org:')
+      ? this.listOrgApexTestClasses(source.slice('org:'.length), this.projectForSources([source]))
+      : listLocalApexTestClasses(source.slice('local:'.length));
+    this.apexTestClassRequests.set(source, request);
+    try {
+      const value = await request;
+      this.apexTestClassCache.set(source, { expiresAt: Date.now() + 60_000, value });
+      return value;
+    } finally {
+      this.apexTestClassRequests.delete(source);
+    }
+  }
+
+  private async listOrgApexTestClasses(alias: string, project: AllowedProject): Promise<string[]> {
+    const apiVersion = await readProjectApiVersion(project.realPath);
+    const raw = await this.sfClient.runJson([
+      'data', 'query',
+      '--query', "SELECT Name FROM ApexClass WHERE NamespacePrefix = null AND Status = 'Active' ORDER BY Name",
+      '--use-tooling-api',
+      '--target-org', alias,
+      '--api-version', apiVersion,
+    ], { cwd: project.realPath, timeoutMs: 60_000 });
+    const records = isRecord(raw) && isRecord(raw.result) && Array.isArray(raw.result.records)
+      ? raw.result.records
+      : [];
+    return normalizeApexTestClasses(records.flatMap((entry) =>
+      isRecord(entry) && typeof entry.Name === 'string' ? [entry.Name] : []));
   }
 
   private async listMetadataTypesForOrg(
@@ -395,6 +433,25 @@ export class WorkspaceService {
 }
 
 async function validatePackageDirectories(projectPath: string, configurationPath: string): Promise<void> {
+  await readPackageDirectories(projectPath, configurationPath);
+}
+
+async function listLocalApexTestClasses(projectPath: string): Promise<string[]> {
+  const packageDirectories = await readPackageDirectories(
+    projectPath,
+    path.join(projectPath, 'sfdx-project.json'),
+  );
+  const names: string[] = [];
+  for (const directory of packageDirectories) {
+    for (const relativePath of await listFiles(directory)) {
+      const match = relativePath.match(/(?:^|\/)classes\/([^/]+)\.cls$/iu);
+      if (match?.[1] !== undefined) names.push(match[1]);
+    }
+  }
+  return normalizeApexTestClasses(names);
+}
+
+async function readPackageDirectories(projectPath: string, configurationPath: string): Promise<string[]> {
   let configuration: unknown;
   try {
     configuration = JSON.parse(await readFile(configurationPath, 'utf8')) as unknown;
@@ -407,6 +464,7 @@ async function validatePackageDirectories(projectPath: string, configurationPath
   const directories = configuration.packageDirectories.flatMap((entry) =>
     isRecord(entry) && typeof entry.path === 'string' && entry.path.length > 0 ? [entry.path] : []);
   if (directories.length === 0) throw new Error('packageDirectories가 없는 Salesforce DX 프로젝트입니다.');
+  const resolved: string[] = [];
   for (const directory of directories) {
     let packageDirectory: string;
     try {
@@ -417,7 +475,14 @@ async function validatePackageDirectories(projectPath: string, configurationPath
     if (packageDirectory !== projectPath && !isInside(projectPath, packageDirectory)) {
       throw new Error('프로젝트 외부 packageDirectory는 사용할 수 없습니다.');
     }
+    resolved.push(packageDirectory);
   }
+  return resolved;
+}
+
+function normalizeApexTestClasses(values: readonly string[]): string[] {
+  return [...new Set(values.filter((value) =>
+    /^[A-Za-z_][A-Za-z0-9_]*_Test$/iu.test(value)))].sort((left, right) => left.localeCompare(right));
 }
 
 function normalizeUploadLabel(value: string | undefined): string | undefined {

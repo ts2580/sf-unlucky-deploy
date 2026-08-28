@@ -628,6 +628,9 @@ function DeployPage({ user }: { user: ApiUser }) {
   const [error, setError] = useState('');
   const [uploading, setUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState('');
+  const [apexTestClasses, setApexTestClasses] = useState<string[]>([]);
+  const [apexTestClassesLoading, setApexTestClassesLoading] = useState(false);
+  const [apexTestClassesError, setApexTestClassesError] = useState('');
   const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
   const comparisonRequestControllerRef = useRef<AbortController | null>(null);
   const dryRunRequestControllerRef = useRef<AbortController | null>(null);
@@ -648,6 +651,7 @@ function DeployPage({ user }: { user: ApiUser }) {
   dryRunJobRef.current = dryRunJob;
   deploymentJobRef.current = deploymentJob;
   const canRun = ['OPERATOR', 'DEPLOYER', 'ADMIN'].includes(user.role);
+  const hasApexDeployment = deploymentCart.some((item) => item.type === 'ApexClass');
 
   useEffect(() => {
     const controller = new AbortController();
@@ -712,6 +716,36 @@ function DeployPage({ user }: { user: ApiUser }) {
   useEffect(() => {
     setDeploymentCart([]);
   }, [sourceId, targetOrgId]);
+
+  useEffect(() => {
+    if (!hasApexDeployment || sourceId.length === 0) {
+      setApexTestClasses([]);
+      setApexTestClassesError('');
+      setApexTestClassesLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setApexTestClassesLoading(true);
+    setApexTestClassesError('');
+    fetch(`/api/v1/apex-test-classes?sourceId=${encodeURIComponent(sourceId)}`, {
+      credentials: 'same-origin', signal: controller.signal,
+    })
+      .then(async (response) => {
+        const data = await response.json() as { testClasses?: string[]; error?: { message: string } };
+        if (!response.ok || data.testClasses === undefined) {
+          throw new Error(data.error?.message ?? 'Apex 테스트 클래스 후보를 불러오지 못했습니다.');
+        }
+        setApexTestClasses(data.testClasses);
+      })
+      .catch((caught: unknown) => {
+        if (caught instanceof DOMException && caught.name === 'AbortError') return;
+        setApexTestClassesError(caught instanceof Error
+          ? caught.message
+          : 'Apex 테스트 클래스 후보를 불러오지 못했습니다.');
+      })
+      .finally(() => { if (!controller.signal.aborted) setApexTestClassesLoading(false); });
+    return () => controller.abort();
+  }, [hasApexDeployment, sourceId]);
 
   useEffect(() => {
     const events = new EventSource('/api/v1/workflow/events');
@@ -871,6 +905,8 @@ function DeployPage({ user }: { user: ApiUser }) {
   const dryRunning = dryRunJob !== null && ['QUEUED', 'DRY_RUN_RUNNING'].includes(dryRunJob.status);
   const deploying = deploymentJob !== null && ['QUEUED', 'DEPLOYING'].includes(deploymentJob.status);
   const testNames = tests.split(/[\s,]+/u).map((value) => value.trim()).filter(Boolean);
+  const selectedTestNames = new Set(testNames);
+  const testSelectionValid = testLevel !== 'RunSpecifiedTests' || testNames.length > 0;
   const selectedMetadataType = metadataTypes.find((entry) =>
     entry.name.toLowerCase() === scopeQuery.trim().toLowerCase());
   const scopeValid = scopeQuery === ALL_METADATA_LABEL || selectedMetadataType !== undefined;
@@ -927,6 +963,21 @@ function DeployPage({ user }: { user: ApiUser }) {
     }
   };
 
+  const changeTestLevel = (nextLevel: string) => {
+    setTestLevel(nextLevel);
+    if (!['auto', 'RunSpecifiedTests'].includes(nextLevel)) setTests('');
+  };
+
+  const setApexTestSelected = (testClass: string, selected: boolean) => {
+    const next = new Set(testNames);
+    if (selected) next.add(testClass);
+    else next.delete(testClass);
+    setTests([...next].sort((left, right) => left.localeCompare(right)).join(', '));
+    if (selected && !['auto', 'RunSpecifiedTests'].includes(testLevel)) {
+      setTestLevel('RunSpecifiedTests');
+    }
+  };
+
   const setComponentInCart = (component: ComparisonComponent, selected: boolean) => {
     if (component.status === 'REMOVED') return;
     setDeploymentCart((current) => {
@@ -979,7 +1030,7 @@ function DeployPage({ user }: { user: ApiUser }) {
   };
 
   const startDryRun = async () => {
-    if (deploymentCart.length === 0) return;
+    if (deploymentCart.length === 0 || !testSelectionValid) return;
     setError('');
     setDryRunJob(null);
     setDeploymentJob(null);
@@ -1097,9 +1148,22 @@ function DeployPage({ user }: { user: ApiUser }) {
           <section className="workflow-panel" aria-labelledby="test-heading">
             <div className="panel-heading"><span className="step-number">03</span><div><h2 id="test-heading">비교 옵션과 Apex 테스트</h2><p>비교가 완료되면 선택한 테스트 조건으로 Dry-run을 실행할 수 있습니다.</p></div><span className="auto-badge">{testLevel.toUpperCase()}</span></div>
             <div className="select-row">
-              <label><span>테스트 수준</span><select value={testLevel} onChange={(event) => setTestLevel(event.target.value)}><option value="auto">Auto · 권장</option><option value="RunSpecifiedTests">RunSpecifiedTests</option><option value="RunLocalTests">RunLocalTests</option><option value="RunAllTestsInOrg">RunAllTestsInOrg</option><option value="RunRelevantTests">RunRelevantTests</option><option value="NoTestRun">NoTestRun</option></select></label>
-              <label><span>테스트 클래스</span><input className="tests-input" value={tests} onChange={(event) => setTests(event.target.value)} placeholder="AccountService_Test, Other_Test" disabled={!['auto', 'RunSpecifiedTests'].includes(testLevel)} /></label>
+              <label><span>테스트 수준</span><select value={testLevel} onChange={(event) => changeTestLevel(event.target.value)}><option value="auto">Auto · 권장</option><option value="RunSpecifiedTests">RunSpecifiedTests</option><option value="RunLocalTests">RunLocalTests</option><option value="RunAllTestsInOrg">RunAllTestsInOrg</option><option value="RunRelevantTests">RunRelevantTests</option><option value="NoTestRun">NoTestRun</option></select></label>
+              <label><span>테스트 클래스 직접 입력</span><input className="tests-input" value={tests} onChange={(event) => setTests(event.target.value)} placeholder="AccountService_Test, Other_Test" disabled={!['auto', 'RunSpecifiedTests'].includes(testLevel)} /></label>
             </div>
+            {hasApexDeployment
+              ? <section className="apex-test-picker" aria-label="Apex 테스트 클래스 선택">
+                <div className="apex-test-picker-head"><div><strong>Apex 테스트 클래스</strong><p>desired source의 <code>*_Test.cls</code> 후보를 복수 선택할 수 있습니다.</p></div><span>{testNames.length}개 선택</span></div>
+                {apexTestClassesLoading
+                  ? <p className="apex-test-message"><Icon name="refresh" />테스트 클래스 조회 중……</p>
+                  : apexTestClassesError
+                    ? <p className="apex-test-message apex-test-error">{apexTestClassesError} 직접 입력은 계속 사용할 수 있습니다.</p>
+                    : apexTestClasses.length === 0
+                      ? <p className="apex-test-message"><code>*_Test.cls</code> 이름의 후보가 없습니다. 필요한 클래스는 직접 입력하세요.</p>
+                      : <div className="apex-test-options">{apexTestClasses.map((testClass) => <label key={testClass}><input type="checkbox" checked={selectedTestNames.has(testClass)} disabled={dryRunning || deploying || !['auto', 'RunSpecifiedTests'].includes(testLevel)} onChange={(event) => setApexTestSelected(testClass, event.target.checked)} /><span><Icon name="check" />{testClass}</span></label>)}</div>}
+              </section>
+              : <p className="apex-test-empty"><Icon name="code" />Apex Class를 배포 대상에 추가하면 테스트 클래스 선택 목록을 불러옵니다.</p>}
+            {!testSelectionValid && <p className="apex-test-validation" role="alert">RunSpecifiedTests는 테스트 클래스를 하나 이상 선택하거나 입력해야 합니다.</p>}
             <div className="option-grid">
               <OptionToggle title="Strict 비교" description="XML 원문 형식 차이까지 탐지" checked={strict} onChange={setStrict} />
               <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} />
@@ -1142,7 +1206,7 @@ function DeployPage({ user }: { user: ApiUser }) {
           <div className="checksum-preview"><span>PAYLOAD SHA-256</span><code>{dryRunJob?.payloadChecksum ?? 'dry-run 완료 후 계산'}</code></div>
           <div className="warning-note"><Icon name="shield" /><p><strong>TARGET ONLY는 선택할 수 없습니다.</strong>desired source에 실제로 있는 컴포넌트만 배포 대상으로 지정할 수 있습니다.</p></div>
           <div className="cart-actions">
-            <button className="button button-primary" type="button" onClick={() => void startDryRun()} disabled={!canRun || dryRunning || deploying || deploymentCart.length === 0}><Icon name={dryRunning ? 'refresh' : 'shield'} />{dryRunning ? 'Dry-run 중……' : '배포 대상 Dry-run'}<Icon name="arrow" /></button>
+            <button className="button button-primary" type="button" onClick={() => void startDryRun()} disabled={!canRun || dryRunning || deploying || deploymentCart.length === 0 || !testSelectionValid}><Icon name={dryRunning ? 'refresh' : 'shield'} />{dryRunning ? 'Dry-run 중……' : '배포 대상 Dry-run'}<Icon name="arrow" /></button>
           </div>
           {dryRunJob?.status === 'APPROVAL_PENDING' && <section className="deployment-approval" aria-label="실제 배포 승인">
             <strong>실제 배포 승인</strong>

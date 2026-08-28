@@ -19,6 +19,10 @@ interface MetadataTypesQuery {
   sourceIds?: string;
 }
 
+interface ApexTestClassesQuery {
+  sourceId?: string;
+}
+
 export async function registerComparisonRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/v1/workspace', async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
@@ -76,6 +80,21 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     } catch (error) {
       return reply.code(400).send({ error: {
         code: 'METADATA_TYPES_LOAD_FAILED',
+        message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
+      } });
+    }
+  });
+
+  app.get<{ Querystring: ApexTestClassesQuery }>('/api/v1/apex-test-classes', async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply);
+    if (session === undefined) return;
+    try {
+      const sourceId = requiredString(request.query.sourceId, '배포 소스');
+      const testClasses = await app.sfudRuntime.workspace.listApexTestClasses(sourceId, session.user.id);
+      return reply.send({ testClasses });
+    } catch (error) {
+      return reply.code(400).send({ error: {
+        code: 'APEX_TEST_CLASSES_LOAD_FAILED',
         message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
       } });
     }
