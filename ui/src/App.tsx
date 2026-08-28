@@ -421,7 +421,7 @@ export function App() {
           </>}
           {currentPage === 'deploy' && <DeployPage user={auth.user} />}
           {currentPage === 'runs' && <RunsPage runs={recentRuns} comparisons={recentComparisons} deployments={recentDeployments} />}
-          {currentPage === 'settings' && <SettingsPage health={health} remoteAccess={remoteAccess} workspace={dashboardWorkspace} />}
+          {currentPage === 'settings' && <SettingsPage user={auth.user} health={health} remoteAccess={remoteAccess} workspace={dashboardWorkspace} />}
           {currentPage === 'admin' && (auth.user.role === 'ADMIN'
             ? <AdminPage currentUser={auth.user} />
             : <AdminAccessDenied />)}
@@ -450,7 +450,6 @@ function ComparePage({ user }: { user: ApiUser }) {
   const [scopeQuery, setScopeQuery] = useState(ALL_METADATA_LABEL);
   const [leftSourceId, setLeftSourceId] = useState('');
   const [rightSourceId, setRightSourceId] = useState('');
-  const [strict, setStrict] = useState(false);
   const [showIdentical, setShowIdentical] = useState(false);
   const [job, setJob] = useState<ComparisonJobResponse | null>(null);
   const [error, setError] = useState('');
@@ -535,7 +534,7 @@ function ComparePage({ user }: { user: ApiUser }) {
           ...(selectedMetadataType === undefined ? {} : { metadataType: selectedMetadataType.name }),
           leftSourceId,
           rightSourceId,
-          strict,
+          strict: false,
           showIdentical,
         }),
       });
@@ -604,10 +603,9 @@ function ComparePage({ user }: { user: ApiUser }) {
       <section className="workflow-panel compact-panel" aria-labelledby="options-heading">
         <div className="panel-heading">
           <span className="step-number">03</span>
-          <div><h2 id="options-heading">비교 옵션</h2><p>리포트에 표시할 차이 수준을 선택합니다.</p></div>
+          <div><h2 id="options-heading">표시 옵션</h2><p>리포트에 동일 항목을 포함할지 선택합니다.</p></div>
         </div>
         <div className="option-grid">
-          <OptionToggle title="Strict 비교" description="XML 원문 형식 차이까지 탐지" checked={strict} onChange={setStrict} />
           <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} />
         </div>
       </section>
@@ -632,7 +630,6 @@ function DeployPage({ user }: { user: ApiUser }) {
   const [targetOrgId, setTargetOrgId] = useState('');
   const [testLevel, setTestLevel] = useState('auto');
   const [tests, setTests] = useState('');
-  const [strict, setStrict] = useState(false);
   const [showIdentical, setShowIdentical] = useState(false);
   const [comparisonJob, setComparisonJob] = useState<ComparisonJobResponse | null>(null);
   const [dryRunJob, setDryRunJob] = useState<DryRunJobResponse | null>(null);
@@ -641,8 +638,6 @@ function DeployPage({ user }: { user: ApiUser }) {
   const [targetConfirmation, setTargetConfirmation] = useState('');
   const [deploymentConfirmation, setDeploymentConfirmation] = useState('');
   const [error, setError] = useState('');
-  const [uploading, setUploading] = useState(false);
-  const [uploadMessage, setUploadMessage] = useState('');
   const [apexTestClasses, setApexTestClasses] = useState<string[]>([]);
   const [apexTestClassQuery, setApexTestClassQuery] = useState('');
   const [apexTestClassesLoading, setApexTestClassesLoading] = useState(false);
@@ -653,9 +648,9 @@ function DeployPage({ user }: { user: ApiUser }) {
   const deploymentRequestControllerRef = useRef<AbortController | null>(null);
   const comparisonJobSelectionKeyRef = useRef<string | null>(null);
   const dryRunJobSelectionKeyRef = useRef<string | null>(null);
-  const workflowSelectionKey = [sourceId, targetOrgId, scopeQuery, strict, showIdentical].join('\u0000');
+  const workflowSelectionKey = [sourceId, targetOrgId, scopeQuery, showIdentical].join('\u0000');
   const cartSelectionKey = deploymentCart.map((item) => item.key).sort().join('\u0001');
-  const dryRunSelectionKey = [sourceId, targetOrgId, cartSelectionKey, testLevel, tests, strict].join('\u0000');
+  const dryRunSelectionKey = [sourceId, targetOrgId, cartSelectionKey, testLevel, tests].join('\u0000');
   const workflowSelectionKeyRef = useRef(workflowSelectionKey);
   const dryRunSelectionKeyRef = useRef(dryRunSelectionKey);
   const comparisonJobRef = useRef(comparisonJob);
@@ -717,7 +712,7 @@ function DeployPage({ user }: { user: ApiUser }) {
     comparisonRequestControllerRef.current?.abort();
     comparisonJobSelectionKeyRef.current = null;
     setComparisonJob(null);
-  }, [sourceId, targetOrgId, scopeQuery, strict, showIdentical]);
+  }, [sourceId, targetOrgId, scopeQuery, showIdentical]);
 
   useEffect(() => {
     dryRunRequestControllerRef.current?.abort();
@@ -938,51 +933,6 @@ function DeployPage({ user }: { user: ApiUser }) {
     && targetConfirmation === targetAlias
     && deploymentConfirmation === '실제 배포';
 
-  const uploadProject = async (event: ChangeEvent<HTMLInputElement>) => {
-    const input = event.currentTarget;
-    const selectedFiles = [...(input.files ?? [])];
-    input.value = '';
-    if (selectedFiles.length === 0) return;
-    const uploadableFiles = selectedFiles.filter((file) => isUploadableProjectFile(
-      file.webkitRelativePath || file.name,
-    ));
-    if (uploadableFiles.length === 0) {
-      setUploadMessage('업로드할 수 있는 프로젝트 파일이 없습니다. .git, node_modules와 비밀키 파일은 제외됩니다.');
-      return;
-    }
-    setUploading(true);
-    setUploadMessage('');
-    try {
-      const form = new FormData();
-      const firstPath = uploadableFiles[0]!.webkitRelativePath;
-      form.append('label', firstPath.length > 0 ? firstPath.split('/')[0]! : '업로드 프로젝트');
-      for (const file of uploadableFiles) {
-        form.append('files', file, file.webkitRelativePath || file.name);
-      }
-      const response = await fetch('/api/v1/uploads/projects', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'x-sfud-csrf': readCookie('sfud_csrf') ?? '' },
-        body: form,
-      });
-      const data = await response.json() as { source?: WorkspaceSource; error?: { message: string } };
-      if (!response.ok || data.source === undefined) {
-        throw new Error(data.error?.message ?? '프로젝트를 업로드하지 못했습니다.');
-      }
-      setWorkspace((current) => current === null ? current : {
-        ...current,
-        sources: [...current.sources.filter((entry) => entry.id !== data.source!.id), data.source!],
-      });
-      setSourceId(data.source.id);
-      const skipped = selectedFiles.length - uploadableFiles.length;
-      setUploadMessage(`${data.source.label} 업로드 완료${skipped > 0 ? ` · 제외된 파일 ${skipped}개` : ''}`);
-    } catch (caught) {
-      setUploadMessage(caught instanceof Error ? caught.message : '프로젝트를 업로드하지 못했습니다.');
-    } finally {
-      setUploading(false);
-    }
-  };
-
   const changeTestLevel = (nextLevel: string) => {
     setTestLevel(nextLevel);
     if (!['auto', 'RunSpecifiedTests'].includes(nextLevel)) setTests('');
@@ -1027,7 +977,7 @@ function DeployPage({ user }: { user: ApiUser }) {
           ...(selectedMetadataType === undefined ? {} : { metadataType: selectedMetadataType.name }),
           leftSourceId: targetOrgId,
           rightSourceId: sourceId,
-          strict,
+          strict: false,
           showIdentical,
         }),
       });
@@ -1068,7 +1018,7 @@ function DeployPage({ user }: { user: ApiUser }) {
         body: JSON.stringify({
           scope: 'selected',
           components: deploymentCart.map(({ type, fullName }) => ({ type, fullName })),
-          sourceId, targetOrgId, testLevel, tests: testNames, waitMinutes: 60, strict,
+          sourceId, targetOrgId, testLevel, tests: testNames, waitMinutes: 60, strict: false,
         }),
       });
       const data = await response.json() as { job?: DryRunJobResponse; error?: { message: string } };
@@ -1121,7 +1071,7 @@ function DeployPage({ user }: { user: ApiUser }) {
             targetOrgId,
             tests: testNames,
             waitMinutes: 60,
-            strict,
+            strict: false,
             targetConfirmation,
             confirmation: deploymentConfirmation,
           }),
@@ -1155,19 +1105,9 @@ function DeployPage({ user }: { user: ApiUser }) {
               <WorkspaceSourceSelect side="TARGET ORG" value={targetOrgId} sources={(workspace?.sources ?? []).filter((entry) => entry.kind === 'org')} onChange={setTargetOrgId} tone="blue" />
             </div>
             <div className="project-source-actions">
-              <div><strong>프로젝트 소스가 어디에 있나요?</strong><p><b>서버 프로젝트</b>는 시작할 때 <code>--project</code>로 등록하고, <b>내 단말기 프로젝트</b>는 여기서 임시 업로드합니다.</p></div>
-              <label className={`small-button upload-button${uploading ? ' upload-button-busy' : ''}`}>
-                <Icon name={uploading ? 'refresh' : 'plus'} />{uploading ? '업로드 중……' : '내 프로젝트 업로드'}
-                <input
-                  type="file"
-                  multiple
-                  disabled={!canRun || uploading || workspace === null}
-                  onChange={(event) => void uploadProject(event)}
-                  {...{ webkitdirectory: '' }}
-                />
-              </label>
+              <div><strong>새 프로젝트 소스가 필요한가요?</strong><p>서버 프로젝트 등록과 내 단말기 DX 프로젝트 업로드는 <b>설정</b>에서 관리합니다.</p></div>
+              <a className="small-button" href="/settings"><Icon name="settings" />프로젝트 설정</a>
             </div>
-            {uploadMessage && <p className="upload-message" role="status">{uploadMessage}</p>}
           </section>
 
           <section className="workflow-panel" aria-labelledby="deploy-scope-heading">
@@ -1185,7 +1125,7 @@ function DeployPage({ user }: { user: ApiUser }) {
           </section>
 
           <section className="workflow-panel" aria-labelledby="test-heading">
-            <div className="panel-heading"><span className="step-number">03</span><div><h2 id="test-heading">비교 옵션과 Apex 테스트</h2><p>비교가 완료되면 선택한 테스트 조건으로 Dry-run을 실행할 수 있습니다.</p></div><span className="auto-badge">{testLevel.toUpperCase()}</span></div>
+            <div className="panel-heading"><span className="step-number">03</span><div><h2 id="test-heading">Apex 테스트와 표시 옵션</h2><p>비교가 완료되면 선택한 테스트 조건으로 Dry-run을 실행할 수 있습니다.</p></div><span className="auto-badge">{testLevel.toUpperCase()}</span></div>
             <div className="select-row">
               <label><span>테스트 수준</span><select value={testLevel} onChange={(event) => changeTestLevel(event.target.value)}><option value="auto">Auto · 권장</option><option value="RunSpecifiedTests">RunSpecifiedTests</option><option value="RunLocalTests">RunLocalTests</option><option value="RunAllTestsInOrg">RunAllTestsInOrg</option><option value="RunRelevantTests">RunRelevantTests</option><option value="NoTestRun">NoTestRun</option></select></label>
               <label><span>테스트 클래스 직접 입력</span><input className="tests-input" value={tests} onChange={(event) => setTests(event.target.value)} placeholder="AccountService_Test, Other_Test" disabled={!['auto', 'RunSpecifiedTests'].includes(testLevel)} /></label>
@@ -1209,7 +1149,6 @@ function DeployPage({ user }: { user: ApiUser }) {
               : <p className="apex-test-empty"><Icon name="code" />Apex Class를 배포 대상에 추가하면 테스트 클래스 선택 목록을 불러옵니다.</p>}
             {!testSelectionValid && <p className="apex-test-validation" role="alert">RunSpecifiedTests는 테스트 클래스를 하나 이상 선택하거나 입력해야 합니다.</p>}
             <div className="option-grid">
-              <OptionToggle title="Strict 비교" description="XML 원문 형식 차이까지 탐지" checked={strict} onChange={setStrict} />
               <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} />
             </div>
             <div className="comparison-action">
@@ -1357,14 +1296,78 @@ function RunsPage({ runs, comparisons, deployments }: { runs: DashboardRun[]; co
   );
 }
 
-function SettingsPage({ health, remoteAccess, workspace }: { health: HealthResponse | null; remoteAccess: boolean; workspace: WorkspaceResponse | null }) {
+function SettingsPage({
+  user,
+  health,
+  remoteAccess,
+  workspace: initialWorkspace,
+}: {
+  user: ApiUser;
+  health: HealthResponse | null;
+  remoteAccess: boolean;
+  workspace: WorkspaceResponse | null;
+}) {
+  const [workspace, setWorkspace] = useState(initialWorkspace);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMessage, setUploadMessage] = useState('');
+  const canUpload = ['OPERATOR', 'DEPLOYER', 'ADMIN'].includes(user.role);
   const orgs = workspace?.sources.filter((source) => source.kind === 'org') ?? [];
+  const uploadedSources = workspace?.sources.filter((source) => source.location === 'upload') ?? [];
+
+  useEffect(() => {
+    setWorkspace(initialWorkspace);
+  }, [initialWorkspace]);
+
+  const uploadProject = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const selectedFiles = [...(input.files ?? [])];
+    input.value = '';
+    if (selectedFiles.length === 0) return;
+    const uploadableFiles = selectedFiles.filter((file) => isUploadableProjectFile(
+      file.webkitRelativePath || file.name,
+    ));
+    if (uploadableFiles.length === 0) {
+      setUploadMessage('업로드할 수 있는 프로젝트 파일이 없습니다. .git, node_modules와 비밀키 파일은 제외됩니다.');
+      return;
+    }
+    setUploading(true);
+    setUploadMessage('');
+    try {
+      const form = new FormData();
+      const firstPath = uploadableFiles[0]!.webkitRelativePath;
+      form.append('label', firstPath.length > 0 ? firstPath.split('/')[0]! : '업로드 프로젝트');
+      for (const file of uploadableFiles) {
+        form.append('files', file, file.webkitRelativePath || file.name);
+      }
+      const response = await fetch('/api/v1/uploads/projects', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'x-sfud-csrf': readCookie('sfud_csrf') ?? '' },
+        body: form,
+      });
+      const data = await response.json() as { source?: WorkspaceSource; error?: { message: string } };
+      if (!response.ok || data.source === undefined) {
+        throw new Error(data.error?.message ?? '프로젝트를 업로드하지 못했습니다.');
+      }
+      setWorkspace((current) => current === null ? current : {
+        ...current,
+        sources: [...current.sources.filter((entry) => entry.id !== data.source!.id), data.source!],
+      });
+      const skipped = selectedFiles.length - uploadableFiles.length;
+      setUploadMessage(`${data.source.label} 업로드 완료${skipped > 0 ? ` · 제외된 파일 ${skipped}개` : ''}`);
+    } catch (caught) {
+      setUploadMessage(caught instanceof Error ? caught.message : '프로젝트를 업로드하지 못했습니다.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
   return (
     <div className="page-stack">
       <PageIntro
         kicker="SERVER CONFIGURATION"
-        title="연결과 서버 프로젝트를 확인합니다."
-        description="Salesforce 인증은 sf CLI에서 관리하며 access token과 auth URL은 UI에 저장하지 않습니다."
+        title="연결과 프로젝트 소스를 관리합니다."
+        description="Salesforce 인증은 sf CLI에서 관리하고, 내 단말기의 DX 프로젝트는 사용자별 임시 소스로 업로드합니다."
       />
       <div className="settings-grid">
         <section className="workflow-panel" aria-labelledby="server-heading">
@@ -1390,6 +1393,30 @@ function SettingsPage({ health, remoteAccess, workspace }: { health: HealthRespo
             : workspace.projects.length === 0
               ? <p className="empty-runs">등록된 서버 프로젝트가 없습니다. 서버 시작 시 <code>--project</code>를 지정하세요.</p>
               : workspace.projects.map((project) => <div className="project-row" key={project.id}><span className="project-logo"><Icon name="code" /></span><div><strong>{project.displayName}</strong><code>Manifest {project.manifests.length}개</code></div><span className="tag tag-green">SERVER</span><span aria-hidden="true"><Icon name="chevron" /></span></div>)}
+        </section>
+        <section className="workflow-panel settings-wide" aria-labelledby="upload-project-heading">
+          <div className="panel-heading">
+            <span className="card-icon icon-blue"><Icon name="plus" /></span>
+            <div><h2 id="upload-project-heading">내 단말기 프로젝트</h2><p>Salesforce DX 폴더를 현재 사용자만 쓸 수 있는 임시 소스로 업로드합니다.</p></div>
+            <label className={`small-button upload-button${uploading ? ' upload-button-busy' : ''}`}>
+              <Icon name={uploading ? 'refresh' : 'plus'} />{uploading ? '업로드 중……' : 'DX 프로젝트 업로드'}
+              <input
+                type="file"
+                multiple
+                disabled={!canUpload || uploading || workspace === null}
+                onChange={(event) => void uploadProject(event)}
+                {...{ webkitdirectory: '' }}
+              />
+            </label>
+          </div>
+          <div className="upload-policy"><Icon name="shield" /><p><strong>사용자별 임시 저장</strong>마지막 사용 후 4시간 동안 유지하며, <code>.git</code>, <code>node_modules</code>, 비밀키 파일은 업로드에서 제외합니다.</p></div>
+          {uploadMessage && <p className="upload-message" role="status">{uploadMessage}</p>}
+          {!canUpload && <p className="upload-message">VIEWER 역할은 프로젝트를 업로드할 수 없습니다.</p>}
+          {workspace === null
+            ? <p className="empty-runs">업로드 프로젝트를 확인 중입니다.</p>
+            : uploadedSources.length === 0
+              ? <p className="empty-runs">업로드된 프로젝트가 없습니다.</p>
+              : <div className="uploaded-project-list">{uploadedSources.map((source) => <div className="project-row" key={source.id}><span className="project-logo project-logo-upload"><Icon name="folder" /></span><div><strong>{source.label}</strong><code>{source.detail}</code></div><span className="tag tag-blue">TEMPORARY</span><a href="/deploy" aria-label={`${source.label} 배포 화면에서 사용`}><Icon name="arrow" /></a></div>)}</div>}
         </section>
       </div>
     </div>

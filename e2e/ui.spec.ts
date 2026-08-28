@@ -69,7 +69,7 @@ test('메뉴마다 독립 URL과 화면을 제공한다', async ({ page }) => {
 
   await page.getByRole('link', { name: '설정', exact: true }).click();
   await expect(page).toHaveURL(/\/settings$/u);
-  await expect(page.getByRole('heading', { name: '연결과 서버 프로젝트를 확인합니다.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '연결과 프로젝트 소스를 관리합니다.' })).toBeVisible();
 });
 
 test('ADMIN이 사용자를 생성하고 역할과 활성 상태를 관리한다', async ({ page }) => {
@@ -108,7 +108,7 @@ test('ADMIN이 사용자를 생성하고 역할과 활성 상태를 관리한다
   await expect(page.getByRole('link', { name: '사용자 관리', exact: true })).toHaveCount(0);
 });
 
-test('내 단말기의 DX 프로젝트를 임시 소스로 업로드한다', async ({ page }, testInfo) => {
+test('설정에서 내 단말기의 DX 프로젝트를 임시 소스로 업로드한다', async ({ page }, testInfo) => {
   const projectPath = testInfo.outputPath('uploaded-project');
   await mkdir(projectPath, { recursive: true });
   await writeFile(path.join(projectPath, 'sfdx-project.json'), JSON.stringify({
@@ -118,15 +118,24 @@ test('내 단말기의 DX 프로젝트를 임시 소스로 업로드한다', asy
   await page.route('**/api/v1/workspace', async (route) => route.fulfill({ json: {
     orgs: [], projects: [], uploads: [], sources: [],
   } }));
-  await login(page, '/deploy');
-  const uploadInput = page.locator('.upload-button input[type="file"]');
+  await login(page, '/settings');
+  await expect(page.getByRole('heading', { name: '내 단말기 프로젝트' })).toBeVisible();
+  const uploadInput = page.getByRole('region', { name: '내 단말기 프로젝트' }).locator('.upload-button input[type="file"]');
   await expect(uploadInput).toBeEnabled();
   await uploadInput.setInputFiles(projectPath);
 
   await expect(page.getByRole('status')).toContainText('uploaded-project 업로드 완료');
-  await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue(/^upload:/u);
+  await expect(page.getByRole('region', { name: '내 단말기 프로젝트' }).getByText('uploaded-project', { exact: true })).toBeVisible();
   await expect(page.getByText('내 단말기에서 임시 업로드 · 마지막 사용 후 4시간', { exact: true }))
     .toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(
+    () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+  )).toBe(false);
+  await expect(page.getByText('DX 프로젝트 업로드', { exact: true })).toBeVisible();
+  await page.getByRole('link', { name: '비교 및 배포', exact: true }).click();
+  await expect(page.locator('.upload-button input[type="file"]')).toHaveCount(0);
+  await expect(page.getByRole('link', { name: '프로젝트 설정' })).toBeVisible();
 });
 
 test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', async ({ page }) => {
@@ -177,7 +186,8 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(page.locator('#salesforce-deploy-metadata-types option')).toHaveCount(4);
   await scopeCombobox.fill('ApexClass');
   await expect(page.getByText('3개 metadata type 검색 가능 · source와 target의 합집합')).toBeVisible();
-  const comparisonOptions = page.getByRole('region', { name: '비교 옵션과 Apex 테스트' });
+  const comparisonOptions = page.getByRole('region', { name: 'Apex 테스트와 표시 옵션' });
+  await expect(comparisonOptions.getByText('Strict 비교')).toHaveCount(0);
   await expect(comparisonOptions.getByRole('button', { name: /비교 실행$/u })).toBeVisible();
   await expect(page.getByRole('complementary', { name: '배포 대상' }).getByRole('button', { name: /비교 실행/u })).toHaveCount(0);
   const workflowStatus = page.getByRole('region', { name: '실행 현황' });
