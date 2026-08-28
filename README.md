@@ -384,6 +384,12 @@ node dist/cli.js ui --no-open
 
 최초 관리자가 생성되면 해당 코드는 더 이상 사용할 수 없다. 비밀번호는 `scrypt`로 해시하고 세션·CSRF 토큰은 SHA-256 해시만 SQLite에 저장한다. 세션 쿠키는 `HttpOnly`, `SameSite=Strict`이며 HTTPS reverse proxy에서는 `Secure` 속성도 적용된다. Nginx 등 reverse proxy는 원래 `Host`와 `X-Forwarded-Proto` 헤더를 전달해야 한다.
 
+`ADMIN` 계정에는 **사용자 관리** 메뉴가 표시된다. 이 화면에서 초기 비밀번호와 함께 사용자를
+생성하고 `VIEWER`, `OPERATOR`, `DEPLOYER`, `ADMIN` 역할을 지정하거나 계정을 비활성화·재활성화할
+수 있다. 비활성화 시 기존 세션도 즉시 폐기된다. 자기 역할 변경, 자기 계정 비활성화와 마지막
+활성 `ADMIN` 제거는 서버에서 차단하며 생성·역할 변경·활성 상태 변경은 모두 감사 로그에 남긴다.
+사용자 목록과 변경 API인 `/api/v1/admin/users`도 `ADMIN` 세션 및 상태 변경 시 CSRF 검증을 요구한다.
+
 ```nginx
 proxy_set_header Host $host;
 proxy_set_header X-Forwarded-Proto $scheme;

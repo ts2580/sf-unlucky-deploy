@@ -5,6 +5,8 @@ import { expect, test, type Page } from '@playwright/test';
 
 const email = 'e2e-admin@example.com';
 const password = 'e2e correct horse battery staple';
+const operatorEmail = 'e2e-operator@example.com';
+const operatorPassword = 'e2e operator initial password';
 
 test('일회용 코드로 최초 관리자를 생성한다', async ({ page }) => {
   await page.goto('http://127.0.0.1:27546');
@@ -68,6 +70,42 @@ test('메뉴마다 독립 URL과 화면을 제공한다', async ({ page }) => {
   await page.getByRole('link', { name: '설정', exact: true }).click();
   await expect(page).toHaveURL(/\/settings$/u);
   await expect(page.getByRole('heading', { name: '연결과 서버 프로젝트를 확인합니다.' })).toBeVisible();
+});
+
+test('ADMIN이 사용자를 생성하고 역할과 활성 상태를 관리한다', async ({ page }) => {
+  await login(page, '/admin');
+  await expect(page.getByRole('link', { name: '사용자 관리', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('heading', { name: '사용자와 배포 권한을 관리합니다.' })).toBeVisible();
+  const createPanel = page.getByRole('region', { name: '사용자 생성' });
+  await createPanel.getByLabel('표시 이름').fill('E2E 운영자');
+  await createPanel.getByLabel('이메일').fill(operatorEmail);
+  await createPanel.getByLabel('역할').selectOption('OPERATOR');
+  await createPanel.getByLabel('초기 비밀번호').fill(operatorPassword);
+  await createPanel.getByRole('button', { name: '사용자 생성' }).click();
+  await expect(page.getByRole('status')).toContainText('E2E 운영자 계정을 생성했습니다.');
+
+  const userRow = page.locator('.admin-user-row', { hasText: operatorEmail });
+  await expect(userRow).toContainText('OPERATOR');
+  await userRow.getByRole('combobox', { name: 'E2E 운영자 역할' }).selectOption('DEPLOYER');
+  await expect(page.getByRole('status')).toContainText('사용자 설정을 변경했습니다.');
+  await expect(userRow.getByRole('combobox', { name: 'E2E 운영자 역할' })).toHaveValue('DEPLOYER');
+  await userRow.getByRole('button', { name: '비활성화' }).click();
+  await expect(userRow).toContainText('비활성');
+  await userRow.getByRole('button', { name: '활성화' }).click();
+  await expect(userRow).toContainText('활성');
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(
+    () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+  )).toBe(false);
+
+  await page.getByRole('button', { name: '로그아웃' }).click();
+  await expect(page.getByRole('heading', { name: '다시 오셨군요.' })).toBeVisible();
+  await page.getByLabel('이메일').fill(operatorEmail);
+  await page.getByLabel('비밀번호').fill(operatorPassword);
+  await page.getByRole('button', { name: '로그인' }).click();
+  await expect(page.getByRole('heading', { name: 'ADMIN 권한이 필요합니다.' })).toBeVisible();
+  await expect(page.getByRole('link', { name: '사용자 관리', exact: true })).toHaveCount(0);
 });
 
 test('내 단말기의 DX 프로젝트를 임시 소스로 업로드한다', async ({ page }, testInfo) => {

@@ -11,6 +11,7 @@ import { resolveDatabasePath } from '../../storage/sqlite-store.js';
 import type { HealthResponse } from '../shared/api.js';
 import { createWebRuntime, type WebRuntime } from './runtime.js';
 import { registerAuthRoutes } from './auth-routes.js';
+import { registerAdminRoutes } from './admin-routes.js';
 import { registerComparisonRoutes } from './comparison-routes.js';
 import { registerDeploymentRoutes } from './deployment-routes.js';
 import { registerProjectUploadRoutes } from './project-upload-routes.js';
@@ -81,6 +82,7 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
   }));
 
   await registerAuthRoutes(app);
+  await registerAdminRoutes(app);
   await registerProjectUploadRoutes(app);
   await registerComparisonRoutes(app);
   await registerDeploymentRoutes(app);
