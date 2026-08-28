@@ -11,6 +11,7 @@ import { ComparisonJobRepository } from '../../compare/comparison-job-repository
 import { ComparisonService } from '../../compare/comparison-service.js';
 import { WorkspaceService } from './workspace-service.js';
 import { DryRunService } from '../../deploy/dry-run-service.js';
+import { DeploymentService } from '../../deploy/deployment-service.js';
 
 export interface WebRuntime {
   store: SqliteStore;
@@ -24,6 +25,7 @@ export interface WebRuntime {
   comparisonQueue: SingleJobQueue;
   comparisons: ComparisonService;
   dryRuns: DryRunService;
+  deployments: DeploymentService;
   recoveredJobCount: number;
   recoveredComparisonCount: number;
 }
@@ -78,6 +80,12 @@ export async function createWebRuntime(
       workspace,
       sfClient,
       runsDirectory,
+    ),
+    deployments: new DeploymentService(
+      deploymentJobs,
+      deploymentCoordinator,
+      workspace,
+      sfClient,
     ),
     recoveredJobCount,
     recoveredComparisonCount,

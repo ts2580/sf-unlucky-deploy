@@ -7,15 +7,23 @@ import { requireAuthenticatedSession } from './auth-routes.js';
 
 interface CreateDryRunBody {
   projectId?: string;
-  scope?: 'manifest' | 'all';
+  scope?: 'manifest' | 'all' | 'selected';
   metadataType?: string;
   manifest?: string;
+  components?: unknown;
   sourceId?: string;
   targetOrgId?: string;
   testLevel?: RequestedTestLevel;
   tests?: unknown;
   waitMinutes?: number;
   strict?: boolean;
+}
+
+interface ExecuteDeploymentBody {
+  dryRunJobId?: string;
+  payloadChecksum?: string;
+  targetAlias?: string;
+  confirmation?: string;
 }
 
 export async function registerDeploymentRoutes(app: FastifyInstance): Promise<void> {
@@ -33,6 +41,9 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
         ...(request.body?.metadataType === undefined ? {} : {
           metadataType: requiredMetadataType(request.body.metadataType),
         }),
+        ...(request.body?.components === undefined ? {} : {
+          components: selectedComponents(request.body.components),
+        }),
         sourceId: requiredString(request.body?.sourceId, '배포 소스'),
         targetOrgId: requiredString(request.body?.targetOrgId, '대상 org'),
         testLevel: request.body?.testLevel ?? 'auto',
@@ -45,6 +56,29 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
     } catch (error) {
       return reply.code(400).send({ error: {
         code: 'INVALID_DRY_RUN_REQUEST',
+        message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
+      } });
+    }
+  });
+
+  app.post<{ Body: ExecuteDeploymentBody }>('/api/v1/deployments/execute', async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply, {
+      csrf: true,
+      roles: ['DEPLOYER', 'ADMIN'],
+    });
+    if (session === undefined) return;
+    try {
+      const job = await app.sfudRuntime.deployments.approveAndExecute({
+        dryRunJobId: requiredString(request.body?.dryRunJobId, 'dry-run 작업'),
+        payloadChecksum: requiredString(request.body?.payloadChecksum, 'payload checksum'),
+        targetAlias: requiredString(request.body?.targetAlias, '대상 org 별칭'),
+        confirmation: requiredString(request.body?.confirmation, '실제 배포 확인 문구'),
+        approvedBy: session.user.id,
+      });
+      return reply.code(202).send({ job: publicJob(app, job, false) });
+    } catch (error) {
+      return reply.code(400).send({ error: {
+        code: 'DEPLOYMENT_APPROVAL_DENIED',
         message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
       } });
     }
@@ -88,8 +122,9 @@ function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: b
         job.source.startsWith('local:') ? job.source.slice('local:'.length) : process.cwd(),
         job.manifestPath,
       ),
-    scope: job.scope === 'ALL' ? 'all' : 'manifest',
+    scope: job.scope === 'ALL' ? 'all' : job.selectedComponents === undefined ? 'manifest' : 'selected',
     ...(job.metadataType === undefined ? {} : { metadataType: job.metadataType }),
+    ...(job.selectedComponents === undefined ? {} : { components: job.selectedComponents }),
     prepared: job.prepared,
     ...(job.prepared ? { payloadChecksum: job.payloadChecksum } : {}),
     ...(job.salesforceDeploymentId === undefined ? {} : { salesforceDeploymentId: job.salesforceDeploymentId }),
@@ -97,6 +132,7 @@ function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: b
     ...(job.comparisonResult === undefined ? {} : { comparisonSummary: job.comparisonResult.summary }),
     ...(comparison === undefined ? {} : { comparison }),
     ...(includeArtifacts && job.dryRunResult !== undefined ? { dryRunResult: job.dryRunResult } : {}),
+    ...(includeArtifacts && job.deploymentResult !== undefined ? { deploymentResult: job.deploymentResult } : {}),
     ...(job.errorCode === undefined ? {} : { errorCode: job.errorCode }),
     ...(job.errorMessage === undefined ? {} : { errorMessage: job.errorMessage }),
     createdAt: job.createdAt,
@@ -124,4 +160,21 @@ function requiredMetadataType(value: unknown): string {
     throw new Error('Salesforce metadata type이 올바르지 않습니다.');
   }
   return value;
+}
+
+function selectedComponents(value: unknown): Array<{ type: string; fullName: string }> {
+  if (!Array.isArray(value)) throw new Error('배포 장바구니 항목은 배열이어야 합니다.');
+  return value.map((entry) => {
+    if (
+      typeof entry !== 'object'
+      || entry === null
+      || !('type' in entry)
+      || !('fullName' in entry)
+      || typeof entry.type !== 'string'
+      || typeof entry.fullName !== 'string'
+    ) {
+      throw new Error('배포 장바구니 항목 형식이 올바르지 않습니다.');
+    }
+    return { type: entry.type, fullName: entry.fullName };
+  });
 }

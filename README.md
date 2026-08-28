@@ -383,6 +383,16 @@ proxy_set_header X-Forwarded-Proto $scheme;
 target org를 선택하고, 비교가 성공하면 같은 범위로 Salesforce check-only를 실행할 수 있다.
 desired source는 `--project`로 등록한 서버 프로젝트, 브라우저에서 임시 업로드한 내 단말기
 프로젝트, 또는 다른 Salesforce org 중에서 선택한다.
+
+비교 결과의 체크박스로 metadata 컴포넌트를 **배포 장바구니**에 담을 수 있다. metadata type을
+바꿔 검색해도 같은 desired source와 target org를 사용하는 동안 장바구니 선택은 유지된다.
+체크를 해제하거나 장바구니의 삭제 버튼을 누르면 배포 목록에서 빠진다. target에만 존재하는
+`TARGET ONLY` 항목은 desired source에 payload가 없으므로 선택할 수 없다.
+
+장바구니의 **Dry-run** 버튼은 선택한 컴포넌트만 포함한 전용 `package.xml`을 만들고 Salesforce
+check-only를 실행한다. 성공한 dry-run은 staging payload와 SHA-256을 고정한다. `DEPLOYER` 또는
+`ADMIN` 사용자가 대상 org 별칭과 `실제 배포` 확인 문구를 입력한 경우에만 실제 배포 버튼이
+활성화되며, 서버는 배포 직전에 staging payload SHA-256을 다시 확인한다.
 서버는 `sf org list --json` 결과에서 별칭, 표시 이름, edition, 연결 상태만 추출하며
 토큰·client ID·키 경로·로컬 절대 경로를 API에 반환하지 않는다.
 

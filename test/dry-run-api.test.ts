@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -105,6 +105,64 @@ describe('dry-run API', () => {
       expect(manifestCalls).toHaveLength(2);
       expect(manifestCalls[0]!.args).toEqual(expect.arrayContaining(['--metadata', 'ApexClass']));
       expect(fixture.client.calls.find((call) => call.args.includes('deploy'))?.args).toContain('--dry-run');
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('장바구니 metadata만 dry-run하고 승인된 동일 payload를 실제 배포한다', async () => {
+    const fixture = await createFixture(new DryRunSfClient());
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ sources: Array<{ id: string; kind: string }> }>();
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      const created = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/dry-run',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: {
+          scope: 'selected',
+          components: [{ type: 'ApexClass', fullName: 'Hello' }],
+          sourceId,
+          targetOrgId: 'org:target',
+          testLevel: 'RunLocalTests',
+        },
+      });
+      expect(created.statusCode).toBe(202);
+      expect(created.json()).toMatchObject({ job: {
+        scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+      } });
+      const dryRunId = created.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+      const dryRun = await fixture.server.sfudRuntime.deploymentJobs.getRequired(dryRunId);
+      expect(dryRun).toMatchObject({ status: 'APPROVAL_PENDING', prepared: true });
+      expect(await readFile(dryRun.manifestPath, 'utf8')).toContain('<members>Hello</members>');
+      expect(await readFile(dryRun.manifestPath, 'utf8')).not.toContain('<members>Hello_Test</members>');
+
+      const approved = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/execute',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: {
+          dryRunJobId: dryRun.id,
+          payloadChecksum: dryRun.payloadChecksum,
+          targetAlias: 'target',
+          confirmation: '실제 배포',
+        },
+      });
+      expect(approved.statusCode).toBe(202);
+      const deploymentId = approved.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+      expect(await fixture.server.sfudRuntime.deploymentJobs.getRequired(deploymentId)).toMatchObject({
+        kind: 'DEPLOY', status: 'SUCCEEDED', selectedComponents: [{ type: 'ApexClass', fullName: 'Hello' }],
+      });
+      const deployCalls = fixture.client.calls.filter((call) => call.args.includes('deploy'));
+      expect(deployCalls).toHaveLength(2);
+      expect(deployCalls[0]!.args).toContain('--dry-run');
+      expect(deployCalls[1]!.args).not.toContain('--dry-run');
+      expect(deployCalls[1]!.args).toEqual(expect.arrayContaining([
+        '--target-org', 'target', '--test-level', 'RunLocalTests',
+      ]));
     } finally {
       await fixture.close();
     }

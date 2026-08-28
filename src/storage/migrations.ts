@@ -196,6 +196,14 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE deployment_jobs ADD COLUMN metadata_type TEXT;
     `,
   },
+  {
+    version: 8,
+    name: 'selected_component_deployments',
+    sql: `
+      ALTER TABLE deployment_jobs ADD COLUMN selected_components_json TEXT;
+      ALTER TABLE deployment_jobs ADD COLUMN deployment_result_json TEXT;
+    `,
+  },
 ];
 
 export async function applyMigrations(database: Database, now: () => string): Promise<void> {

@@ -7,6 +7,11 @@ import { redactSensitiveText, type SfClient } from '../salesforce/sf-client.js';
 import type { WorkspaceService } from '../web/server/workspace-service.js';
 import { DeploymentCoordinator, ReconciliationRequiredError } from './deployment-coordinator.js';
 import { DeploymentJobRepository, type DeploymentJob } from './deployment-job-repository.js';
+import {
+  normalizeSelectedComponents,
+  type SelectedMetadataComponent,
+  writeSelectedManifest,
+} from './selected-manifest.js';
 import type { RequestedTestLevel } from './test-plan.js';
 
 const TEST_LEVELS: RequestedTestLevel[] = [
@@ -20,9 +25,10 @@ const TEST_LEVELS: RequestedTestLevel[] = [
 
 export interface CreateDryRunInput {
   projectId?: string;
-  scope?: 'manifest' | 'all';
+  scope?: 'manifest' | 'all' | 'selected';
   metadataType?: string;
   manifest?: string;
+  components?: SelectedMetadataComponent[];
   sourceId: string;
   targetOrgId: string;
   testLevel: RequestedTestLevel;
@@ -43,7 +49,7 @@ export class DryRunService {
 
   public async create(input: CreateDryRunInput): Promise<DeploymentJob> {
     assertInput(input);
-    if (input.scope !== undefined && input.scope !== 'manifest' && input.scope !== 'all') {
+    if (input.scope !== undefined && !['manifest', 'all', 'selected'].includes(input.scope)) {
       throw new SfudError('INVALID_ARGUMENT', '지원하지 않는 배포 범위입니다.');
     }
     const scope = input.scope ?? 'manifest';
@@ -51,7 +57,7 @@ export class DryRunService {
       this.workspace.resolveSource(input.sourceId, input.createdBy),
       this.workspace.resolveSource(input.targetOrgId, input.createdBy),
     ]);
-    const project = scope === 'all'
+    const project = scope === 'all' || scope === 'selected'
       ? this.workspace.projectForSources([source, targetSource])
       : await this.workspace.resolveProject(requiredString(input.projectId, '프로젝트'));
     if (!targetSource.startsWith('org:')) throw new Error('dry-run 대상은 Salesforce org여야 합니다.');
@@ -59,6 +65,12 @@ export class DryRunService {
     if (scope !== 'all' && input.metadataType !== undefined) {
       throw new Error('Salesforce metadata type은 전체 metadata 범위에서만 선택할 수 있습니다.');
     }
+    if (scope !== 'selected' && input.components !== undefined) {
+      throw new Error('배포 장바구니 항목은 선택한 metadata 범위에서만 사용할 수 있습니다.');
+    }
+    const selectedComponents = scope === 'selected'
+      ? normalizeSelectedComponents(input.components ?? [])
+      : undefined;
     if (input.metadataType !== undefined) {
       const availableTypes = await this.workspace.listMetadataTypes(
         [input.sourceId, input.targetOrgId],
@@ -68,9 +80,27 @@ export class DryRunService {
         throw new Error(`선택한 Salesforce metadata type을 사용할 수 없습니다: ${input.metadataType}`);
       }
     }
+    if (selectedComponents !== undefined) {
+      const availableTypes = await this.workspace.listMetadataTypes(
+        [input.sourceId, input.targetOrgId],
+        input.createdBy,
+      );
+      const availableTypeNames = new Set(availableTypes.map((entry) => entry.name));
+      const unavailable = selectedComponents.find((component) => !availableTypeNames.has(component.type));
+      if (unavailable !== undefined) {
+        throw new Error(`선택한 Salesforce metadata type을 사용할 수 없습니다: ${unavailable.type}`);
+      }
+    }
+    const selectedManifest = selectedComponents === undefined
+      ? undefined
+      : await writeSelectedManifest({
+        components: selectedComponents,
+        projectPath: project.realPath,
+        runsDirectory: this.runsDirectory,
+      });
     const manifestPath = scope === 'all'
       ? '@all'
-      : (await this.workspace.resolveManifest(
+      : selectedManifest?.manifestPath ?? (await this.workspace.resolveManifest(
         requiredString(input.projectId, '프로젝트'),
         requiredString(input.manifest, 'manifest'),
       )).path;
@@ -86,6 +116,7 @@ export class DryRunService {
       strict: input.strict,
       scope,
       metadataType: input.metadataType,
+      selectedComponents,
     })).digest('hex');
     const releaseSources = this.workspace.pinSources([input.sourceId], input.createdBy);
     let job: DeploymentJob;
@@ -98,6 +129,7 @@ export class DryRunService {
         createdBy: input.createdBy,
         scope: scope === 'all' ? 'ALL' : 'MANIFEST',
         ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
+        ...(selectedComponents === undefined ? {} : { selectedComponents }),
       });
     } catch (error) {
       releaseSources();

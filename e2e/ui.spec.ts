@@ -58,7 +58,7 @@ test('390px 모바일 화면에서 body 수평 overflow가 없다', async ({ pag
 
 test('메뉴마다 독립 URL과 화면을 제공한다', async ({ page }) => {
   await login(page, '/compare');
-  await expect(page.getByRole('heading', { name: '한 흐름에서 비교하고 배포를 검증합니다.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '검색한 메타데이터를 장바구니에 담아 배포합니다.' })).toBeVisible();
   await expect(page.getByRole('link', { name: '비교 및 배포', exact: true })).toHaveAttribute('aria-current', 'page');
 
   await page.getByRole('link', { name: '실행 기록', exact: true }).click();
@@ -156,7 +156,10 @@ test('선택 변경 후 이전 비교 polling 결과를 폐기한다', async ({ 
     ],
   } }));
   await page.route('**/api/v1/metadata-types**', async (route) => route.fulfill({ json: {
-    metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }],
+    metadataTypes: [
+      { name: 'ApexClass', directoryName: 'classes' },
+      { name: 'CustomObject', directoryName: 'objects' },
+    ],
   } }));
   let pollingStarted = false;
   await page.route('**/api/v1/comparisons**', async (route) => {
@@ -195,7 +198,10 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
     ],
   } }));
   await page.route('**/api/v1/metadata-types**', async (route) => route.fulfill({ json: {
-    metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }],
+    metadataTypes: [
+      { name: 'ApexClass', directoryName: 'classes' },
+      { name: 'CustomObject', directoryName: 'objects' },
+    ],
   } }));
   let comparisonPolls = 0;
   await page.route('**/api/v1/comparisons**', async (route) => {
@@ -215,19 +221,33 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   });
   await page.route('**/api/v1/deployments/dry-run', async (route) => {
     expect(route.request().postDataJSON()).toMatchObject({
-      scope: 'all', sourceId: 'project:project-1', targetOrgId: 'org:target',
+      scope: 'selected',
+      components: [{ type: 'ApexClass', fullName: 'NewClass' }],
+      sourceId: 'project:project-1', targetOrgId: 'org:target',
     });
     expect(route.request().postDataJSON()).not.toHaveProperty('manifest');
     await route.fulfill({ status: 202, json: { job: dryRunFixture('QUEUED') } });
   });
-  let polls = 0;
+  await page.route('**/api/v1/deployments/execute', async (route) => {
+    expect(route.request().postDataJSON()).toMatchObject({
+      dryRunJobId: 'dry-run-1', targetAlias: 'target', confirmation: '실제 배포',
+    });
+    await route.fulfill({ status: 202, json: { job: deploymentFixture('QUEUED') } });
+  });
+  let dryRunPolls = 0;
+  let deploymentPolls = 0;
   await page.route('**/api/v1/deployment-jobs**', async (route) => {
     if (new URL(route.request().url()).pathname === '/api/v1/deployment-jobs') {
       await route.fulfill({ json: { jobs: [] } });
       return;
     }
-    polls += 1;
-    await route.fulfill({ json: { job: dryRunFixture(polls > 1 ? 'APPROVAL_PENDING' : 'DRY_RUN_RUNNING') } });
+    if (new URL(route.request().url()).pathname.endsWith('/deploy-1')) {
+      deploymentPolls += 1;
+      await route.fulfill({ json: { job: deploymentFixture(deploymentPolls > 1 ? 'SUCCEEDED' : 'DEPLOYING') } });
+      return;
+    }
+    dryRunPolls += 1;
+    await route.fulfill({ json: { job: dryRunFixture(dryRunPolls > 1 ? 'APPROVAL_PENDING' : 'DRY_RUN_RUNNING') } });
   });
 
   await login(page, '/deploy');
@@ -236,26 +256,35 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await page.getByRole('button', { name: /비교 실행/u }).click();
   await expect(page.getByText('메타데이터 비교 중')).toBeVisible();
   await expect(page.getByText('NEW', { exact: true }).first()).toBeVisible({ timeout: 5_000 });
-  await page.getByRole('button', { name: /같은 범위로 Dry-run/u }).click();
+  await page.getByLabel('NewClass 배포 장바구니').check();
+  await expect(page.getByLabel('OldClass 배포 장바구니')).toBeDisabled();
+  await expect(page.getByLabel('배포 장바구니').getByText('NewClass', { exact: true })).toBeVisible();
+  await page.getByRole('combobox', { name: 'Salesforce metadata type' }).fill('CustomObject');
+  await expect(page.getByLabel('배포 장바구니').getByText('NewClass', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '장바구니 Dry-run' }).click();
   await expect(page.getByText('Salesforce check-only 실행 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Salesforce dry-run 성공' })).toBeVisible({ timeout: 5_000 });
   const result = page.getByLabel('Salesforce dry-run 성공');
   await expect(result.getByText('RunSpecifiedTests', { exact: true })).toBeVisible();
   await expect(result.getByText(/Hello_Test/u)).toBeVisible();
-  await expect(result.getByRole('button', { name: '배포 승인 준비' })).toBeDisabled();
+  await page.getByLabel('대상 org 별칭').fill('target');
+  await page.getByLabel('확인 문구').fill('실제 배포');
+  await page.getByRole('button', { name: '장바구니 실제 배포' }).click();
+  await expect(page.getByText('Salesforce 실제 배포 중')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Salesforce 실제 배포 성공' })).toBeVisible({ timeout: 5_000 });
 
   await page.setViewportSize({ width: 390, height: 844 });
   const hasHorizontalOverflow = await page.evaluate(
     () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
   );
   const resultBox = await result.boundingBox();
-  const summaryBox = await page.getByRole('complementary', { name: '비교 및 Dry-run 요약' }).boundingBox();
+  const summaryBox = await page.getByRole('complementary', { name: '배포 장바구니' }).boundingBox();
 
   expect(hasHorizontalOverflow).toBe(false);
   expect(resultBox).not.toBeNull();
   expect(summaryBox).not.toBeNull();
   expect(summaryBox!.y).toBeGreaterThan(resultBox!.y + resultBox!.height);
-  await expect(result.getByRole('button', { name: '배포 승인 준비' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '장바구니 실제 배포' })).toBeVisible();
 });
 
 test('제품 파비콘을 제공한다', async ({ page, request }) => {
@@ -346,5 +375,16 @@ function dryRunFixture(status: 'QUEUED' | 'DRY_RUN_RUNNING' | 'APPROVAL_PENDING'
       testPlan: { level: 'RunSpecifiedTests', tests: ['Hello_Test'], selection: 'suffix' },
       comparisonSummary: { added: 1, removed: 0, modified: 1, identical: 0, total: 2, different: 2 },
     }),
+  };
+}
+
+function deploymentFixture(status: 'QUEUED' | 'DEPLOYING' | 'SUCCEEDED') {
+  return {
+    id: 'deploy-1', kind: 'DEPLOY', status,
+    source: { id: 'project:project-1', kind: 'local', label: 'fixture-project' },
+    target: { id: 'org:target', kind: 'org', label: 'target' },
+    manifest: 'selected.xml', scope: 'selected', prepared: false,
+    createdAt: '2026-08-23T06:01:00.000Z',
+    ...(status !== 'SUCCEEDED' ? {} : { salesforceDeploymentId: '0Af-deploy' }),
   };
 }
