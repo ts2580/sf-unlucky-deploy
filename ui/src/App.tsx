@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
 
+const METADATA_RESULTS_PER_PAGE = 20;
+
 type IconName =
   | 'activity'
   | 'arrow'
@@ -1724,18 +1726,26 @@ function ComparisonResultPanel({
   onSelectionChange?: (component: ComparisonComponent, selected: boolean) => void;
   selectionDisabled?: boolean;
 }) {
+  const [resultPage, setResultPage] = useState(1);
+  useEffect(() => setResultPage(1), [job.id]);
+  const displaySource = deploymentView ? job.right : job.left;
+  const displayTarget = deploymentView ? job.left : job.right;
   if (job.status === 'QUEUED' || job.status === 'RUNNING') {
-    return <section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? '비교 대기 중' : '메타데이터 비교 중'}</strong><p>{job.left.label} → {job.right.label} · {job.manifest}</p></div></section>;
+    return <section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? '비교 대기 중' : '메타데이터 비교 중'}</strong><p>{displaySource.label} → {displayTarget.label} · {job.manifest}</p></div></section>;
   }
   if (job.status === 'FAILED') {
     return <section className="compare-error" role="alert"><strong>비교 작업이 실패했습니다.</strong><p>{job.errorMessage ?? '상세 오류가 기록되지 않았습니다.'}</p></section>;
   }
   if (job.result === undefined) return null;
   const summary = job.result.summary;
+  const resultPageCount = Math.max(1, Math.ceil(job.result.components.length / METADATA_RESULTS_PER_PAGE));
+  const currentResultPage = Math.min(resultPage, resultPageCount);
+  const resultStart = (currentResultPage - 1) * METADATA_RESULTS_PER_PAGE;
+  const visibleComponents = job.result.components.slice(resultStart, resultStart + METADATA_RESULTS_PER_PAGE);
   return (
     <section className="comparison-result" aria-labelledby="comparison-result-title">
       <div className="comparison-result-head">
-        <div><p className="eyebrow">COMPARISON COMPLETE</p><h2 id="comparison-result-title">{job.left.label} → {job.right.label}</h2><small>{job.manifest}</small></div>
+        <div><p className="eyebrow">COMPARISON COMPLETE</p><h2 id="comparison-result-title">{displaySource.label} → {displayTarget.label}</h2><small>{job.manifest}</small></div>
         <span className="result-success"><Icon name="check" />비교 완료</span>
       </div>
       <div className="comparison-summary">
@@ -1749,7 +1759,7 @@ function ComparisonResultPanel({
       <div className="component-results">
         {job.result.components.length === 0
           ? <p className="empty-result">표시할 차이가 없습니다. 두 소스가 동일합니다.</p>
-          : job.result.components.map((component) => <details key={component.key} className={`component-result${deploymentView ? ' component-selectable' : ''}${selectedKeys.has(component.key) ? ' component-selected' : ''}`}>
+          : visibleComponents.map((component) => <details key={component.key} className={`component-result${deploymentView ? ' component-selectable' : ''}${selectedKeys.has(component.key) ? ' component-selected' : ''}`}>
               <summary>{deploymentView && <label className={`component-cart-check${component.status === 'REMOVED' || selectionDisabled ? ' component-cart-disabled' : ''}`} onClick={(event) => event.stopPropagation()}>
                 <input
                   type="checkbox"
@@ -1762,6 +1772,11 @@ function ComparisonResultPanel({
               </label>}<span className={`component-status status-${component.status.toLowerCase()}`}>{deploymentView ? deploymentDiffStatusLabel(component.status) : component.status}</span><div><strong>{component.fullName}</strong><small>{component.type} · 파일 {component.files.length}개{deploymentView && component.status === 'REMOVED' ? ' · 소스에 없어 선택 불가' : ''}</small></div><Icon name="chevron" /></summary>
               <div className="component-files">{component.files.map((file) => <article key={file.path}><div><code>{file.path}</code><span>{file.status}</span></div>{file.xmlChanges !== undefined && file.xmlChanges.length > 0 && <p>XML 변경 {file.xmlChanges.length}개</p>}{file.unifiedDiff && <pre>{file.unifiedDiff}</pre>}</article>)}</div>
             </details>)}
+        {job.result.components.length > METADATA_RESULTS_PER_PAGE && <nav className="component-pagination" aria-label="메타데이터 검색 결과 페이지">
+          <button type="button" onClick={() => setResultPage((page) => Math.max(1, page - 1))} disabled={currentResultPage === 1} aria-label="이전 페이지"><Icon name="chevron" />이전</button>
+          <span><strong>{currentResultPage}</strong> / {resultPageCount}페이지 · {resultStart + 1}-{Math.min(resultStart + METADATA_RESULTS_PER_PAGE, job.result.components.length)} / {job.result.components.length}개</span>
+          <button type="button" onClick={() => setResultPage((page) => Math.min(resultPageCount, page + 1))} disabled={currentResultPage === resultPageCount} aria-label="다음 페이지">다음<Icon name="chevron" /></button>
+        </nav>}
       </div>
     </section>
   );

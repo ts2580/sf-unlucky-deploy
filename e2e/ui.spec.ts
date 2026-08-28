@@ -196,7 +196,7 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await comparisonOptions.getByRole('button', { name: /비교 실행$/u }).click();
   await expect(page.getByLabel('비교 현황')).toContainText(/대기열|진행 중/u);
   await expect(page.getByText('메타데이터 비교 중')).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'left → right' })).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByRole('heading', { name: 'right → left' })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByLabel('비교 현황')).toContainText('완료');
   await expect(page.getByText('Hello', { exact: true })).toBeVisible();
   await expect(page.locator('.component-status', { hasText: 'MODIFIED' })).toBeVisible();
@@ -240,7 +240,7 @@ test('선택 변경 후 이전 비교 polling 결과를 폐기한다', async ({ 
   await expect(page.getByRole('button', { name: /비교 실행/u })).toBeEnabled();
   await page.waitForTimeout(600);
 
-  await expect(page.getByRole('heading', { name: 'left → right' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'right → left' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: /같은 범위로 Dry-run/u })).toHaveCount(0);
 });
 
@@ -346,7 +346,22 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await directTestInput.clear();
   await page.getByRole('button', { name: /비교 실행/u }).click();
   await expect(page.getByText('메타데이터 비교 중')).toBeVisible();
+  await expect(page.getByText('fixture-project → target · 전체 메타데이터', { exact: true })).toBeVisible();
   await expect(page.getByText('NEW', { exact: true }).first()).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByRole('heading', { name: 'fixture-project → target' })).toBeVisible();
+  const metadataResults = page.locator('.component-results');
+  await expect(metadataResults.locator('.component-result')).toHaveCount(20);
+  const resultPagination = page.getByRole('navigation', { name: '메타데이터 검색 결과 페이지' });
+  await expect(resultPagination).toContainText('1 / 3페이지 · 1-20 / 42개');
+  await resultPagination.getByRole('button', { name: '다음 페이지' }).click();
+  await expect(metadataResults.locator('.component-result')).toHaveCount(20);
+  await expect(page.getByText('Paged19', { exact: true })).toBeVisible();
+  await expect(page.getByText('NewClass', { exact: true })).toHaveCount(0);
+  await resultPagination.getByRole('button', { name: '다음 페이지' }).click();
+  await expect(metadataResults.locator('.component-result')).toHaveCount(2);
+  await expect(resultPagination).toContainText('3 / 3페이지 · 41-42 / 42개');
+  await resultPagination.getByRole('button', { name: '이전 페이지' }).click();
+  await resultPagination.getByRole('button', { name: '이전 페이지' }).click();
   await page.getByLabel('NewClass 배포 대상으로 선택').check();
   await expect(page.getByLabel('OldClass 배포 대상으로 선택')).toBeDisabled();
   await expect(page.getByLabel('배포 대상').getByText('NewClass', { exact: true })).toBeVisible();
@@ -457,11 +472,16 @@ function deploymentComparisonFixture(status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED')
     left: { id: 'org:target', kind: 'org', label: 'target' },
     right: { id: 'project:project-1', kind: 'local', label: 'fixture-project' },
     ...(status !== 'SUCCEEDED' ? {} : { result: {
-      summary: { added: 1, removed: 1, modified: 0, identical: 0, total: 2, different: 2 },
+      summary: { added: 41, removed: 1, modified: 0, identical: 0, total: 42, different: 42 },
       warnings: ['TARGET ONLY는 destructive manifest 없이는 삭제되지 않습니다.'],
       components: [
         { key: 'ApexClass:NewClass', type: 'ApexClass', fullName: 'NewClass', status: 'ADDED', files: [] },
         { key: 'ApexClass:OldClass', type: 'ApexClass', fullName: 'OldClass', status: 'REMOVED', files: [] },
+        ...Array.from({ length: 40 }, (_, index) => ({
+          key: `ApexClass:Paged${String(index + 1).padStart(2, '0')}`,
+          type: 'ApexClass', fullName: `Paged${String(index + 1).padStart(2, '0')}`,
+          status: 'ADDED' as const, files: [],
+        })),
       ],
     } }),
   };
