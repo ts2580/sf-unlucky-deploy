@@ -330,6 +330,20 @@ npm run build
 node dist/cli.js ui --no-open
 ```
 
+프로젝트 루트의 로컬 실행 스크립트는 기본 포트 `27546`을 점유한 기존 LISTEN 프로세스를
+종료한 뒤 UI를 시작한다. 빌드 결과가 없으면 자동 빌드하지 않고 먼저 `npm run build`를
+실행하라는 오류를 표시한다.
+
+```bash
+./start-local.sh
+
+# 다른 로컬 주소나 포트 사용
+SFUD_UI_HOST=192.168.0.62 SFUD_UI_PORT=27546 ./start-local.sh
+```
+
+loopback이 아닌 주소에는 스크립트가 `--allow-remote`를 자동으로 추가한다. 추가 CLI 옵션은
+스크립트 뒤에 그대로 전달할 수 있다. 예: `./start-local.sh --project /path/to/project`.
+
 셀프 호스팅에서는 영속 volume의 디렉터리를 명시한다.
 
 ```bash
