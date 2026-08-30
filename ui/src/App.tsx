@@ -1160,10 +1160,17 @@ function DeployPage({ user }: { user: ApiUser }) {
               </label>
             </div>
             <p className={`field-hint${scopeValid ? '' : ' field-hint-error'}`}><Icon name="check" />{metadataTypesLoading ? 'Salesforce metadata type을 불러오는 중입니다.' : scopeValid ? `${metadataTypes.length}개 metadata type 검색 가능 · source와 target의 합집합` : '목록에 있는 Salesforce metadata type을 선택하세요.'}</p>
+            <div className="option-grid">
+              <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} />
+            </div>
+            <div className="comparison-action">
+              <div><Icon name="shield" /><span><strong>읽기 전용 비교</strong>현재 metadata type과 옵션으로 source와 target을 비교합니다.</span></div>
+              <button className="button button-secondary" type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesLoading || !scopeValid || !sourceId || !targetOrgId || sourceId === targetOrgId}><Icon name={comparing ? 'refresh' : 'compare'} />{comparing ? '비교 실행 중……' : '현재 type 비교 실행'}</button>
+            </div>
           </section>
 
           <section className="workflow-panel" aria-labelledby="test-heading">
-            <div className="panel-heading"><span className="step-number">03</span><div><h2 id="test-heading">Apex 테스트와 표시 옵션</h2><p>비교가 완료되면 선택한 테스트 조건으로 Dry-run을 실행할 수 있습니다.</p></div><span className="auto-badge">{testLevel.toUpperCase()}</span></div>
+            <div className="panel-heading"><span className="step-number">03</span><div><h2 id="test-heading">Apex 테스트 설정</h2><p>비교 결과에서 Apex Class를 선택한 뒤 Dry-run 테스트 조건을 지정합니다.</p></div><span className="auto-badge">{testLevel.toUpperCase()}</span></div>
             <div className="select-row">
               <label><span>테스트 수준</span><select value={testLevel} onChange={(event) => changeTestLevel(event.target.value)}><option value="auto">Auto · 권장</option><option value="RunSpecifiedTests">RunSpecifiedTests</option><option value="RunLocalTests">RunLocalTests</option><option value="RunAllTestsInOrg">RunAllTestsInOrg</option><option value="RunRelevantTests">RunRelevantTests</option><option value="NoTestRun">NoTestRun</option></select></label>
               <div
@@ -1216,13 +1223,6 @@ function DeployPage({ user }: { user: ApiUser }) {
               </section>
               : <p className="apex-test-empty"><Icon name="code" />Apex Class를 배포 대상에 추가하면 테스트 클래스 선택 목록을 불러옵니다.</p>}
             {!testSelectionValid && <p className="apex-test-validation" role="alert">RunSpecifiedTests는 테스트 클래스를 하나 이상 선택하거나 입력해야 합니다.</p>}
-            <div className="option-grid">
-              <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} />
-            </div>
-            <div className="comparison-action">
-              <div><Icon name="shield" /><span><strong>읽기 전용 비교</strong>현재 metadata type과 옵션으로 source와 target을 비교합니다.</span></div>
-              <button className="button button-secondary" type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesLoading || !scopeValid || !sourceId || !targetOrgId || sourceId === targetOrgId}><Icon name={comparing ? 'refresh' : 'compare'} />{comparing ? '비교 실행 중……' : '현재 type 비교 실행'}</button>
-            </div>
           </section>
 
           <WorkflowStatusPanel
