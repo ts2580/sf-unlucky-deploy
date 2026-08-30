@@ -285,6 +285,13 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_deployment_jobs_target_created ON deployment_jobs(target_alias, created_at);
     `,
   },
+  {
+    version: 10,
+    name: 'salesforce_deployment_progress',
+    sql: `
+      ALTER TABLE deployment_jobs ADD COLUMN progress_json TEXT;
+    `,
+  },
 ];
 
 export async function applyMigrations(

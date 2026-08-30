@@ -13,6 +13,7 @@ import {
 import type { WorkspaceService } from '../web/server/workspace-service.js';
 import { DeploymentCoordinator, ReconciliationRequiredError } from './deployment-coordinator.js';
 import { DeploymentJobRepository, type DeploymentJob } from './deployment-job-repository.js';
+import { runAsyncSalesforceDeployment } from './salesforce-deployment.js';
 
 export interface ApproveDeploymentRequest {
   dryRunJobId: string;
@@ -52,19 +53,26 @@ export class DeploymentService {
         const testPlan = dryRun.testPlan;
         if (testPlan === undefined) throw new SfudError('INVALID_JOB_STATE', 'dry-run 테스트 계획이 없습니다.');
         const result = await withRequestWorkspace(this.workspace.defaultProject().realPath, async (cwd) =>
-          sanitizeSfOutput(await this.sfClient.runJson([
-            'project', 'deploy', 'start',
-            '--target-org', current.targetAlias,
-            '--metadata-dir', packageRoot,
-            '--wait', '60',
-            '--test-level', testPlan.level,
-            ...testPlan.tests.flatMap((testName) => ['--tests', testName]),
-          ], { cwd, timeoutMs: 65 * 60 * 1_000 })));
+          sanitizeSfOutput(await runAsyncSalesforceDeployment({
+            sfClient: this.sfClient,
+            startArgs: [
+              'project', 'deploy', 'start',
+              '--target-org', current.targetAlias,
+              '--metadata-dir', packageRoot,
+              '--test-level', testPlan.level,
+              ...testPlan.tests.flatMap((testName) => ['--tests', testName]),
+            ],
+            targetAlias: current.targetAlias,
+            cwd,
+            phase: 'DEPLOY',
+            onProgress: async (progress) => { await this.jobs.recordSalesforceProgress(current.id, progress); },
+          })));
         await this.jobs.recordDeploymentResult(current.id, result);
         const deploymentId = extractDeploymentId(result);
         return deploymentId === undefined ? {} : { deploymentId };
       } catch (error) {
-        if (isAmbiguousSalesforceFailure(error)) {
+        if ((error instanceof SfudError && error.code === 'SF_EXTERNAL_STATE_UNKNOWN')
+          || isAmbiguousSalesforceFailure(error)) {
           const message = redactSensitiveText(error instanceof Error ? error.message : String(error));
           throw new ReconciliationRequiredError(message, extractDeploymentIdFromText(message), { cause: error });
         }

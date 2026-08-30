@@ -55,18 +55,25 @@ describe('dry-run API', () => {
           manifest: 'manifest/package.xml',
           payloadChecksum: expect.stringMatching(/^[a-f0-9]{64}$/u),
           salesforceDeploymentId: '0Af-check-only',
+          progress: {
+            phase: 'DRY_RUN', status: 'Succeeded', done: true,
+            numberComponentsDeployed: 2, numberComponentsTotal: 2,
+            numberTestsCompleted: 1, numberTestsTotal: 1,
+          },
           testPlan: { level: 'RunSpecifiedTests', tests: ['Hello_Test'], selection: 'suffix' },
           comparisonSummary: { modified: 1 },
         },
       });
       expect(response.body).not.toContain('must-not-leak');
       expect(response.body).not.toContain(fixture.projectPath);
-      const deployCalls = fixture.client.calls.filter((call) => call.args.includes('deploy'));
+      const deployCalls = deploymentStartCalls(fixture.client.calls);
       expect(deployCalls).toHaveLength(1);
       expect(deployCalls[0]!.args).toContain('--dry-run');
       expect(deployCalls[0]!.args).toEqual(expect.arrayContaining([
-        '--test-level', 'RunSpecifiedTests', '--tests', 'Hello_Test', '--wait', '10',
+        '--test-level', 'RunSpecifiedTests', '--tests', 'Hello_Test', '--async',
       ]));
+      expect(deployCalls[0]!.args).not.toContain('--wait');
+      expect(fixture.client.calls.some((call) => call.args.slice(0, 3).join(' ') === 'project deploy report')).toBe(true);
     } finally {
       await fixture.close();
     }
@@ -156,7 +163,7 @@ describe('dry-run API', () => {
       expect(await fixture.server.sfudRuntime.deploymentJobs.getRequired(deploymentId)).toMatchObject({
         kind: 'DEPLOY', status: 'SUCCEEDED', selectedComponents: [{ type: 'ApexClass', fullName: 'Hello' }],
       });
-      const deployCalls = fixture.client.calls.filter((call) => call.args.includes('deploy'));
+      const deployCalls = deploymentStartCalls(fixture.client.calls);
       expect(deployCalls).toHaveLength(2);
       expect(deployCalls[0]!.args).toContain('--dry-run');
       expect(deployCalls[1]!.args).not.toContain('--dry-run');
@@ -197,7 +204,7 @@ describe('dry-run API', () => {
         testPlan: { level: 'NoTestRun', tests: [], selection: 'configured' },
       } });
       expect((await fixture.server.sfudRuntime.deploymentJobs.getRequired(jobId)).dryRunJobId).toBeUndefined();
-      const deployCalls = fixture.client.calls.filter((call) => call.args.includes('deploy'));
+      const deployCalls = deploymentStartCalls(fixture.client.calls);
       expect(deployCalls).toHaveLength(1);
       expect(deployCalls[0]!.args).not.toContain('--dry-run');
       expect(deployCalls[0]!.args).toEqual(expect.arrayContaining(['--test-level', 'NoTestRun']));
@@ -234,7 +241,7 @@ describe('dry-run API', () => {
         kind: 'DEPLOY', status: 'SUCCEEDED', testCoverage: 80,
         testPlan: { level: 'RunSpecifiedTests', tests: ['CoverageSpec'] },
       } });
-      const deployCalls = fixture.client.calls.filter((call) => call.args.includes('deploy'));
+      const deployCalls = deploymentStartCalls(fixture.client.calls);
       expect(deployCalls).toHaveLength(2);
       expect(deployCalls[0]!.args).toContain('--dry-run');
       expect(deployCalls[1]!.args).not.toContain('--dry-run');
@@ -272,7 +279,7 @@ describe('dry-run API', () => {
         status: 'FAILED', errorCode: 'JOB_EXECUTION_FAILED',
         errorMessage: expect.stringMatching(/74%.*75% 미만/u),
       });
-      const deployCalls = fixture.client.calls.filter((call) => call.args.includes('deploy'));
+      const deployCalls = deploymentStartCalls(fixture.client.calls);
       expect(deployCalls).toHaveLength(1);
       expect(deployCalls[0]!.args).toContain('--dry-run');
     } finally {
@@ -359,7 +366,7 @@ describe('dry-run API', () => {
 
       expect(response.statusCode).toBe(400);
       expect(response.json()).toMatchObject({ error: { code: 'INVALID_DRY_RUN_REQUEST' } });
-      expect(fixture.client.calls.filter((call) => call.args.includes('deploy'))).toHaveLength(0);
+      expect(deploymentStartCalls(fixture.client.calls)).toHaveLength(0);
       expect(await fixture.server.sfudRuntime.store.database.get('SELECT COUNT(*) count FROM deployment_jobs'))
         .toEqual({ count: 0 });
     } finally {
@@ -406,7 +413,7 @@ class DryRunSfClient implements SfClient {
       await writeSnapshot(flagValue(args, '--output-dir'), 'source');
       return { status: 0 };
     }
-    if (args.includes('deploy')) {
+    if (args[0] === 'project' && args[1] === 'deploy' && args[2] === 'start') {
       if (this.failure === 'definitive') {
         throw new SfudError('SF_COMMAND_FAILED', '실패 force://client:must-not-leak@example.com');
       }
@@ -418,6 +425,21 @@ class DryRunSfClient implements SfClient {
       }
       return { status: 0, result: {
         id: args.includes('--dry-run') ? '0Af-check-only' : '0Af-deploy',
+        status: 'Queued',
+        done: false,
+      } };
+    }
+    if (args[0] === 'project' && args[1] === 'deploy' && args[2] === 'report') {
+      const id = flagValue(args, '--job-id');
+      return { status: 0, result: {
+        id,
+        status: 'Succeeded',
+        done: true,
+        success: true,
+        numberComponentsDeployed: 2,
+        numberComponentsTotal: 2,
+        numberTestsCompleted: 1,
+        numberTestsTotal: 1,
         accessToken: 'must-not-leak',
         details: { runTestResult: { codeCoverage: [
           { name: 'Hello', numLocations: 100, numLocationsNotCovered: 100 - this.coverage },
@@ -480,4 +502,8 @@ function flagValue(args: readonly string[], flag: string): string {
   const value = args[index + 1];
   if (index < 0 || value === undefined) throw new Error(`${flag} argument missing`);
   return value;
+}
+
+function deploymentStartCalls<T extends { args: readonly string[] }>(calls: readonly T[]): T[] {
+  return calls.filter((call) => call.args[0] === 'project' && call.args[1] === 'deploy' && call.args[2] === 'start');
 }

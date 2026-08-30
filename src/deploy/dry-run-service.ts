@@ -105,6 +105,7 @@ export class DryRunService {
           cwd: prepared.project.realPath,
           sfClient: this.sfClient,
           stdout: () => undefined,
+          onDeploymentProgress: async (progress) => { await this.jobs.recordSalesforceProgress(job.id, progress); },
         });
         const payloadChecksum = result.payloadSha256;
         await this.jobs.recordDryRunArtifacts({
@@ -182,6 +183,7 @@ export class DryRunService {
           cwd: prepared.project.realPath,
           sfClient: this.sfClient,
           stdout: () => undefined,
+          onDeploymentProgress: async (progress) => { await this.jobs.recordSalesforceProgress(job.id, progress); },
         });
         if (result.deployResult === undefined) {
           throw new SfudError('DEPLOY_FAILED', 'Salesforce 실제 배포 결과가 없습니다.');

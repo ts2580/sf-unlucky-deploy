@@ -69,7 +69,7 @@ test('메뉴마다 독립 URL과 화면을 제공한다', async ({ page }) => {
 
   await page.getByRole('link', { name: '설정', exact: true }).click();
   await expect(page).toHaveURL(/\/settings$/u);
-  await expect(page.getByRole('heading', { name: '연결과 서버 프로젝트를 확인합니다.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '연결과 프로젝트 소스를 관리합니다.' })).toBeVisible();
 });
 
 test('ADMIN이 사용자를 생성하고 역할과 활성 상태를 관리한다', async ({ page }) => {
@@ -108,7 +108,7 @@ test('ADMIN이 사용자를 생성하고 역할과 활성 상태를 관리한다
   await expect(page.getByRole('link', { name: '사용자 관리', exact: true })).toHaveCount(0);
 });
 
-test('내 단말기의 DX 프로젝트를 임시 소스로 업로드한다', async ({ page }, testInfo) => {
+test('설정에서 내 단말기의 DX 프로젝트를 임시 소스로 업로드한다', async ({ page }, testInfo) => {
   const projectPath = testInfo.outputPath('uploaded-project');
   await mkdir(projectPath, { recursive: true });
   await writeFile(path.join(projectPath, 'sfdx-project.json'), JSON.stringify({
@@ -118,15 +118,24 @@ test('내 단말기의 DX 프로젝트를 임시 소스로 업로드한다', asy
   await page.route('**/api/v1/workspace', async (route) => route.fulfill({ json: {
     orgs: [], projects: [], uploads: [], sources: [],
   } }));
-  await login(page, '/deploy');
-  const uploadInput = page.locator('.upload-button input[type="file"]');
+  await login(page, '/settings');
+  await expect(page.getByRole('heading', { name: '내 단말기 프로젝트' })).toBeVisible();
+  const uploadInput = page.getByRole('region', { name: '내 단말기 프로젝트' }).locator('.upload-button input[type="file"]');
   await expect(uploadInput).toBeEnabled();
   await uploadInput.setInputFiles(projectPath);
 
   await expect(page.getByRole('status')).toContainText('uploaded-project 업로드 완료');
-  await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue(/^upload:/u);
+  await expect(page.getByRole('region', { name: '내 단말기 프로젝트' }).getByText('uploaded-project', { exact: true })).toBeVisible();
   await expect(page.getByText('내 단말기에서 임시 업로드 · 마지막 사용 후 4시간', { exact: true }))
     .toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(
+    () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+  )).toBe(false);
+  await expect(page.getByText('DX 프로젝트 업로드', { exact: true })).toBeVisible();
+  await page.getByRole('link', { name: '비교 및 배포', exact: true }).click();
+  await expect(page.locator('.upload-button input[type="file"]')).toHaveCount(0);
+  await expect(page.getByText('새 프로젝트 소스가 필요한가요?')).toHaveCount(0);
 });
 
 test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', async ({ page }) => {
@@ -177,7 +186,8 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(page.locator('#salesforce-deploy-metadata-types option')).toHaveCount(4);
   await scopeCombobox.fill('ApexClass');
   await expect(page.getByText('3개 metadata type 검색 가능 · source와 target의 합집합')).toBeVisible();
-  const comparisonOptions = page.getByRole('region', { name: '비교 옵션과 Apex 테스트' });
+  const comparisonOptions = page.getByRole('region', { name: 'Apex 테스트와 표시 옵션' });
+  await expect(comparisonOptions.getByText('Strict 비교')).toHaveCount(0);
   await expect(comparisonOptions.getByRole('button', { name: /비교 실행$/u })).toBeVisible();
   await expect(page.getByRole('complementary', { name: '배포 대상' }).getByRole('button', { name: /비교 실행/u })).toHaveCount(0);
   const workflowStatus = page.getByRole('region', { name: '실행 현황' });
@@ -186,7 +196,7 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await comparisonOptions.getByRole('button', { name: /비교 실행$/u }).click();
   await expect(page.getByLabel('비교 현황')).toContainText(/대기열|진행 중/u);
   await expect(page.getByText('메타데이터 비교 중')).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'left → right' })).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByRole('heading', { name: 'right → left' })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByLabel('비교 현황')).toContainText('완료');
   await expect(page.getByText('Hello', { exact: true })).toBeVisible();
   await expect(page.locator('.component-status', { hasText: 'MODIFIED' })).toBeVisible();
@@ -230,7 +240,7 @@ test('선택 변경 후 이전 비교 polling 결과를 폐기한다', async ({ 
   await expect(page.getByRole('button', { name: /비교 실행/u })).toBeEnabled();
   await page.waitForTimeout(600);
 
-  await expect(page.getByRole('heading', { name: 'left → right' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'right → left' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: /같은 범위로 Dry-run/u })).toHaveCount(0);
 });
 
@@ -249,9 +259,12 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
       { name: 'CustomObject', directoryName: 'objects' },
     ],
   } }));
-  await page.route('**/api/v1/apex-test-classes**', async (route) => route.fulfill({ json: {
-    testClasses: ['Hello_Test', 'Order_Test', 'PaymentValidationSpec'],
-  } }));
+  await page.route('**/api/v1/apex-test-classes**', async (route) => {
+    expect(new URL(route.request().url()).searchParams.get('sourceId')).toBe('project:project-1');
+    await route.fulfill({ json: {
+      testClasses: ['Hello_Test', 'Order_Test', 'PaymentValidationSpec'],
+    } });
+  });
   let comparisonPolls = 0;
   await page.route('**/api/v1/comparisons**', async (route) => {
     if (route.request().method() === 'POST') {
@@ -320,9 +333,35 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await login(page, '/deploy');
   await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue('project:project-1');
   await expect(page.getByLabel('TARGET ORG 비교 소스')).toHaveValue('org:target');
+  const directTestInput = page.getByLabel('테스트 클래스 직접 입력');
+  await directTestInput.fill('Hello_Test, pay');
+  const directTestSuggestions = page.getByRole('listbox', { name: 'source 테스트 클래스 검색 결과' });
+  const paymentSuggestion = directTestSuggestions.getByRole('option', { name: 'PaymentValidationSpec' });
+  await expect(paymentSuggestion).toBeVisible();
+  await expect(directTestSuggestions.getByRole('option', { name: 'Hello_Test' })).toHaveCount(0);
+  await directTestInput.press('Tab');
+  await expect(paymentSuggestion).toBeFocused();
+  await paymentSuggestion.press('Enter');
+  await expect(directTestInput).toHaveValue('Hello_Test, PaymentValidationSpec');
+  await directTestInput.clear();
   await page.getByRole('button', { name: /비교 실행/u }).click();
   await expect(page.getByText('메타데이터 비교 중')).toBeVisible();
+  await expect(page.getByText('fixture-project → target · 전체 메타데이터', { exact: true })).toBeVisible();
   await expect(page.getByText('NEW', { exact: true }).first()).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByRole('heading', { name: 'fixture-project → target' })).toBeVisible();
+  const metadataResults = page.locator('.component-results');
+  await expect(metadataResults.locator('.component-result')).toHaveCount(20);
+  const resultPagination = page.getByRole('navigation', { name: '메타데이터 검색 결과 페이지' });
+  await expect(resultPagination).toContainText('1 / 3페이지 · 1-20 / 42개');
+  await resultPagination.getByRole('button', { name: '다음 페이지' }).click();
+  await expect(metadataResults.locator('.component-result')).toHaveCount(20);
+  await expect(page.getByText('Paged19', { exact: true })).toBeVisible();
+  await expect(page.getByText('NewClass', { exact: true })).toHaveCount(0);
+  await resultPagination.getByRole('button', { name: '다음 페이지' }).click();
+  await expect(metadataResults.locator('.component-result')).toHaveCount(2);
+  await expect(resultPagination).toContainText('3 / 3페이지 · 41-42 / 42개');
+  await resultPagination.getByRole('button', { name: '이전 페이지' }).click();
+  await resultPagination.getByRole('button', { name: '이전 페이지' }).click();
   await page.getByLabel('NewClass 배포 대상으로 선택').check();
   await expect(page.getByLabel('OldClass 배포 대상으로 선택')).toBeDisabled();
   await expect(page.getByLabel('배포 대상').getByText('NewClass', { exact: true })).toBeVisible();
@@ -346,6 +385,8 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await page.getByLabel('확인 문구').fill('실제 배포');
   await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
   await expect(page.getByText('Salesforce 실제 배포 중')).toBeVisible();
+  await expect(page.getByLabel('실제 배포 현황')).toContainText(/InProgress · \d+초/u);
+  await expect(page.getByLabel('실제 배포 현황')).toContainText('컴포넌트 1/2');
   await expect(page.getByRole('heading', { name: 'Salesforce 실제 배포 성공' })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByText(/Hello_Test · 코드 커버리지 80.00%/u)).toBeVisible();
   await page.getByRole('combobox', { name: 'Salesforce metadata type' }).fill('CustomObject');
@@ -431,11 +472,16 @@ function deploymentComparisonFixture(status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED')
     left: { id: 'org:target', kind: 'org', label: 'target' },
     right: { id: 'project:project-1', kind: 'local', label: 'fixture-project' },
     ...(status !== 'SUCCEEDED' ? {} : { result: {
-      summary: { added: 1, removed: 1, modified: 0, identical: 0, total: 2, different: 2 },
+      summary: { added: 41, removed: 1, modified: 0, identical: 0, total: 42, different: 42 },
       warnings: ['TARGET ONLY는 destructive manifest 없이는 삭제되지 않습니다.'],
       components: [
         { key: 'ApexClass:NewClass', type: 'ApexClass', fullName: 'NewClass', status: 'ADDED', files: [] },
         { key: 'ApexClass:OldClass', type: 'ApexClass', fullName: 'OldClass', status: 'REMOVED', files: [] },
+        ...Array.from({ length: 40 }, (_, index) => ({
+          key: `ApexClass:Paged${String(index + 1).padStart(2, '0')}`,
+          type: 'ApexClass', fullName: `Paged${String(index + 1).padStart(2, '0')}`,
+          status: 'ADDED' as const, files: [],
+        })),
       ],
     } }),
   };
@@ -464,6 +510,14 @@ function dryRunFixture(status: 'QUEUED' | 'DRY_RUN_RUNNING' | 'APPROVAL_PENDING'
     target: { id: 'org:target', kind: 'org', label: 'target' },
     manifest: 'manifest/package.xml', prepared: status === 'APPROVAL_PENDING',
     createdAt: '2026-08-23T06:00:00.000Z',
+    ...(status === 'DRY_RUN_RUNNING' ? {
+      startedAt: new Date(Date.now() - 2_000).toISOString(),
+      progress: {
+        phase: 'DRY_RUN', deploymentId: '0Af-check-only', status: 'InProgress', done: false,
+        numberComponentsDeployed: 1, numberComponentsTotal: 2,
+        numberTestsCompleted: 0, numberTestsTotal: 1, checkedAt: new Date().toISOString(),
+      },
+    } : {}),
     ...(status !== 'APPROVAL_PENDING' ? {} : {
       payloadChecksum: 'b'.repeat(64), salesforceDeploymentId: '0Af-check-only',
       testPlan: { level: 'RunSpecifiedTests', tests: ['Hello_Test'], selection: 'suffix' },
@@ -479,6 +533,14 @@ function deploymentFixture(status: 'QUEUED' | 'DEPLOYING' | 'SUCCEEDED') {
     target: { id: 'org:target', kind: 'org', label: 'target' },
     manifest: 'selected.xml', scope: 'selected', prepared: false,
     createdAt: '2026-08-23T06:01:00.000Z',
+    ...(status === 'DEPLOYING' ? {
+      startedAt: new Date(Date.now() - 2_000).toISOString(),
+      progress: {
+        phase: 'DEPLOY', deploymentId: '0Af-deploy', status: 'InProgress', done: false,
+        numberComponentsDeployed: 1, numberComponentsTotal: 2,
+        numberTestsCompleted: 0, numberTestsTotal: 1, checkedAt: new Date().toISOString(),
+      },
+    } : {}),
     ...(status !== 'SUCCEEDED' ? {} : { salesforceDeploymentId: '0Af-deploy' }),
   };
 }

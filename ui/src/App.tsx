@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
 
+const METADATA_RESULTS_PER_PAGE = 20;
+
 type IconName =
   | 'activity'
   | 'arrow'
@@ -99,6 +101,9 @@ interface ComparisonJobResponse {
   right: { id: string; kind: 'org' | 'local'; label: string };
   errorMessage?: string;
   createdAt?: string;
+  startedAt?: string;
+  updatedAt?: string;
+  completedAt?: string;
   summary?: { added: number; removed: number; modified: number; identical: number; total: number; different: number };
   result?: {
     summary: { added: number; removed: number; modified: number; identical: number; total: number; different: number };
@@ -134,6 +139,20 @@ interface DryRunJobResponse {
   prepared: boolean;
   payloadChecksum?: string;
   salesforceDeploymentId?: string;
+  progress?: {
+    phase: 'DRY_RUN' | 'DEPLOY';
+    deploymentId: string;
+    status: string;
+    done: boolean;
+    success?: boolean;
+    numberComponentsDeployed?: number;
+    numberComponentsTotal?: number;
+    numberComponentErrors?: number;
+    numberTestsCompleted?: number;
+    numberTestsTotal?: number;
+    numberTestErrors?: number;
+    checkedAt: string;
+  };
   testPlan?: { level: string; tests: string[]; selection: string };
   testCoverage?: number;
   comparisonSummary?: { added: number; removed: number; modified: number; identical: number; total: number; different: number };
@@ -141,6 +160,9 @@ interface DryRunJobResponse {
   errorCode?: string;
   errorMessage?: string;
   createdAt: string;
+  startedAt?: string;
+  updatedAt?: string;
+  completedAt?: string;
 }
 
 interface WorkflowEventMessage {
@@ -421,7 +443,7 @@ export function App() {
           </>}
           {currentPage === 'deploy' && <DeployPage user={auth.user} />}
           {currentPage === 'runs' && <RunsPage runs={recentRuns} comparisons={recentComparisons} deployments={recentDeployments} />}
-          {currentPage === 'settings' && <SettingsPage health={health} remoteAccess={remoteAccess} workspace={dashboardWorkspace} />}
+          {currentPage === 'settings' && <SettingsPage user={auth.user} health={health} remoteAccess={remoteAccess} workspace={dashboardWorkspace} />}
           {currentPage === 'admin' && (auth.user.role === 'ADMIN'
             ? <AdminPage currentUser={auth.user} />
             : <AdminAccessDenied />)}
@@ -450,7 +472,6 @@ function ComparePage({ user }: { user: ApiUser }) {
   const [scopeQuery, setScopeQuery] = useState(ALL_METADATA_LABEL);
   const [leftSourceId, setLeftSourceId] = useState('');
   const [rightSourceId, setRightSourceId] = useState('');
-  const [strict, setStrict] = useState(false);
   const [showIdentical, setShowIdentical] = useState(false);
   const [job, setJob] = useState<ComparisonJobResponse | null>(null);
   const [error, setError] = useState('');
@@ -535,7 +556,7 @@ function ComparePage({ user }: { user: ApiUser }) {
           ...(selectedMetadataType === undefined ? {} : { metadataType: selectedMetadataType.name }),
           leftSourceId,
           rightSourceId,
-          strict,
+          strict: false,
           showIdentical,
         }),
       });
@@ -604,10 +625,9 @@ function ComparePage({ user }: { user: ApiUser }) {
       <section className="workflow-panel compact-panel" aria-labelledby="options-heading">
         <div className="panel-heading">
           <span className="step-number">03</span>
-          <div><h2 id="options-heading">비교 옵션</h2><p>리포트에 표시할 차이 수준을 선택합니다.</p></div>
+          <div><h2 id="options-heading">표시 옵션</h2><p>리포트에 동일 항목을 포함할지 선택합니다.</p></div>
         </div>
         <div className="option-grid">
-          <OptionToggle title="Strict 비교" description="XML 원문 형식 차이까지 탐지" checked={strict} onChange={setStrict} />
           <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} />
         </div>
       </section>
@@ -632,7 +652,6 @@ function DeployPage({ user }: { user: ApiUser }) {
   const [targetOrgId, setTargetOrgId] = useState('');
   const [testLevel, setTestLevel] = useState('auto');
   const [tests, setTests] = useState('');
-  const [strict, setStrict] = useState(false);
   const [showIdentical, setShowIdentical] = useState(false);
   const [comparisonJob, setComparisonJob] = useState<ComparisonJobResponse | null>(null);
   const [dryRunJob, setDryRunJob] = useState<DryRunJobResponse | null>(null);
@@ -641,21 +660,20 @@ function DeployPage({ user }: { user: ApiUser }) {
   const [targetConfirmation, setTargetConfirmation] = useState('');
   const [deploymentConfirmation, setDeploymentConfirmation] = useState('');
   const [error, setError] = useState('');
-  const [uploading, setUploading] = useState(false);
-  const [uploadMessage, setUploadMessage] = useState('');
   const [apexTestClasses, setApexTestClasses] = useState<string[]>([]);
   const [apexTestClassQuery, setApexTestClassQuery] = useState('');
   const [apexTestClassesLoading, setApexTestClassesLoading] = useState(false);
   const [apexTestClassesError, setApexTestClassesError] = useState('');
+  const [testInputFocused, setTestInputFocused] = useState(false);
   const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
   const comparisonRequestControllerRef = useRef<AbortController | null>(null);
   const dryRunRequestControllerRef = useRef<AbortController | null>(null);
   const deploymentRequestControllerRef = useRef<AbortController | null>(null);
   const comparisonJobSelectionKeyRef = useRef<string | null>(null);
   const dryRunJobSelectionKeyRef = useRef<string | null>(null);
-  const workflowSelectionKey = [sourceId, targetOrgId, scopeQuery, strict, showIdentical].join('\u0000');
+  const workflowSelectionKey = [sourceId, targetOrgId, scopeQuery, showIdentical].join('\u0000');
   const cartSelectionKey = deploymentCart.map((item) => item.key).sort().join('\u0001');
-  const dryRunSelectionKey = [sourceId, targetOrgId, cartSelectionKey, testLevel, tests, strict].join('\u0000');
+  const dryRunSelectionKey = [sourceId, targetOrgId, cartSelectionKey, testLevel, tests].join('\u0000');
   const workflowSelectionKeyRef = useRef(workflowSelectionKey);
   const dryRunSelectionKeyRef = useRef(dryRunSelectionKey);
   const comparisonJobRef = useRef(comparisonJob);
@@ -717,7 +735,7 @@ function DeployPage({ user }: { user: ApiUser }) {
     comparisonRequestControllerRef.current?.abort();
     comparisonJobSelectionKeyRef.current = null;
     setComparisonJob(null);
-  }, [sourceId, targetOrgId, scopeQuery, strict, showIdentical]);
+  }, [sourceId, targetOrgId, scopeQuery, showIdentical]);
 
   useEffect(() => {
     dryRunRequestControllerRef.current?.abort();
@@ -734,10 +752,14 @@ function DeployPage({ user }: { user: ApiUser }) {
   }, [sourceId, targetOrgId]);
 
   useEffect(() => {
-    if (!hasApexDeployment || sourceId.length === 0) {
+    if (sourceId.length === 0) {
       setApexTestClasses([]);
       setApexTestClassQuery('');
       setApexTestClassesError('');
+      setApexTestClassesLoading(false);
+      return;
+    }
+    if (!hasApexDeployment && !testInputFocused) {
       setApexTestClassesLoading(false);
       return;
     }
@@ -763,7 +785,7 @@ function DeployPage({ user }: { user: ApiUser }) {
       })
       .finally(() => { if (!controller.signal.aborted) setApexTestClassesLoading(false); });
     return () => controller.abort();
-  }, [hasApexDeployment, sourceId]);
+  }, [hasApexDeployment, sourceId, testInputFocused]);
 
   useEffect(() => {
     const events = new EventSource('/api/v1/workflow/events');
@@ -927,6 +949,16 @@ function DeployPage({ user }: { user: ApiUser }) {
   const normalizedApexTestClassQuery = apexTestClassQuery.trim().toLocaleLowerCase();
   const filteredApexTestClasses = apexTestClasses.filter((testClass) =>
     testClass.toLocaleLowerCase().includes(normalizedApexTestClassQuery));
+  const currentTestToken = tests.match(/[^\s,]*$/u)?.[0] ?? '';
+  const normalizedCurrentTestToken = currentTestToken.toLocaleLowerCase();
+  const directInputSuggestions = normalizedCurrentTestToken.length === 0
+    ? []
+    : apexTestClasses.filter((testClass) =>
+      testClass.toLocaleLowerCase().includes(normalizedCurrentTestToken)
+      && !selectedTestNames.has(testClass)).slice(0, 8);
+  const directInputSearchOpen = testInputFocused
+    && currentTestToken.length > 0
+    && ['auto', 'RunSpecifiedTests'].includes(testLevel);
   const testSelectionValid = testLevel !== 'RunSpecifiedTests' || testNames.length > 0;
   const selectedMetadataType = metadataTypes.find((entry) =>
     entry.name.toLowerCase() === scopeQuery.trim().toLowerCase());
@@ -937,51 +969,6 @@ function DeployPage({ user }: { user: ApiUser }) {
     && deploymentCart.length > 0
     && targetConfirmation === targetAlias
     && deploymentConfirmation === '실제 배포';
-
-  const uploadProject = async (event: ChangeEvent<HTMLInputElement>) => {
-    const input = event.currentTarget;
-    const selectedFiles = [...(input.files ?? [])];
-    input.value = '';
-    if (selectedFiles.length === 0) return;
-    const uploadableFiles = selectedFiles.filter((file) => isUploadableProjectFile(
-      file.webkitRelativePath || file.name,
-    ));
-    if (uploadableFiles.length === 0) {
-      setUploadMessage('업로드할 수 있는 프로젝트 파일이 없습니다. .git, node_modules와 비밀키 파일은 제외됩니다.');
-      return;
-    }
-    setUploading(true);
-    setUploadMessage('');
-    try {
-      const form = new FormData();
-      const firstPath = uploadableFiles[0]!.webkitRelativePath;
-      form.append('label', firstPath.length > 0 ? firstPath.split('/')[0]! : '업로드 프로젝트');
-      for (const file of uploadableFiles) {
-        form.append('files', file, file.webkitRelativePath || file.name);
-      }
-      const response = await fetch('/api/v1/uploads/projects', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'x-sfud-csrf': readCookie('sfud_csrf') ?? '' },
-        body: form,
-      });
-      const data = await response.json() as { source?: WorkspaceSource; error?: { message: string } };
-      if (!response.ok || data.source === undefined) {
-        throw new Error(data.error?.message ?? '프로젝트를 업로드하지 못했습니다.');
-      }
-      setWorkspace((current) => current === null ? current : {
-        ...current,
-        sources: [...current.sources.filter((entry) => entry.id !== data.source!.id), data.source!],
-      });
-      setSourceId(data.source.id);
-      const skipped = selectedFiles.length - uploadableFiles.length;
-      setUploadMessage(`${data.source.label} 업로드 완료${skipped > 0 ? ` · 제외된 파일 ${skipped}개` : ''}`);
-    } catch (caught) {
-      setUploadMessage(caught instanceof Error ? caught.message : '프로젝트를 업로드하지 못했습니다.');
-    } finally {
-      setUploading(false);
-    }
-  };
 
   const changeTestLevel = (nextLevel: string) => {
     setTestLevel(nextLevel);
@@ -996,6 +983,11 @@ function DeployPage({ user }: { user: ApiUser }) {
     if (selected && !['auto', 'RunSpecifiedTests'].includes(testLevel)) {
       setTestLevel('RunSpecifiedTests');
     }
+  };
+
+  const selectDirectTestClass = (testClass: string) => {
+    const tokenStart = tests.search(/[^\s,]*$/u);
+    setTests(`${tokenStart < 0 ? '' : tests.slice(0, tokenStart)}${testClass}`);
   };
 
   const setComponentInCart = (component: ComparisonComponent, selected: boolean) => {
@@ -1027,7 +1019,7 @@ function DeployPage({ user }: { user: ApiUser }) {
           ...(selectedMetadataType === undefined ? {} : { metadataType: selectedMetadataType.name }),
           leftSourceId: targetOrgId,
           rightSourceId: sourceId,
-          strict,
+          strict: false,
           showIdentical,
         }),
       });
@@ -1068,7 +1060,7 @@ function DeployPage({ user }: { user: ApiUser }) {
         body: JSON.stringify({
           scope: 'selected',
           components: deploymentCart.map(({ type, fullName }) => ({ type, fullName })),
-          sourceId, targetOrgId, testLevel, tests: testNames, waitMinutes: 60, strict,
+          sourceId, targetOrgId, testLevel, tests: testNames, waitMinutes: 60, strict: false,
         }),
       });
       const data = await response.json() as { job?: DryRunJobResponse; error?: { message: string } };
@@ -1121,7 +1113,7 @@ function DeployPage({ user }: { user: ApiUser }) {
             targetOrgId,
             tests: testNames,
             waitMinutes: 60,
-            strict,
+            strict: false,
             targetConfirmation,
             confirmation: deploymentConfirmation,
           }),
@@ -1154,20 +1146,6 @@ function DeployPage({ user }: { user: ApiUser }) {
               <div className="direction-marker"><span>배포 대상</span><Icon name="arrow" /></div>
               <WorkspaceSourceSelect side="TARGET ORG" value={targetOrgId} sources={(workspace?.sources ?? []).filter((entry) => entry.kind === 'org')} onChange={setTargetOrgId} tone="blue" />
             </div>
-            <div className="project-source-actions">
-              <div><strong>프로젝트 소스가 어디에 있나요?</strong><p><b>서버 프로젝트</b>는 시작할 때 <code>--project</code>로 등록하고, <b>내 단말기 프로젝트</b>는 여기서 임시 업로드합니다.</p></div>
-              <label className={`small-button upload-button${uploading ? ' upload-button-busy' : ''}`}>
-                <Icon name={uploading ? 'refresh' : 'plus'} />{uploading ? '업로드 중……' : '내 프로젝트 업로드'}
-                <input
-                  type="file"
-                  multiple
-                  disabled={!canRun || uploading || workspace === null}
-                  onChange={(event) => void uploadProject(event)}
-                  {...{ webkitdirectory: '' }}
-                />
-              </label>
-            </div>
-            {uploadMessage && <p className="upload-message" role="status">{uploadMessage}</p>}
           </section>
 
           <section className="workflow-panel" aria-labelledby="deploy-scope-heading">
@@ -1185,10 +1163,40 @@ function DeployPage({ user }: { user: ApiUser }) {
           </section>
 
           <section className="workflow-panel" aria-labelledby="test-heading">
-            <div className="panel-heading"><span className="step-number">03</span><div><h2 id="test-heading">비교 옵션과 Apex 테스트</h2><p>비교가 완료되면 선택한 테스트 조건으로 Dry-run을 실행할 수 있습니다.</p></div><span className="auto-badge">{testLevel.toUpperCase()}</span></div>
+            <div className="panel-heading"><span className="step-number">03</span><div><h2 id="test-heading">Apex 테스트와 표시 옵션</h2><p>비교가 완료되면 선택한 테스트 조건으로 Dry-run을 실행할 수 있습니다.</p></div><span className="auto-badge">{testLevel.toUpperCase()}</span></div>
             <div className="select-row">
               <label><span>테스트 수준</span><select value={testLevel} onChange={(event) => changeTestLevel(event.target.value)}><option value="auto">Auto · 권장</option><option value="RunSpecifiedTests">RunSpecifiedTests</option><option value="RunLocalTests">RunLocalTests</option><option value="RunAllTestsInOrg">RunAllTestsInOrg</option><option value="RunRelevantTests">RunRelevantTests</option><option value="NoTestRun">NoTestRun</option></select></label>
-              <label><span>테스트 클래스 직접 입력</span><input className="tests-input" value={tests} onChange={(event) => setTests(event.target.value)} placeholder="AccountService_Test, Other_Test" disabled={!['auto', 'RunSpecifiedTests'].includes(testLevel)} /></label>
+              <div
+                className="test-class-input"
+                onFocus={() => setTestInputFocused(true)}
+                onBlur={(event) => {
+                  if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) {
+                    setTestInputFocused(false);
+                  }
+                }}
+              >
+                <label><span>테스트 클래스 직접 입력</span><input
+                  className="tests-input"
+                  value={tests}
+                  onChange={(event) => setTests(event.target.value)}
+                  placeholder="AccountService_Test, Other_Test"
+                  disabled={!['auto', 'RunSpecifiedTests'].includes(testLevel)}
+                  role="combobox"
+                  aria-autocomplete="list"
+                  aria-expanded={directInputSearchOpen}
+                  aria-controls="source-apex-test-suggestions"
+                /></label>
+                {directInputSearchOpen && <div id="source-apex-test-suggestions" className="test-class-suggestions" role="listbox" aria-label="source 테스트 클래스 검색 결과">
+                  <div className="test-class-suggestions-head"><span>{source?.label ?? 'source'}에서 검색</span><small>최대 8개</small></div>
+                  {apexTestClassesLoading
+                    ? <p><Icon name="refresh" />Apex 클래스 검색 중……</p>
+                    : apexTestClassesError
+                      ? <p className="test-class-suggestions-error">{apexTestClassesError}</p>
+                      : directInputSuggestions.length === 0
+                        ? <p>일치하는 source Apex 클래스가 없습니다.</p>
+                        : directInputSuggestions.map((testClass) => <button key={testClass} type="button" role="option" aria-selected="false" onClick={() => selectDirectTestClass(testClass)}><Icon name="code" />{testClass}</button>)}
+                </div>}
+              </div>
             </div>
             {hasApexDeployment
               ? <section className="apex-test-picker" aria-label="Apex 테스트 클래스 선택">
@@ -1209,7 +1217,6 @@ function DeployPage({ user }: { user: ApiUser }) {
               : <p className="apex-test-empty"><Icon name="code" />Apex Class를 배포 대상에 추가하면 테스트 클래스 선택 목록을 불러옵니다.</p>}
             {!testSelectionValid && <p className="apex-test-validation" role="alert">RunSpecifiedTests는 테스트 클래스를 하나 이상 선택하거나 입력해야 합니다.</p>}
             <div className="option-grid">
-              <OptionToggle title="Strict 비교" description="XML 원문 형식 차이까지 탐지" checked={strict} onChange={setStrict} />
               <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} />
             </div>
             <div className="comparison-action">
@@ -1281,15 +1288,24 @@ function WorkflowStatusPanel({
   dryRunJob: DryRunJobResponse | null;
   deploymentJob: DryRunJobResponse | null;
 }) {
+  const running = [comparisonJob?.status, dryRunJob?.status, deploymentJob?.status]
+    .some((status) => status !== undefined && ['QUEUED', 'RUNNING', 'DRY_RUN_RUNNING', 'DEPLOYING'].includes(status));
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running) return;
+    setNow(Date.now());
+    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, [running]);
   const connectionLabel = liveStatus === 'connected'
     ? '실시간 연결'
     : liveStatus === 'reconnecting'
       ? '재연결 중'
       : '연결 중';
   const items = [
-    workflowStatusItem('비교', comparisonJob?.id, comparisonJob?.status),
-    workflowStatusItem('Dry-run', dryRunJob?.id, dryRunJob?.status),
-    workflowStatusItem('실제 배포', deploymentJob?.id, deploymentJob?.status),
+    workflowStatusItem('비교', comparisonJob, now),
+    workflowStatusItem('Dry-run', dryRunJob, now),
+    workflowStatusItem('실제 배포', deploymentJob, now),
   ];
   return (
     <section className="workflow-status-panel" aria-labelledby="workflow-status-heading" aria-live="polite">
@@ -1301,7 +1317,7 @@ function WorkflowStatusPanel({
         {items.map((item) => <article className={`workflow-status-card workflow-status-${item.tone}`} key={item.title} aria-label={`${item.title} 현황`}>
           <span>{item.title}</span>
           <strong>{item.label}</strong>
-          <small>{item.jobId === undefined ? '아직 실행되지 않음' : `Job ${item.jobId.slice(0, 12)}`}</small>
+          <small>{item.detail}</small>
         </article>)}
       </div>
       <p className="workflow-status-note">SSE 연결이 끊기면 자동 재연결하며, polling으로 상태 확인을 계속합니다.</p>
@@ -1311,23 +1327,48 @@ function WorkflowStatusPanel({
 
 function workflowStatusItem(
   title: string,
-  jobId: string | undefined,
-  status: ComparisonJobResponse['status'] | DryRunJobResponse['status'] | undefined,
-): { title: string; jobId?: string; label: string; tone: 'idle' | 'pending' | 'success' | 'error' } {
-  if (status === undefined) return { title, label: '대기', tone: 'idle' };
-  if (status === 'QUEUED') return { title, jobId, label: '대기열', tone: 'pending' };
+  job: ComparisonJobResponse | DryRunJobResponse | null,
+  now: number,
+): { title: string; label: string; detail: string; tone: 'idle' | 'pending' | 'success' | 'error' } {
+  if (job === null) return { title, label: '대기', detail: '아직 실행되지 않음', tone: 'idle' };
+  const status = job.status;
+  const seconds = elapsedSeconds(job.startedAt ?? job.createdAt, job.completedAt, now);
+  const elapsed = seconds === undefined ? '' : ` · ${seconds}초`;
+  const progress = 'progress' in job ? job.progress : undefined;
+  const detail = progress === undefined
+    ? `Job ${job.id.slice(0, 12)}`
+    : progressSummary(progress);
+  if (status === 'QUEUED') return { title, label: `대기열${elapsed}`, detail, tone: 'pending' };
   if (['RUNNING', 'DRY_RUN_RUNNING', 'DEPLOYING'].includes(status)) {
-    return { title, jobId, label: '진행 중', tone: 'pending' };
+    return { title, label: `${progress?.status ?? '진행 중'}${elapsed}`, detail, tone: 'pending' };
   }
   if (status === 'FAILED' || status === 'RECONCILE_REQUIRED') {
-    return { title, jobId, label: status === 'FAILED' ? '실패' : '확인 필요', tone: 'error' };
+    return { title, label: `${status === 'FAILED' ? '실패' : '확인 필요'}${elapsed}`, detail, tone: 'error' };
   }
   return {
     title,
-    jobId,
-    label: status === 'APPROVAL_PENDING' ? '승인 대기' : '완료',
+    label: `${status === 'APPROVAL_PENDING' ? '승인 대기' : '완료'}${elapsed}`,
+    detail,
     tone: 'success',
   };
+}
+
+function elapsedSeconds(startedAt: string | undefined, completedAt: string | undefined, now: number): number | undefined {
+  if (startedAt === undefined) return undefined;
+  const start = Date.parse(startedAt);
+  const end = completedAt === undefined ? now : Date.parse(completedAt);
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, Math.floor((end - start) / 1_000)) : undefined;
+}
+
+function progressSummary(progress: NonNullable<DryRunJobResponse['progress']>): string {
+  const parts = [`SF ${progress.deploymentId}`];
+  if (progress.numberComponentsTotal !== undefined) {
+    parts.push(`컴포넌트 ${progress.numberComponentsDeployed ?? 0}/${progress.numberComponentsTotal}`);
+  }
+  if (progress.numberTestsTotal !== undefined) {
+    parts.push(`테스트 ${progress.numberTestsCompleted ?? 0}/${progress.numberTestsTotal}`);
+  }
+  return parts.join(' · ');
 }
 
 function RunsPage({ runs, comparisons, deployments }: { runs: DashboardRun[]; comparisons: ComparisonJobResponse[]; deployments: DryRunJobResponse[] }) {
@@ -1357,14 +1398,78 @@ function RunsPage({ runs, comparisons, deployments }: { runs: DashboardRun[]; co
   );
 }
 
-function SettingsPage({ health, remoteAccess, workspace }: { health: HealthResponse | null; remoteAccess: boolean; workspace: WorkspaceResponse | null }) {
+function SettingsPage({
+  user,
+  health,
+  remoteAccess,
+  workspace: initialWorkspace,
+}: {
+  user: ApiUser;
+  health: HealthResponse | null;
+  remoteAccess: boolean;
+  workspace: WorkspaceResponse | null;
+}) {
+  const [workspace, setWorkspace] = useState(initialWorkspace);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMessage, setUploadMessage] = useState('');
+  const canUpload = ['OPERATOR', 'DEPLOYER', 'ADMIN'].includes(user.role);
   const orgs = workspace?.sources.filter((source) => source.kind === 'org') ?? [];
+  const uploadedSources = workspace?.sources.filter((source) => source.location === 'upload') ?? [];
+
+  useEffect(() => {
+    setWorkspace(initialWorkspace);
+  }, [initialWorkspace]);
+
+  const uploadProject = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const selectedFiles = [...(input.files ?? [])];
+    input.value = '';
+    if (selectedFiles.length === 0) return;
+    const uploadableFiles = selectedFiles.filter((file) => isUploadableProjectFile(
+      file.webkitRelativePath || file.name,
+    ));
+    if (uploadableFiles.length === 0) {
+      setUploadMessage('업로드할 수 있는 프로젝트 파일이 없습니다. .git, node_modules와 비밀키 파일은 제외됩니다.');
+      return;
+    }
+    setUploading(true);
+    setUploadMessage('');
+    try {
+      const form = new FormData();
+      const firstPath = uploadableFiles[0]!.webkitRelativePath;
+      form.append('label', firstPath.length > 0 ? firstPath.split('/')[0]! : '업로드 프로젝트');
+      for (const file of uploadableFiles) {
+        form.append('files', file, file.webkitRelativePath || file.name);
+      }
+      const response = await fetch('/api/v1/uploads/projects', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'x-sfud-csrf': readCookie('sfud_csrf') ?? '' },
+        body: form,
+      });
+      const data = await response.json() as { source?: WorkspaceSource; error?: { message: string } };
+      if (!response.ok || data.source === undefined) {
+        throw new Error(data.error?.message ?? '프로젝트를 업로드하지 못했습니다.');
+      }
+      setWorkspace((current) => current === null ? current : {
+        ...current,
+        sources: [...current.sources.filter((entry) => entry.id !== data.source!.id), data.source!],
+      });
+      const skipped = selectedFiles.length - uploadableFiles.length;
+      setUploadMessage(`${data.source.label} 업로드 완료${skipped > 0 ? ` · 제외된 파일 ${skipped}개` : ''}`);
+    } catch (caught) {
+      setUploadMessage(caught instanceof Error ? caught.message : '프로젝트를 업로드하지 못했습니다.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
   return (
     <div className="page-stack">
       <PageIntro
         kicker="SERVER CONFIGURATION"
-        title="연결과 서버 프로젝트를 확인합니다."
-        description="Salesforce 인증은 sf CLI에서 관리하며 access token과 auth URL은 UI에 저장하지 않습니다."
+        title="연결과 프로젝트 소스를 관리합니다."
+        description="Salesforce 인증은 sf CLI에서 관리하고, 내 단말기의 DX 프로젝트는 사용자별 임시 소스로 업로드합니다."
       />
       <div className="settings-grid">
         <section className="workflow-panel" aria-labelledby="server-heading">
@@ -1390,6 +1495,30 @@ function SettingsPage({ health, remoteAccess, workspace }: { health: HealthRespo
             : workspace.projects.length === 0
               ? <p className="empty-runs">등록된 서버 프로젝트가 없습니다. 서버 시작 시 <code>--project</code>를 지정하세요.</p>
               : workspace.projects.map((project) => <div className="project-row" key={project.id}><span className="project-logo"><Icon name="code" /></span><div><strong>{project.displayName}</strong><code>Manifest {project.manifests.length}개</code></div><span className="tag tag-green">SERVER</span><span aria-hidden="true"><Icon name="chevron" /></span></div>)}
+        </section>
+        <section className="workflow-panel settings-wide" aria-labelledby="upload-project-heading">
+          <div className="panel-heading">
+            <span className="card-icon icon-blue"><Icon name="plus" /></span>
+            <div><h2 id="upload-project-heading">내 단말기 프로젝트</h2><p>Salesforce DX 폴더를 현재 사용자만 쓸 수 있는 임시 소스로 업로드합니다.</p></div>
+            <label className={`small-button upload-button${uploading ? ' upload-button-busy' : ''}`}>
+              <Icon name={uploading ? 'refresh' : 'plus'} />{uploading ? '업로드 중……' : 'DX 프로젝트 업로드'}
+              <input
+                type="file"
+                multiple
+                disabled={!canUpload || uploading || workspace === null}
+                onChange={(event) => void uploadProject(event)}
+                {...{ webkitdirectory: '' }}
+              />
+            </label>
+          </div>
+          <div className="upload-policy"><Icon name="shield" /><p><strong>사용자별 임시 저장</strong>마지막 사용 후 4시간 동안 유지하며, <code>.git</code>, <code>node_modules</code>, 비밀키 파일은 업로드에서 제외합니다.</p></div>
+          {uploadMessage && <p className="upload-message" role="status">{uploadMessage}</p>}
+          {!canUpload && <p className="upload-message">VIEWER 역할은 프로젝트를 업로드할 수 없습니다.</p>}
+          {workspace === null
+            ? <p className="empty-runs">업로드 프로젝트를 확인 중입니다.</p>
+            : uploadedSources.length === 0
+              ? <p className="empty-runs">업로드된 프로젝트가 없습니다.</p>
+              : <div className="uploaded-project-list">{uploadedSources.map((source) => <div className="project-row" key={source.id}><span className="project-logo project-logo-upload"><Icon name="folder" /></span><div><strong>{source.label}</strong><code>{source.detail}</code></div><span className="tag tag-blue">TEMPORARY</span><a href="/deploy" aria-label={`${source.label} 배포 화면에서 사용`}><Icon name="arrow" /></a></div>)}</div>}
         </section>
       </div>
     </div>
@@ -1597,18 +1726,26 @@ function ComparisonResultPanel({
   onSelectionChange?: (component: ComparisonComponent, selected: boolean) => void;
   selectionDisabled?: boolean;
 }) {
+  const [resultPage, setResultPage] = useState(1);
+  useEffect(() => setResultPage(1), [job.id]);
+  const displaySource = deploymentView ? job.right : job.left;
+  const displayTarget = deploymentView ? job.left : job.right;
   if (job.status === 'QUEUED' || job.status === 'RUNNING') {
-    return <section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? '비교 대기 중' : '메타데이터 비교 중'}</strong><p>{job.left.label} → {job.right.label} · {job.manifest}</p></div></section>;
+    return <section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? '비교 대기 중' : '메타데이터 비교 중'}</strong><p>{displaySource.label} → {displayTarget.label} · {job.manifest}</p></div></section>;
   }
   if (job.status === 'FAILED') {
     return <section className="compare-error" role="alert"><strong>비교 작업이 실패했습니다.</strong><p>{job.errorMessage ?? '상세 오류가 기록되지 않았습니다.'}</p></section>;
   }
   if (job.result === undefined) return null;
   const summary = job.result.summary;
+  const resultPageCount = Math.max(1, Math.ceil(job.result.components.length / METADATA_RESULTS_PER_PAGE));
+  const currentResultPage = Math.min(resultPage, resultPageCount);
+  const resultStart = (currentResultPage - 1) * METADATA_RESULTS_PER_PAGE;
+  const visibleComponents = job.result.components.slice(resultStart, resultStart + METADATA_RESULTS_PER_PAGE);
   return (
     <section className="comparison-result" aria-labelledby="comparison-result-title">
       <div className="comparison-result-head">
-        <div><p className="eyebrow">COMPARISON COMPLETE</p><h2 id="comparison-result-title">{job.left.label} → {job.right.label}</h2><small>{job.manifest}</small></div>
+        <div><p className="eyebrow">COMPARISON COMPLETE</p><h2 id="comparison-result-title">{displaySource.label} → {displayTarget.label}</h2><small>{job.manifest}</small></div>
         <span className="result-success"><Icon name="check" />비교 완료</span>
       </div>
       <div className="comparison-summary">
@@ -1622,7 +1759,7 @@ function ComparisonResultPanel({
       <div className="component-results">
         {job.result.components.length === 0
           ? <p className="empty-result">표시할 차이가 없습니다. 두 소스가 동일합니다.</p>
-          : job.result.components.map((component) => <details key={component.key} className={`component-result${deploymentView ? ' component-selectable' : ''}${selectedKeys.has(component.key) ? ' component-selected' : ''}`}>
+          : visibleComponents.map((component) => <details key={component.key} className={`component-result${deploymentView ? ' component-selectable' : ''}${selectedKeys.has(component.key) ? ' component-selected' : ''}`}>
               <summary>{deploymentView && <label className={`component-cart-check${component.status === 'REMOVED' || selectionDisabled ? ' component-cart-disabled' : ''}`} onClick={(event) => event.stopPropagation()}>
                 <input
                   type="checkbox"
@@ -1635,6 +1772,11 @@ function ComparisonResultPanel({
               </label>}<span className={`component-status status-${component.status.toLowerCase()}`}>{deploymentView ? deploymentDiffStatusLabel(component.status) : component.status}</span><div><strong>{component.fullName}</strong><small>{component.type} · 파일 {component.files.length}개{deploymentView && component.status === 'REMOVED' ? ' · 소스에 없어 선택 불가' : ''}</small></div><Icon name="chevron" /></summary>
               <div className="component-files">{component.files.map((file) => <article key={file.path}><div><code>{file.path}</code><span>{file.status}</span></div>{file.xmlChanges !== undefined && file.xmlChanges.length > 0 && <p>XML 변경 {file.xmlChanges.length}개</p>}{file.unifiedDiff && <pre>{file.unifiedDiff}</pre>}</article>)}</div>
             </details>)}
+        {job.result.components.length > METADATA_RESULTS_PER_PAGE && <nav className="component-pagination" aria-label="메타데이터 검색 결과 페이지">
+          <button type="button" onClick={() => setResultPage((page) => Math.max(1, page - 1))} disabled={currentResultPage === 1} aria-label="이전 페이지"><Icon name="chevron" />이전</button>
+          <span><strong>{currentResultPage}</strong> / {resultPageCount}페이지 · {resultStart + 1}-{Math.min(resultStart + METADATA_RESULTS_PER_PAGE, job.result.components.length)} / {job.result.components.length}개</span>
+          <button type="button" onClick={() => setResultPage((page) => Math.min(resultPageCount, page + 1))} disabled={currentResultPage === resultPageCount} aria-label="다음 페이지">다음<Icon name="chevron" /></button>
+        </nav>}
       </div>
     </section>
   );
@@ -1642,10 +1784,10 @@ function ComparisonResultPanel({
 
 function DryRunResultPanel({ job }: { job: DryRunJobResponse }) {
   if (job.kind === 'DEPLOY' && ['QUEUED', 'DEPLOYING'].includes(job.status)) {
-    return <section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? '실제 배포 대기 중' : 'Salesforce 실제 배포 중'}</strong><p>{job.source.label} → {job.target.label} · dry-run으로 고정한 payload를 배포합니다.</p></div></section>;
+    return <section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? '실제 배포 대기 중' : `Salesforce 실제 배포 중${job.progress === undefined ? '' : ` · ${job.progress.status}`}`}</strong><p>{job.progress === undefined ? `${job.source.label} → ${job.target.label} · dry-run으로 고정한 payload를 배포합니다.` : progressSummary(job.progress)}</p></div></section>;
   }
   if (['QUEUED', 'DRY_RUN_RUNNING'].includes(job.status)) {
-    return <section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? 'dry-run 대기 중' : 'Salesforce check-only 실행 중'}</strong><p>{job.source.label} → {job.target.label} · snapshot, 차이, 테스트를 검증합니다.</p></div></section>;
+    return <section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? 'dry-run 대기 중' : `Salesforce check-only 실행 중${job.progress === undefined ? '' : ` · ${job.progress.status}`}`}</strong><p>{job.progress === undefined ? `${job.source.label} → ${job.target.label} · snapshot, 차이, 테스트를 검증합니다.` : progressSummary(job.progress)}</p></div></section>;
   }
   if (job.status === 'FAILED' || job.status === 'RECONCILE_REQUIRED') {
     return <section className="compare-error" role="alert"><strong>{job.status === 'FAILED' ? `${job.kind === 'DEPLOY' ? '실제 배포' : 'dry-run'}이 실패했습니다.` : 'Salesforce 상태 재확인이 필요합니다.'}</strong><p>{job.errorMessage ?? '상세 오류가 기록되지 않았습니다.'}</p></section>;

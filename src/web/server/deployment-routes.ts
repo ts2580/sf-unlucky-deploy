@@ -172,6 +172,7 @@ function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: b
     prepared: job.prepared,
     ...(job.prepared ? { payloadChecksum: job.payloadChecksum } : {}),
     ...(job.salesforceDeploymentId === undefined ? {} : { salesforceDeploymentId: job.salesforceDeploymentId }),
+    ...(job.progress === undefined ? {} : { progress: job.progress }),
     ...(job.testPlan === undefined ? {} : { testPlan: job.testPlan }),
     ...(testCoverage === undefined ? {} : { testCoverage }),
     ...(job.comparisonResult === undefined ? {} : { comparisonSummary: job.comparisonResult.summary }),
