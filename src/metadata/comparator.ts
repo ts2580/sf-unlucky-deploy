@@ -63,6 +63,8 @@ export interface CompareOptions {
   strict?: boolean;
 }
 
+const COMPONENT_COMPARISON_CONCURRENCY = 8;
+
 export async function compareSnapshots(
   left: MetadataSnapshot,
   right: MetadataSnapshot,
@@ -80,21 +82,17 @@ export async function compareSnapshots(
   const keys = [...new Set([...leftComponents.keys(), ...rightComponents.keys()])].sort((a, b) =>
     a.localeCompare(b),
   );
-  const components: ComponentDifference[] = [];
-
-  for (const key of keys) {
+  const components = await mapWithConcurrency(keys, COMPONENT_COMPARISON_CONCURRENCY, async (key) => {
     const leftComponent = leftComponents.get(key);
     const rightComponent = rightComponents.get(key);
-    components.push(
-      await compareComponent(
-        left.packageRoot,
-        right.packageRoot,
-        leftComponent,
-        rightComponent,
-        options.strict ?? false,
-      ),
+    return await compareComponent(
+      left.packageRoot,
+      right.packageRoot,
+      leftComponent,
+      rightComponent,
+      options.strict ?? false,
     );
-  }
+  });
 
   const summary = summarize(components);
   const hasPermissionMetadata = components.some(
@@ -146,15 +144,19 @@ async function compareComponent(
     };
   }
 
-  const filePaths = [...new Set([...left.files, ...right.files])].sort((a, b) => a.localeCompare(b));
+  const leftFilePaths = new Set(left.files);
+  const rightFilePaths = new Set(right.files);
+  const filePaths = [...new Set([...leftFilePaths, ...rightFilePaths])].sort((a, b) =>
+    a.localeCompare(b),
+  );
   const files: FileDifference[] = [];
   for (const relativePath of filePaths) {
     files.push(
       await compareFile(
         leftRoot,
         rightRoot,
-        left.files.includes(relativePath),
-        right.files.includes(relativePath),
+        leftFilePaths.has(relativePath),
+        rightFilePaths.has(relativePath),
         relativePath,
         strict,
       ),
@@ -223,10 +225,18 @@ async function compareFile(
     rightSize: rightContent.byteLength,
   };
 
+  if (leftContent.equals(rightContent)) {
+    return {
+      ...common,
+      status: 'IDENTICAL',
+      ...(kind === 'xml' ? { xmlChanges: [] } : {}),
+    };
+  }
+
   if (kind === 'binary') {
     return {
       ...common,
-      status: leftContent.equals(rightContent) ? 'IDENTICAL' : 'MODIFIED',
+      status: 'MODIFIED',
     };
   }
 
@@ -340,4 +350,31 @@ function snapshotReference(snapshot: MetadataSnapshot): SnapshotReference {
     manifestSha256: snapshot.manifestSha256,
     payloadSha256: snapshot.payloadSha256,
   };
+}
+
+async function mapWithConcurrency<Input, Output>(
+  values: readonly Input[],
+  concurrency: number,
+  mapper: (value: Input, index: number) => Promise<Output>,
+): Promise<Output[]> {
+  const results = new Array<Output>(values.length);
+  let nextIndex = 0;
+  let stopped = false;
+
+  async function worker(): Promise<void> {
+    while (!stopped && nextIndex < values.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      try {
+        results[index] = await mapper(values[index]!, index);
+      } catch (error) {
+        stopped = true;
+        throw error;
+      }
+    }
+  }
+
+  const workerCount = Math.min(concurrency, values.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
 }
