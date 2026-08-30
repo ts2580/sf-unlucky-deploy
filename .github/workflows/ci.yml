@@ -11,6 +11,32 @@ permissions:
   contents: read
 
 jobs:
+  promotion-policy:
+    name: promotion-policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+
+    steps:
+      - name: main 승격 경로 검증
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if [[ "$EVENT_NAME" != "pull_request" || "$BASE_REF" != "main" ]]; then
+            echo "main 대상 Pull Request가 아니므로 승격 경로 검증을 건너뜁니다."
+            exit 0
+          fi
+
+          if [[ "$HEAD_REF" != "canary" || "$HEAD_REPOSITORY" != "$REPOSITORY" ]]; then
+            echo "::error::main 브랜치는 동일 저장소의 canary 브랜치에서 시작한 Pull Request로만 변경할 수 있습니다."
+            exit 1
+          fi
+
+          echo "동일 저장소의 canary 브랜치에서 시작한 main 승격 Pull Request입니다."
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
