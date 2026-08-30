@@ -1,5 +1,6 @@
 import path from 'node:path';
 
+import { SfudError } from '../core/errors.js';
 import { compareSnapshots, type ComparisonResult } from '../metadata/comparator.js';
 import { generateDeployableManifest } from '../metadata/deployable-manifest.js';
 import { withRequestWorkspace } from '../core/request-workspace.js';
@@ -16,6 +17,7 @@ export interface CompareCommandOptions {
   manifest?: string;
   allMetadata?: boolean;
   metadataType?: string;
+  wait?: number;
   reportDir?: string;
   detail?: boolean;
   showIdentical?: boolean;
@@ -60,7 +62,10 @@ export async function runCompareCommand(
     const manifestPath = generatedManifest?.manifestPath
       ?? path.resolve(cwd, options.manifest ?? 'manifest/package.xml');
     const sourceManifests = generatedManifest?.sourceManifests;
-    const snapshotWaitMinutes = options.metadataType === undefined ? 15 : 5;
+    const snapshotWaitMinutes = options.wait ?? 60;
+    if (!Number.isInteger(snapshotWaitMinutes) || snapshotWaitMinutes < 1) {
+      throw new SfudError('INVALID_ARGUMENT', '--wait는 1 이상의 정수여야 합니다.');
+    }
     const snapshotCommandTimeoutMs = (snapshotWaitMinutes + 1) * 60 * 1000;
     await writeRunMetadata(context, 'compare', leftSource, rightSource.displayName, manifestPath);
 

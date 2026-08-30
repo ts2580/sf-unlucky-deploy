@@ -37,6 +37,7 @@ describe('sfud CLI', () => {
     expect(compareCommand?.options.map((option) => option.long)).toEqual(expect.arrayContaining([
       '--all-metadata',
       '--metadata-type',
+      '--wait',
     ]));
   });
 

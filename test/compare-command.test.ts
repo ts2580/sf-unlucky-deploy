@@ -37,6 +37,10 @@ describe('compare command', () => {
     expect(result.exitCode).toBe(1);
     expect(result.comparison.summary.modified).toBe(1);
     expect(client.calls.filter((call) => call.args.includes('retrieve'))).toHaveLength(2);
+    for (const call of client.calls.filter((entry) => entry.args.includes('retrieve'))) {
+      expect(flagValue(call.args, '--wait')).toBe('60');
+      expect(call.options.timeoutMs).toBe(61 * 60 * 1000);
+    }
     const requestWorkspaces = new Set(client.calls.map((call) => call.options.cwd));
     expect(requestWorkspaces.size).toBe(1);
     const requestWorkspace = [...requestWorkspaces][0]!;
@@ -87,6 +91,7 @@ describe('compare command', () => {
       left: 'org:left',
       right: 'org:right',
       metadataType: 'ApexClass',
+      wait: 90,
       reportDir: path.join(root, 'run'),
       color: false,
     }, { cwd: root, sfClient: client, stdout: () => undefined });
@@ -96,8 +101,8 @@ describe('compare command', () => {
     const leftRetrieval = client.retrievals.find((entry) => entry.alias === 'left')!;
     const rightRetrieval = client.retrievals.find((entry) => entry.alias === 'right')!;
     for (const retrieval of client.retrievals) {
-      expect(retrieval.waitMinutes).toBe('5');
-      expect(retrieval.options.timeoutMs).toBe(6 * 60 * 1000);
+      expect(retrieval.waitMinutes).toBe('90');
+      expect(retrieval.options.timeoutMs).toBe(91 * 60 * 1000);
     }
     expect(leftRetrieval.manifestPath).not.toBe(rightRetrieval.manifestPath);
     await expect(readFile(leftRetrieval.manifestPath, 'utf8')).resolves.toContain('<members>leftOnly</members>');

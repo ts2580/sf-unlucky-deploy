@@ -139,6 +139,10 @@ describe('SQLite 저장소', () => {
       dryRunJobId: dryRun.id,
       payloadChecksum: checksum,
       targetAlias: 'stdOrg',
+      prepared: true,
+      comparisonResult,
+      testPlan: { level: 'RunLocalTests', tests: [], selection: 'fallback' },
+      dryRunResult: { status: 0, result: { id: '0Af-dry-run' } },
     });
     const coordinator = new DeploymentCoordinator(jobs, new SingleJobQueue());
     expect(await coordinator.runDeployment(deploy.id, async () => ({

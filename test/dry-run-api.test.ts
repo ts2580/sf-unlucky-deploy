@@ -158,10 +158,17 @@ describe('dry-run API', () => {
         },
       });
       expect(approved.statusCode).toBe(202);
+      expect(approved.json()).toMatchObject({ job: {
+        prepared: true,
+        payloadChecksum: dryRun.payloadChecksum,
+        testPlan: { level: 'RunLocalTests' },
+      } });
       const deploymentId = approved.json<{ job: { id: string } }>().job.id;
       await fixture.server.sfudRuntime.deploymentQueue.onIdle();
       expect(await fixture.server.sfudRuntime.deploymentJobs.getRequired(deploymentId)).toMatchObject({
-        kind: 'DEPLOY', status: 'SUCCEEDED', selectedComponents: [{ type: 'ApexClass', fullName: 'Hello' }],
+        kind: 'DEPLOY', status: 'SUCCEEDED', prepared: true,
+        testPlan: { level: 'RunLocalTests' },
+        selectedComponents: [{ type: 'ApexClass', fullName: 'Hello' }],
       });
       const deployCalls = deploymentStartCalls(fixture.client.calls);
       expect(deployCalls).toHaveLength(2);
