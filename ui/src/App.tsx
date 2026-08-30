@@ -653,6 +653,7 @@ function DeployPage({ user }: { user: ApiUser }) {
   const [testLevel, setTestLevel] = useState('auto');
   const [tests, setTests] = useState('');
   const [showIdentical, setShowIdentical] = useState(false);
+  const [comparisonSubmitting, setComparisonSubmitting] = useState(false);
   const [comparisonJob, setComparisonJob] = useState<ComparisonJobResponse | null>(null);
   const [dryRunJob, setDryRunJob] = useState<DryRunJobResponse | null>(null);
   const [deploymentJob, setDeploymentJob] = useState<DryRunJobResponse | null>(null);
@@ -733,7 +734,9 @@ function DeployPage({ user }: { user: ApiUser }) {
 
   useEffect(() => {
     comparisonRequestControllerRef.current?.abort();
+    comparisonRequestControllerRef.current = null;
     comparisonJobSelectionKeyRef.current = null;
+    setComparisonSubmitting(false);
     setComparisonJob(null);
   }, [sourceId, targetOrgId, scopeQuery, showIdentical]);
 
@@ -941,7 +944,8 @@ function DeployPage({ user }: { user: ApiUser }) {
 
   const source = workspace?.sources.find((entry) => entry.id === sourceId);
   const target = workspace?.sources.find((entry) => entry.id === targetOrgId);
-  const comparing = comparisonJob !== null && ['QUEUED', 'RUNNING'].includes(comparisonJob.status);
+  const comparing = comparisonSubmitting
+    || (comparisonJob !== null && ['QUEUED', 'RUNNING'].includes(comparisonJob.status));
   const dryRunning = dryRunJob !== null && ['QUEUED', 'DRY_RUN_RUNNING'].includes(dryRunJob.status);
   const deploying = deploymentJob !== null && ['QUEUED', 'DEPLOYING'].includes(deploymentJob.status);
   const testNames = tests.split(/[\s,]+/u).map((value) => value.trim()).filter(Boolean);
@@ -1004,6 +1008,7 @@ function DeployPage({ user }: { user: ApiUser }) {
   const runComparison = async () => {
     setError('');
     setComparisonJob(null);
+    setComparisonSubmitting(true);
     const selectionKey = workflowSelectionKey;
     const controller = new AbortController();
     comparisonRequestControllerRef.current?.abort();
@@ -1037,6 +1042,7 @@ function DeployPage({ user }: { user: ApiUser }) {
     } finally {
       if (comparisonRequestControllerRef.current === controller) {
         comparisonRequestControllerRef.current = null;
+        setComparisonSubmitting(false);
       }
     }
   };
@@ -1164,7 +1170,6 @@ function DeployPage({ user }: { user: ApiUser }) {
               <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} />
             </div>
             <div className="comparison-action">
-              <div><Icon name="shield" /><span><strong>읽기 전용 비교</strong>현재 metadata type과 옵션으로 source와 target을 비교합니다.</span></div>
               <button className="button button-secondary" type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesLoading || !scopeValid || !sourceId || !targetOrgId || sourceId === targetOrgId}><Icon name={comparing ? 'refresh' : 'compare'} />{comparing ? '비교 실행 중……' : '현재 type 비교 실행'}</button>
             </div>
           </section>

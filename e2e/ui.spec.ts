@@ -167,6 +167,7 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
       });
       expect(route.request().postDataJSON()).not.toHaveProperty('manifest');
       expect(route.request().postDataJSON()).not.toHaveProperty('projectId');
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
       await route.fulfill({ json: { job: comparisonFixture('QUEUED') }, status: 202 });
       return;
     }
@@ -209,6 +210,9 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(workflowStatus).toBeVisible();
   await expect(workflowStatus.getByText('실시간 연결')).toBeVisible();
   await comparisonOptions.getByRole('button', { name: /비교 실행$/u }).click();
+  await expect(comparisonOptions.getByRole('button', { name: '비교 실행 중……' })).toBeVisible({ timeout: 300 });
+  await expect(comparisonOptions.getByText('읽기 전용 비교')).toHaveCount(0);
+  await expect(comparisonOptions.getByText('현재 metadata type과 옵션으로 source와 target을 비교합니다.')).toHaveCount(0);
   await expect(page.getByLabel('비교 현황')).toContainText(/대기열|진행 중/u);
   await expect(page.getByText('메타데이터 비교 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'right → left' })).toBeVisible({ timeout: 5_000 });

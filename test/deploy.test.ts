@@ -117,7 +117,7 @@ describe('deploy command', () => {
     expect(deploymentStartCalls(client.calls)).toHaveLength(1);
   });
 
-  it('전체 metadata 비교 합집합과 배포 source manifest를 분리한다', async () => {
+  it('전체 metadata 비교 범위와 source별 retrieve 및 배포 manifest를 분리한다', async () => {
     const fixture = await createDeployFixture(temporaryDirectories);
     await writeFile(path.join(fixture.projectPath, 'sfdx-project.json'), JSON.stringify({
       packageDirectories: [{ path: 'force-app' }], sourceApiVersion: '67.0',
@@ -139,7 +139,8 @@ describe('deploy command', () => {
     expect(client.deployedManifest).toContain('<members>Shared</members>');
     expect(client.deployedManifest).not.toContain('TargetOnly');
     expect(client.calls.filter((call) => call.args.includes('convert'))).toHaveLength(2);
-    expect(result.payloadSha256).not.toBe(result.comparison.right.payloadSha256);
+    expect(result.payloadSha256).toBe(result.comparison.right.payloadSha256);
+    expect(result.comparison.left.manifestSha256).toBe(result.comparison.right.manifestSha256);
   });
 
   it('동적 source manifest가 비어 있으면 target-only 비교 후 Salesforce 배포를 생략한다', async () => {

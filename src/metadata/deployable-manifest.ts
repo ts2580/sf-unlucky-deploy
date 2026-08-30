@@ -69,7 +69,7 @@ export async function generateDeployableManifest(
       }
       await options.sfClient.runJson(args, {
         cwd: options.commandProjectPath,
-        timeoutMs: 35 * 60 * 1000,
+        timeoutMs: options.metadataTypes === undefined ? 35 * 60 * 1000 : 5 * 60 * 1000,
       });
       metadataTypes = parseMetadataTypes(await options.sfClient.runJson([
         'org',
@@ -87,7 +87,7 @@ export async function generateDeployableManifest(
       }
       await options.sfClient.runJson(args, {
         cwd: source.projectPath,
-        timeoutMs: 35 * 60 * 1000,
+        timeoutMs: options.metadataTypes === undefined ? 35 * 60 * 1000 : 5 * 60 * 1000,
       });
       metadataTypes = await discoverLocalMetadataTypes(sourceDirectories);
     }

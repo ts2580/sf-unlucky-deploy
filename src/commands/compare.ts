@@ -59,25 +59,38 @@ export async function runCompareCommand(
       : undefined;
     const manifestPath = generatedManifest?.manifestPath
       ?? path.resolve(cwd, options.manifest ?? 'manifest/package.xml');
+    const sourceManifests = generatedManifest?.sourceManifests;
+    const snapshotWaitMinutes = options.metadataType === undefined ? 15 : 5;
+    const snapshotCommandTimeoutMs = (snapshotWaitMinutes + 1) * 60 * 1000;
     await writeRunMetadata(context, 'compare', leftSource, rightSource.displayName, manifestPath);
 
     const [leftSnapshot, rightSnapshot] = await Promise.all([
       createSnapshot({
         source: leftSource,
         manifestPath,
+        ...(sourceManifests === undefined ? {} : {
+          retrievalManifestPath: sourceManifests[0]!.manifestPath,
+        }),
         outputDir: context.leftSnapshotDirectory,
         commandProjectPath,
         sfClient,
-        ...(generatedManifest?.empty === true ? { empty: true } : {}),
+        waitMinutes: snapshotWaitMinutes,
+        commandTimeoutMs: snapshotCommandTimeoutMs,
+        ...(sourceManifests?.[0]?.empty === true ? { empty: true } : {}),
         ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
       }),
       createSnapshot({
         source: rightSource,
         manifestPath,
+        ...(sourceManifests === undefined ? {} : {
+          retrievalManifestPath: sourceManifests[1]!.manifestPath,
+        }),
         outputDir: context.rightSnapshotDirectory,
         commandProjectPath,
         sfClient,
-        ...(generatedManifest?.empty === true ? { empty: true } : {}),
+        waitMinutes: snapshotWaitMinutes,
+        commandTimeoutMs: snapshotCommandTimeoutMs,
+        ...(sourceManifests?.[1]?.empty === true ? { empty: true } : {}),
         ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
       }),
     ]);
