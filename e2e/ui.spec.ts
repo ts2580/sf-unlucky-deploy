@@ -151,9 +151,9 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   }));
   await page.route('**/api/v1/metadata-types**', async (route) => route.fulfill({ json: {
     metadataTypes: [
-      { name: 'ApexClass', directoryName: 'classes' },
       { name: 'CustomObject', directoryName: 'objects' },
       { name: 'LightningComponentBundle', directoryName: 'lwc' },
+      { name: 'ApexClass', directoryName: 'classes' },
     ],
   } }));
   let polls = 0;
@@ -232,8 +232,8 @@ test('선택 변경 후 이전 비교 polling 결과를 폐기한다', async ({ 
   } }));
   await page.route('**/api/v1/metadata-types**', async (route) => route.fulfill({ json: {
     metadataTypes: [
-      { name: 'ApexClass', directoryName: 'classes' },
       { name: 'CustomObject', directoryName: 'objects' },
+      { name: 'ApexClass', directoryName: 'classes' },
     ],
   } }));
   let pollingStarted = false;
@@ -439,7 +439,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   expect(dryRunStatusBox!.y + dryRunStatusBox!.height).toBeLessThanOrEqual(dryRunButtonBox!.y);
   await expect(page.getByText('Salesforce check-only 실행 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Salesforce dry-run 성공' })).toBeVisible({ timeout: 5_000 });
-  await expect(page.getByLabel('Dry-run 현황')).toContainText('승인 대기');
+  await expect(page.getByLabel('Dry-run 현황')).toContainText('Dry-run 성공 · 실제 배포 승인 대기');
   const result = page.getByLabel('Salesforce dry-run 성공');
   await expect(result.getByText('RunSpecifiedTests', { exact: true })).toBeVisible();
   await expect(result.getByText(/Hello_Test/u)).toBeVisible();

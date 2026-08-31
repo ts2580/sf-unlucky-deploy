@@ -211,6 +211,8 @@ button:focus-visible, a:focus-visible { outline: 3px solid #60a5fa; outline-offs
 .dry-run-live-progress > small { overflow-wrap: anywhere; margin-top: 4px; color: #58758c; font: 500 .51rem ui-monospace,monospace; line-height: 1.45; }
 .dry-run-live-progress > p { margin: 8px 0 0; color: #7890a3; font-size: .48rem; line-height: 1.45; }
 .dry-run-live-progress .live-status { padding: 5px 7px; font-size: .46rem; }
+.dry-run-live-success { border-color: #b9dfca; background: #eefaf3; }
+.dry-run-live-success .dry-run-live-head > span:first-child,.dry-run-live-success > strong { color: #178052; }
 .dry-run-live-diagnostics { margin-top: 10px; padding-top: 10px; border-top: 1px solid #c9e0f1; }
 .dry-run-live-diagnostics > strong { display: block; margin-bottom: 7px; color: #9a302b; font-size: .56rem; }
 .dry-run-live-diagnostics article { padding: 8px; border: 1px solid #efc5c2; border-radius: 8px; background: #fff7f6; }

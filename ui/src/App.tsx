@@ -91,6 +91,12 @@ interface MetadataTypeOption {
   directoryName: string;
 }
 
+function defaultMetadataType(metadataTypes: MetadataTypeOption[]): string {
+  return metadataTypes.find((metadataType) => metadataType.name === 'ApexClass')?.name
+    ?? metadataTypes[0]?.name
+    ?? '';
+}
+
 interface ComparisonJobResponse {
   id: string;
   status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
@@ -533,7 +539,7 @@ function ComparePage({ user }: { user: ApiUser }) {
           throw new Error(data.error?.message ?? 'Salesforce metadata type을 불러오지 못했습니다.');
         }
         setMetadataTypes(data.metadataTypes);
-        setScopeQuery(data.metadataTypes[0]?.name ?? '');
+        setScopeQuery(defaultMetadataType(data.metadataTypes));
       })
       .catch((caught: unknown) => {
         if (caught instanceof DOMException && caught.name === 'AbortError') return;
@@ -743,7 +749,7 @@ function DeployPage({ user }: { user: ApiUser }) {
           throw new Error(data.error?.message ?? 'Salesforce metadata type을 불러오지 못했습니다.');
         }
         setMetadataTypes(data.metadataTypes);
-        setScopeQuery(data.metadataTypes[0]?.name ?? '');
+        setScopeQuery(defaultMetadataType(data.metadataTypes));
       })
       .catch((caught: unknown) => {
         if (caught instanceof DOMException && caught.name === 'AbortError') return;
@@ -1366,7 +1372,7 @@ function DryRunLiveProgress({ liveStatus, job }: { liveStatus: LiveStatus; job: 
       : 'SSE 연결 중';
 
   return (
-    <section className="dry-run-live-progress" aria-label="Dry-run 현황" aria-live="polite">
+    <section className={`dry-run-live-progress dry-run-live-${status.tone}`} aria-label="Dry-run 현황" aria-live="polite">
       <div className="dry-run-live-head">
         <span><Icon name="activity" />Dry-run 진행 상황</span>
         <span className={`live-status live-status-${liveStatus}`}><i />{connectionLabel}</span>
@@ -1423,9 +1429,12 @@ function workflowStatusItem(
   if (status === 'FAILED' || status === 'RECONCILE_REQUIRED') {
     return { title, label: `${status === 'FAILED' ? '실패' : '확인 필요'}${elapsed}`, detail, tone: 'error' };
   }
+  if (status === 'APPROVAL_PENDING') {
+    return { title, label: `Dry-run 성공 · 실제 배포 승인 대기${elapsed}`, detail, tone: 'success' };
+  }
   return {
     title,
-    label: `${status === 'APPROVAL_PENDING' ? '승인 대기' : '완료'}${elapsed}`,
+    label: `완료${elapsed}`,
     detail,
     tone: 'success',
   };
