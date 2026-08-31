@@ -1174,6 +1174,14 @@ function DeployPage({ user }: { user: ApiUser }) {
             </div>
           </section>
 
+          {comparisonJob !== null && <ComparisonResultPanel
+            job={comparisonJob}
+            deploymentView
+            selectedKeys={new Set(deploymentCart.map((item) => item.key))}
+            onSelectionChange={setComponentInCart}
+            selectionDisabled={dryRunning || deploying}
+          />}
+
           <section className="workflow-panel" aria-labelledby="test-heading">
             <div className="panel-heading"><span className="step-number">03</span><div><h2 id="test-heading">Apex 테스트 설정</h2><p>비교 결과에서 Apex Class를 선택한 뒤 Dry-run 테스트 조건을 지정합니다.</p></div><span className="auto-badge">{testLevel.toUpperCase()}</span></div>
             <div className="select-row">
@@ -1233,18 +1241,10 @@ function DeployPage({ user }: { user: ApiUser }) {
           <WorkflowStatusPanel
             liveStatus={liveStatus}
             comparisonJob={comparisonJob}
-            dryRunJob={dryRunJob}
             deploymentJob={deploymentJob}
           />
 
           {error && <section className="compare-error" role="alert"><strong>비교 및 배포 작업을 실행하지 못했습니다.</strong><p>{error}</p></section>}
-          {comparisonJob !== null && <ComparisonResultPanel
-            job={comparisonJob}
-            deploymentView
-            selectedKeys={new Set(deploymentCart.map((item) => item.key))}
-            onSelectionChange={setComponentInCart}
-            selectionDisabled={dryRunning || deploying}
-          />}
           {dryRunJob !== null && <DryRunResultPanel job={dryRunJob} />}
           {deploymentJob !== null && <DryRunResultPanel job={deploymentJob} />}
         </div>
@@ -1261,6 +1261,7 @@ function DeployPage({ user }: { user: ApiUser }) {
           </section>
           <div className="checksum-preview"><span>PAYLOAD SHA-256</span><code>{dryRunJob?.payloadChecksum ?? deploymentJob?.payloadChecksum ?? '작업 완료 후 계산'}</code></div>
           <div className="warning-note"><Icon name="shield" /><p><strong>TARGET ONLY는 선택할 수 없습니다.</strong>desired source에 실제로 있는 컴포넌트만 배포 대상으로 지정할 수 있습니다.</p></div>
+          {dryRunJob !== null && <DryRunLiveProgress liveStatus={liveStatus} job={dryRunJob} />}
           <div className="cart-actions">
             <button className="button button-primary" type="button" onClick={() => void startDryRun()} disabled={!canRun || dryRunning || deploying || deploymentCart.length === 0 || !testSelectionValid}><Icon name={dryRunning ? 'refresh' : 'shield'} />{dryRunning ? 'Dry-run 중……' : '배포 대상 Dry-run'}<Icon name="arrow" /></button>
           </div>
@@ -1285,15 +1286,13 @@ function DeployPage({ user }: { user: ApiUser }) {
 function WorkflowStatusPanel({
   liveStatus,
   comparisonJob,
-  dryRunJob,
   deploymentJob,
 }: {
   liveStatus: LiveStatus;
   comparisonJob: ComparisonJobResponse | null;
-  dryRunJob: DryRunJobResponse | null;
   deploymentJob: DryRunJobResponse | null;
 }) {
-  const running = [comparisonJob?.status, dryRunJob?.status, deploymentJob?.status]
+  const running = [comparisonJob?.status, deploymentJob?.status]
     .some((status) => status !== undefined && ['QUEUED', 'RUNNING', 'DRY_RUN_RUNNING', 'DEPLOYING'].includes(status));
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -1309,13 +1308,12 @@ function WorkflowStatusPanel({
       : '연결 중';
   const items = [
     workflowStatusItem('비교', comparisonJob, now),
-    workflowStatusItem('Dry-run', dryRunJob, now),
     workflowStatusItem('실제 배포', deploymentJob, now),
   ];
   return (
     <section className="workflow-status-panel" aria-labelledby="workflow-status-heading" aria-live="polite">
       <div className="workflow-status-head">
-        <div><span className="card-icon icon-blue"><Icon name="activity" /></span><span><h2 id="workflow-status-heading">실행 현황</h2><p>비교부터 배포까지 서버 작업 상태를 실시간으로 표시합니다.</p></span></div>
+        <div><span className="card-icon icon-blue"><Icon name="activity" /></span><span><h2 id="workflow-status-heading">실행 현황</h2><p>비교와 실제 배포의 서버 작업 상태를 실시간으로 표시합니다.</p></span></div>
         <span className={`live-status live-status-${liveStatus}`}><i />{connectionLabel}</span>
       </div>
       <div className="workflow-status-grid">
@@ -1326,6 +1324,35 @@ function WorkflowStatusPanel({
         </article>)}
       </div>
       <p className="workflow-status-note">SSE 연결이 끊기면 자동 재연결하며, polling으로 상태 확인을 계속합니다.</p>
+    </section>
+  );
+}
+
+function DryRunLiveProgress({ liveStatus, job }: { liveStatus: LiveStatus; job: DryRunJobResponse }) {
+  const running = ['QUEUED', 'DRY_RUN_RUNNING'].includes(job.status);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running) return;
+    setNow(Date.now());
+    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, [running]);
+  const status = workflowStatusItem('Dry-run', job, now);
+  const connectionLabel = liveStatus === 'connected'
+    ? 'SSE 연결됨'
+    : liveStatus === 'reconnecting'
+      ? 'SSE 재연결 중'
+      : 'SSE 연결 중';
+
+  return (
+    <section className="dry-run-live-progress" aria-label="Dry-run 현황" aria-live="polite">
+      <div className="dry-run-live-head">
+        <span><Icon name="activity" />Dry-run 진행 상황</span>
+        <span className={`live-status live-status-${liveStatus}`}><i />{connectionLabel}</span>
+      </div>
+      <strong>{status.label}</strong>
+      <small>{status.detail}</small>
+      <p>SSE 연결이 끊기면 polling으로 상태 확인을 계속합니다.</p>
     </section>
   );
 }
