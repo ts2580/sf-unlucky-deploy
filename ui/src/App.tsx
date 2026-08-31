@@ -987,9 +987,13 @@ function DeployPage({ user }: { user: ApiUser }) {
     : apexTestClasses.filter((testClass) =>
       testClass.toLocaleLowerCase().includes(normalizedCurrentTestToken)
       && !selectedTestNames.has(testClass)).slice(0, 8);
+  const directInputMatchesSource = apexTestClasses.some((testClass) =>
+    testClass.toLocaleLowerCase() === normalizedCurrentTestToken);
   const directInputSearchOpen = testInputFocused
     && currentTestToken.length > 0
-    && ['auto', 'RunSpecifiedTests'].includes(testLevel);
+    && ['auto', 'RunSpecifiedTests'].includes(testLevel)
+    && !directInputMatchesSource
+    && (apexTestClassesLoading || apexTestClassesError.length > 0 || directInputSuggestions.length > 0);
   const testSelectionValid = testLevel !== 'RunSpecifiedTests' || testNames.length > 0;
   const selectedMetadataType = metadataTypes.find((entry) =>
     entry.name.toLowerCase() === scopeQuery.trim().toLowerCase());
@@ -1239,9 +1243,7 @@ function DeployPage({ user }: { user: ApiUser }) {
                     ? <p><Icon name="refresh" />Apex 클래스 검색 중……</p>
                     : apexTestClassesError
                       ? <p className="test-class-suggestions-error">{apexTestClassesError}</p>
-                      : directInputSuggestions.length === 0
-                        ? <p>일치하는 source Apex 클래스가 없습니다.</p>
-                        : directInputSuggestions.map((testClass) => <button key={testClass} type="button" role="option" aria-selected="false" onClick={() => selectDirectTestClass(testClass)}><Icon name="code" />{testClass}</button>)}
+                      : directInputSuggestions.map((testClass) => <button key={testClass} type="button" role="option" aria-selected="false" onClick={() => selectDirectTestClass(testClass)}><Icon name="code" />{testClass}</button>)}
                 </div>}
               </div>
             </div>

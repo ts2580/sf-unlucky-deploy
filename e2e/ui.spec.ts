@@ -371,6 +371,12 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(paymentSuggestion).toBeFocused();
   await paymentSuggestion.press('Enter');
   await expect(directTestInput).toHaveValue('Hello_Test, PaymentValidationSpec');
+  await expect(directTestInput).toHaveAttribute('aria-expanded', 'false');
+  await expect(directTestSuggestions).toHaveCount(0);
+  await directTestInput.fill('ExternalOnly_Test');
+  await expect(directTestInput).toHaveValue('ExternalOnly_Test');
+  await expect(page.getByText('일치하는 source Apex 클래스가 없습니다.')).toHaveCount(0);
+  await expect(directTestInput).toHaveAttribute('aria-expanded', 'false');
   await directTestInput.clear();
   await page.getByRole('button', { name: /비교 실행/u }).click();
   await expect(page.getByText('메타데이터 비교 중')).toBeVisible();
