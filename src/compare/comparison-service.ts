@@ -41,6 +41,9 @@ export class ComparisonService {
     if (scope !== 'all' && input.metadataType !== undefined) {
       throw new Error('Salesforce metadata type은 전체 metadata 비교에서만 선택할 수 있습니다.');
     }
+    if (scope === 'all' && input.metadataType === undefined) {
+      throw new Error('전체 메타데이터 검색은 지원하지 않습니다. Salesforce metadata type을 선택하세요.');
+    }
     if (input.metadataType !== undefined) {
       const availableTypes = await this.workspace.listMetadataTypes([
         input.leftSourceId,

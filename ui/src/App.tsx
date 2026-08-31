@@ -151,6 +151,7 @@ interface DryRunJobResponse {
     numberTestsCompleted?: number;
     numberTestsTotal?: number;
     numberTestErrors?: number;
+    diagnostics?: SalesforceDeploymentDiagnostics;
     checkedAt: string;
   };
   testPlan?: { level: string; tests: string[]; selection: string };
@@ -163,6 +164,28 @@ interface DryRunJobResponse {
   startedAt?: string;
   updatedAt?: string;
   completedAt?: string;
+}
+
+interface SalesforceDeploymentDiagnostics {
+  componentFailures: Array<{
+    componentType?: string;
+    fullName?: string;
+    fileName?: string;
+    problemType?: string;
+    problem: string;
+    lineNumber?: number;
+    columnNumber?: number;
+  }>;
+  testFailures: Array<{
+    name?: string;
+    methodName?: string;
+    message: string;
+    stackTrace?: string;
+    time?: number;
+  }>;
+  codeCoverageWarnings: Array<{ name?: string; message: string }>;
+  flowCoverageWarnings: Array<{ name?: string; message: string }>;
+  messages: string[];
 }
 
 interface WorkflowEventMessage {
@@ -187,8 +210,6 @@ interface DashboardRun {
 }
 
 type PageKey = 'home' | 'deploy' | 'runs' | 'settings' | 'admin';
-
-const ALL_METADATA_LABEL = '전체 메타데이터';
 
 const pageMeta: Record<PageKey, { eyebrow: string; title: string }> = {
   home: { eyebrow: 'METADATA WORKSPACE', title: '배포 대시보드' },
@@ -469,7 +490,7 @@ function ComparePage({ user }: { user: ApiUser }) {
   const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null);
   const [metadataTypes, setMetadataTypes] = useState<MetadataTypeOption[]>([]);
   const [metadataTypesLoading, setMetadataTypesLoading] = useState(false);
-  const [scopeQuery, setScopeQuery] = useState(ALL_METADATA_LABEL);
+  const [scopeQuery, setScopeQuery] = useState('');
   const [leftSourceId, setLeftSourceId] = useState('');
   const [rightSourceId, setRightSourceId] = useState('');
   const [showIdentical, setShowIdentical] = useState(false);
@@ -512,7 +533,7 @@ function ComparePage({ user }: { user: ApiUser }) {
           throw new Error(data.error?.message ?? 'Salesforce metadata type을 불러오지 못했습니다.');
         }
         setMetadataTypes(data.metadataTypes);
-        setScopeQuery(ALL_METADATA_LABEL);
+        setScopeQuery(data.metadataTypes[0]?.name ?? '');
       })
       .catch((caught: unknown) => {
         if (caught instanceof DOMException && caught.name === 'AbortError') return;
@@ -541,9 +562,10 @@ function ComparePage({ user }: { user: ApiUser }) {
   const running = job !== null && ['QUEUED', 'RUNNING'].includes(job.status);
   const selectedMetadataType = metadataTypes.find((entry) =>
     entry.name.toLowerCase() === scopeQuery.trim().toLowerCase());
-  const scopeValid = scopeQuery === ALL_METADATA_LABEL || selectedMetadataType !== undefined;
+  const scopeValid = selectedMetadataType !== undefined;
 
   const runComparison = async () => {
+    if (selectedMetadataType === undefined) return;
     setError('');
     setJob(null);
     try {
@@ -553,7 +575,7 @@ function ComparePage({ user }: { user: ApiUser }) {
         headers: { 'content-type': 'application/json', 'x-sfud-csrf': readCookie('sfud_csrf') ?? '' },
         body: JSON.stringify({
           scope: 'all',
-          ...(selectedMetadataType === undefined ? {} : { metadataType: selectedMetadataType.name }),
+          metadataType: selectedMetadataType.name,
           leftSourceId,
           rightSourceId,
           strict: false,
@@ -592,7 +614,7 @@ function ComparePage({ user }: { user: ApiUser }) {
       <section className="workflow-panel" aria-labelledby="scope-heading">
         <div className="panel-heading">
           <span className="step-number">02</span>
-          <div><h2 id="scope-heading">비교 범위</h2><p>Salesforce metadata type 전체에서 검색하거나 전체 범위를 선택하세요.</p></div>
+          <div><h2 id="scope-heading">비교 범위</h2><p>한 번에 하나의 Salesforce metadata type만 검색합니다.</p></div>
           <span className="panel-state">필수</span>
         </div>
         <div className="compare-scope-grid metadata-scope-grid">
@@ -608,7 +630,6 @@ function ComparePage({ user }: { user: ApiUser }) {
               aria-invalid={!scopeValid}
             />
             <datalist id="salesforce-metadata-types">
-              <option value={ALL_METADATA_LABEL}>모든 배포 가능 metadata</option>
               {metadataTypes.map((entry) => <option key={entry.name} value={entry.name}>{entry.directoryName}</option>)}
             </datalist>
           </label>
@@ -647,7 +668,7 @@ function DeployPage({ user }: { user: ApiUser }) {
   const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null);
   const [metadataTypes, setMetadataTypes] = useState<MetadataTypeOption[]>([]);
   const [metadataTypesLoading, setMetadataTypesLoading] = useState(false);
-  const [scopeQuery, setScopeQuery] = useState(ALL_METADATA_LABEL);
+  const [scopeQuery, setScopeQuery] = useState('');
   const [sourceId, setSourceId] = useState('');
   const [targetOrgId, setTargetOrgId] = useState('');
   const [testLevel, setTestLevel] = useState('auto');
@@ -722,7 +743,7 @@ function DeployPage({ user }: { user: ApiUser }) {
           throw new Error(data.error?.message ?? 'Salesforce metadata type을 불러오지 못했습니다.');
         }
         setMetadataTypes(data.metadataTypes);
-        setScopeQuery(ALL_METADATA_LABEL);
+        setScopeQuery(data.metadataTypes[0]?.name ?? '');
       })
       .catch((caught: unknown) => {
         if (caught instanceof DOMException && caught.name === 'AbortError') return;
@@ -966,7 +987,7 @@ function DeployPage({ user }: { user: ApiUser }) {
   const testSelectionValid = testLevel !== 'RunSpecifiedTests' || testNames.length > 0;
   const selectedMetadataType = metadataTypes.find((entry) =>
     entry.name.toLowerCase() === scopeQuery.trim().toLowerCase());
-  const scopeValid = scopeQuery === ALL_METADATA_LABEL || selectedMetadataType !== undefined;
+  const scopeValid = selectedMetadataType !== undefined;
   const canDeploy = ['DEPLOYER', 'ADMIN'].includes(user.role);
   const targetAlias = targetOrgId.startsWith('org:') ? targetOrgId.slice('org:'.length) : '';
   const deploymentReady = canDeploy
@@ -1006,6 +1027,7 @@ function DeployPage({ user }: { user: ApiUser }) {
   };
 
   const runComparison = async () => {
+    if (selectedMetadataType === undefined) return;
     setError('');
     setComparisonJob(null);
     setComparisonSubmitting(true);
@@ -1021,7 +1043,7 @@ function DeployPage({ user }: { user: ApiUser }) {
         headers: { 'content-type': 'application/json', 'x-sfud-csrf': readCookie('sfud_csrf') ?? '' },
         body: JSON.stringify({
           scope: 'all',
-          ...(selectedMetadataType === undefined ? {} : { metadataType: selectedMetadataType.name }),
+          metadataType: selectedMetadataType.name,
           leftSourceId: targetOrgId,
           rightSourceId: sourceId,
           strict: false,
@@ -1160,7 +1182,6 @@ function DeployPage({ user }: { user: ApiUser }) {
               <label><span className="field-label">Salesforce metadata type</span>
                 <input id="deploy-scope" list="salesforce-deploy-metadata-types" value={scopeQuery} onChange={(event) => setScopeQuery(event.target.value)} placeholder="metadata type 검색" autoComplete="off" disabled={workspace === null || metadataTypesLoading} aria-invalid={!scopeValid} />
                 <datalist id="salesforce-deploy-metadata-types">
-                  <option value={ALL_METADATA_LABEL}>모든 배포 가능 metadata</option>
                   {metadataTypes.map((entry) => <option key={entry.name} value={entry.name}>{entry.directoryName}</option>)}
                 </datalist>
               </label>
@@ -1251,7 +1272,7 @@ function DeployPage({ user }: { user: ApiUser }) {
 
         <aside className="deploy-summary" aria-label="배포 대상">
           <p className="eyebrow">DEPLOYMENT TARGETS</p><h2>{deploying ? '실제 배포 중' : deploymentJob?.status === 'SUCCEEDED' ? '배포 성공' : dryRunning ? 'Dry-run 실행 중' : dryRunJob?.status === 'APPROVAL_PENDING' ? '배포 승인 준비' : comparing ? '메타데이터 검색 중' : deploymentCart.length > 0 ? `${deploymentCart.length}개 선택됨` : '선택된 배포 대상이 없습니다'}</h2>
-          <dl><div><dt>Desired source</dt><dd>{source?.label ?? '선택 대기'}</dd></div><div><dt>Target org</dt><dd>{target?.label ?? '선택 대기'}</dd></div><div><dt>현재 검색</dt><dd>{selectedMetadataType?.name ?? ALL_METADATA_LABEL}</dd></div><div><dt>직접 배포 테스트</dt><dd>{testNames.length > 0 ? `RunSpecifiedTests · ${testNames.length}개 · 75%` : 'NoTestRun'}</dd></div></dl>
+          <dl><div><dt>Desired source</dt><dd>{source?.label ?? '선택 대기'}</dd></div><div><dt>Target org</dt><dd>{target?.label ?? '선택 대기'}</dd></div><div><dt>현재 검색</dt><dd>{selectedMetadataType?.name ?? 'type 선택 필요'}</dd></div><div><dt>직접 배포 테스트</dt><dd>{testNames.length > 0 ? `RunSpecifiedTests · ${testNames.length}개 · 75%` : 'NoTestRun'}</dd></div></dl>
           <section className="deployment-cart" aria-label="선택한 배포 목록">
             <div className="deployment-cart-head"><strong>배포 대상</strong><span>{deploymentCart.length}개</span></div>
             {deploymentCart.length === 0
@@ -1352,8 +1373,33 @@ function DryRunLiveProgress({ liveStatus, job }: { liveStatus: LiveStatus; job: 
       </div>
       <strong>{status.label}</strong>
       <small>{status.detail}</small>
+      <DryRunLiveDiagnostics diagnostics={job.progress?.diagnostics} />
       <p>SSE 연결이 끊기면 polling으로 상태 확인을 계속합니다.</p>
     </section>
+  );
+}
+
+function DryRunLiveDiagnostics({ diagnostics }: { diagnostics: SalesforceDeploymentDiagnostics | undefined }) {
+  if (diagnostics === undefined) return null;
+  return (
+    <div className="dry-run-live-diagnostics">
+      <strong>실패 원인</strong>
+      {diagnostics.componentFailures.map((failure, index) => <article key={`${failure.fullName ?? failure.fileName ?? 'component'}-${index}`}>
+        <b>{[failure.componentType, failure.fullName].filter(Boolean).join(' · ') || '컴포넌트 오류'}</b>
+        {(failure.fileName !== undefined || failure.lineNumber !== undefined) && <code>{failure.fileName ?? '파일 미상'}{failure.lineNumber === undefined ? '' : `:${failure.lineNumber}${failure.columnNumber === undefined ? '' : `:${failure.columnNumber}`}`}</code>}
+        <span>{failure.problem}</span>
+      </article>)}
+      {diagnostics.testFailures.map((failure, index) => <article key={`${failure.name ?? 'test'}-${failure.methodName ?? index}`}>
+        <b>{[failure.name, failure.methodName].filter(Boolean).join('.') || 'Apex 테스트 실패'}</b>
+        <span>{failure.message}</span>
+        {failure.stackTrace !== undefined && <code>{failure.stackTrace}</code>}
+      </article>)}
+      {[...diagnostics.codeCoverageWarnings, ...diagnostics.flowCoverageWarnings].map((warning, index) => <article key={`${warning.name ?? 'coverage'}-${index}`}>
+        <b>{warning.name === undefined ? '커버리지 경고' : `커버리지 · ${warning.name}`}</b>
+        <span>{warning.message}</span>
+      </article>)}
+      {diagnostics.messages.map((message, index) => <article key={`${message}-${index}`}><span>{message}</span></article>)}
+    </div>
   );
 }
 
@@ -1816,18 +1862,18 @@ function ComparisonResultPanel({
 
 function DryRunResultPanel({ job }: { job: DryRunJobResponse }) {
   if (job.kind === 'DEPLOY' && ['QUEUED', 'DEPLOYING'].includes(job.status)) {
-    return <section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? '실제 배포 대기 중' : `Salesforce 실제 배포 중${job.progress === undefined ? '' : ` · ${job.progress.status}`}`}</strong><p>{job.progress === undefined ? `${job.source.label} → ${job.target.label} · dry-run으로 고정한 payload를 배포합니다.` : progressSummary(job.progress)}</p></div></section>;
+    return <><section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? '실제 배포 대기 중' : `Salesforce 실제 배포 중${job.progress === undefined ? '' : ` · ${job.progress.status}`}`}</strong><p>{job.progress === undefined ? `${job.source.label} → ${job.target.label} · dry-run으로 고정한 payload를 배포합니다.` : progressSummary(job.progress)}</p></div></section><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></>;
   }
   if (['QUEUED', 'DRY_RUN_RUNNING'].includes(job.status)) {
-    return <section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? 'dry-run 대기 중' : `Salesforce check-only 실행 중${job.progress === undefined ? '' : ` · ${job.progress.status}`}`}</strong><p>{job.progress === undefined ? `${job.source.label} → ${job.target.label} · snapshot, 차이, 테스트를 검증합니다.` : progressSummary(job.progress)}</p></div></section>;
+    return <><section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? 'dry-run 대기 중' : `Salesforce check-only 실행 중${job.progress === undefined ? '' : ` · ${job.progress.status}`}`}</strong><p>{job.progress === undefined ? `${job.source.label} → ${job.target.label} · snapshot, 차이, 테스트를 검증합니다.` : progressSummary(job.progress)}</p></div></section><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></>;
   }
   if (job.status === 'FAILED' || job.status === 'RECONCILE_REQUIRED') {
-    return <section className="compare-error" role="alert"><strong>{job.status === 'FAILED' ? `${job.kind === 'DEPLOY' ? '실제 배포' : 'dry-run'}이 실패했습니다.` : 'Salesforce 상태 재확인이 필요합니다.'}</strong><p>{job.errorMessage ?? '상세 오류가 기록되지 않았습니다.'}</p></section>;
+    return <section className="compare-error" role="alert"><strong>{job.status === 'FAILED' ? `${job.kind === 'DEPLOY' ? '실제 배포' : 'dry-run'}이 실패했습니다.` : 'Salesforce 상태 재확인이 필요합니다.'}</strong><p>{job.errorMessage ?? '상세 오류가 기록되지 않았습니다.'}</p><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></section>;
   }
   if (job.kind === 'DEPLOY' && job.status === 'SUCCEEDED') {
     return <section className="dry-run-result" aria-label="Salesforce 실제 배포 성공"><div className="comparison-result-head"><div><p className="eyebrow">DEPLOYMENT COMPLETE</p><h2>Salesforce 실제 배포 성공</h2><small>{job.salesforceDeploymentId ?? 'deployment ID 없음'}</small></div><span className="result-success"><Icon name="check" />배포 성공</span></div><div className="approval-preview"><Icon name="shield" /><div><strong>선택한 payload 배포를 완료했습니다.</strong><p>{job.testPlan?.tests.length
       ? `${job.testPlan.tests.join(', ')} · 코드 커버리지 ${job.testCoverage?.toFixed(2) ?? '확인 완료'}%`
-      : 'NoTestRun · 테스트 없이 target org에 반영했습니다.'}</p></div></div></section>;
+      : 'NoTestRun · 테스트 없이 target org에 반영했습니다.'}</p></div></div><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></section>;
   }
   if (job.status !== 'APPROVAL_PENDING') return null;
   const summary = job.comparisonSummary;
@@ -1840,6 +1886,47 @@ function DryRunResultPanel({ job }: { job: DryRunJobResponse }) {
         <div><span className="card-icon icon-blue"><Icon name="shield" /></span><p><strong>Payload 고정</strong><code>{job.payloadChecksum}</code></p></div>
       </div>
       <div className="approval-preview"><Icon name="shield" /><div><strong>실제 배포 승인 준비가 완료되었습니다.</strong><p>오른쪽 배포 대상에서 동일 payload checksum과 대상 org를 다시 확인한 뒤 배포할 수 있습니다.</p></div></div>
+      <SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} />
+    </section>
+  );
+}
+
+function SalesforceDiagnosticsPanel({ diagnostics }: { diagnostics: SalesforceDeploymentDiagnostics | undefined }) {
+  if (diagnostics === undefined) return null;
+  const warnings = [
+    ...diagnostics.codeCoverageWarnings.map((warning) => ({ ...warning, kind: 'Apex 커버리지' })),
+    ...diagnostics.flowCoverageWarnings.map((warning) => ({ ...warning, kind: 'Flow 커버리지' })),
+  ];
+  return (
+    <section className="salesforce-diagnostics" aria-label="Salesforce 상세 결과">
+      <div className="salesforce-diagnostics-head">
+        <span><Icon name="code" /></span>
+        <div><strong>Salesforce 상세 결과</strong><p>배포 보고서 JSON에서 오류와 경고를 파싱했습니다.</p></div>
+      </div>
+      {diagnostics.componentFailures.length > 0 && <div className="salesforce-diagnostic-group">
+        <h3>컴포넌트 오류 <span>{diagnostics.componentFailures.length}</span></h3>
+        {diagnostics.componentFailures.map((failure, index) => <article key={`${failure.fullName ?? failure.fileName ?? 'component'}-${index}`}>
+          <strong>{[failure.componentType, failure.fullName].filter(Boolean).join(' · ') || '컴포넌트 오류'}</strong>
+          {(failure.fileName !== undefined || failure.lineNumber !== undefined) && <code>{failure.fileName ?? '파일 미상'}{failure.lineNumber === undefined ? '' : `:${failure.lineNumber}${failure.columnNumber === undefined ? '' : `:${failure.columnNumber}`}`}</code>}
+          <p>{failure.problemType === undefined ? failure.problem : `${failure.problemType} · ${failure.problem}`}</p>
+        </article>)}
+      </div>}
+      {diagnostics.testFailures.length > 0 && <div className="salesforce-diagnostic-group">
+        <h3>Apex 테스트 실패 <span>{diagnostics.testFailures.length}</span></h3>
+        {diagnostics.testFailures.map((failure, index) => <article key={`${failure.name ?? 'test'}-${failure.methodName ?? index}`}>
+          <strong>{[failure.name, failure.methodName].filter(Boolean).join('.') || 'Apex 테스트 실패'}</strong>
+          <p>{failure.message}</p>
+          {failure.stackTrace !== undefined && <pre>{failure.stackTrace}</pre>}
+        </article>)}
+      </div>}
+      {warnings.length > 0 && <div className="salesforce-diagnostic-group salesforce-warning-group">
+        <h3>검증 경고 <span>{warnings.length}</span></h3>
+        {warnings.map((warning, index) => <article key={`${warning.kind}-${warning.name ?? index}`}><strong>{warning.kind}{warning.name === undefined ? '' : ` · ${warning.name}`}</strong><p>{warning.message}</p></article>)}
+      </div>}
+      {diagnostics.messages.length > 0 && <div className="salesforce-diagnostic-group">
+        <h3>Salesforce 메시지 <span>{diagnostics.messages.length}</span></h3>
+        {diagnostics.messages.map((message, index) => <article key={`${message}-${index}`}><p>{message}</p></article>)}
+      </div>}
     </section>
   );
 }

@@ -324,6 +324,46 @@ describe('dry-run API', () => {
     }
   });
 
+  it('Salesforce 실패 보고서의 테스트와 커버리지 상세를 API에 보존한다', async () => {
+    const fixture = await createFixture(new DryRunSfClient('reported'));
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ projects: Array<{ id: string }>; sources: Array<{ id: string; kind: string }> }>();
+      const created = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/dry-run',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: {
+          projectId: workspace.projects[0]!.id,
+          manifest: 'manifest/package.xml',
+          sourceId: workspace.sources.find((source) => source.kind === 'local')!.id,
+          targetOrgId: 'org:target', testLevel: 'RunSpecifiedTests', tests: ['CryptoUtil_Test'],
+        },
+      });
+      const jobId = created.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+
+      const response = await fixture.server.inject({
+        url: `/api/v1/deployment-jobs/${jobId}`, headers: { cookie: auth.cookie },
+      });
+      expect(response.json()).toMatchObject({ job: {
+        status: 'FAILED',
+        errorMessage: expect.stringMatching(/CryptoUtil_Test\.encryptsAndDecryptsWithConfiguredKey.*List has no rows/u),
+        progress: { status: 'Failed', diagnostics: {
+          componentFailures: [],
+          testFailures: [{
+            name: 'CryptoUtil_Test', methodName: 'encryptsAndDecryptsWithConfiguredKey',
+            message: 'System.QueryException: List has no rows for assignment to SObject',
+          }],
+          codeCoverageWarnings: [{ name: 'CryptoUtil', message: expect.stringContaining('8.696%') }],
+        } },
+      } });
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it('제출 후 Salesforce 응답이 끊기면 RECONCILE_REQUIRED로 기록한다', async () => {
     const fixture = await createFixture(new DryRunSfClient('ambiguous'));
     try {
@@ -386,7 +426,7 @@ class DryRunSfClient implements SfClient {
   public readonly calls: Array<{ args: readonly string[]; options: SfRunOptions }> = [];
 
   public constructor(
-    private readonly failure: 'none' | 'definitive' | 'ambiguous' = 'none',
+    private readonly failure: 'none' | 'definitive' | 'ambiguous' | 'reported' = 'none',
     private readonly coverage = 80,
   ) {}
 
@@ -438,6 +478,27 @@ class DryRunSfClient implements SfClient {
     }
     if (args[0] === 'project' && args[1] === 'deploy' && args[2] === 'report') {
       const id = flagValue(args, '--job-id');
+      if (this.failure === 'reported') {
+        return { status: 0, result: {
+          id, status: 'Failed', done: true, success: false,
+          numberComponentsDeployed: 2, numberComponentsTotal: 2, numberComponentErrors: 0,
+          numberTestsCompleted: 0, numberTestsTotal: 1, numberTestErrors: 1,
+          details: {
+            componentFailures: [],
+            runTestResult: {
+              failures: [{
+                name: 'CryptoUtil_Test', methodName: 'encryptsAndDecryptsWithConfiguredKey',
+                message: 'System.QueryException: List has no rows for assignment to SObject',
+                stackTrace: 'Class.CryptoUtil.<init>: line 22, column 1',
+              }],
+              codeCoverageWarnings: [{
+                name: 'CryptoUtil',
+                message: 'Test coverage of selected Apex Class is 8.696%, at least 75% test coverage is required',
+              }],
+            },
+          },
+        } };
+      }
       return { status: 0, result: {
         id,
         status: 'Succeeded',

@@ -183,9 +183,9 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue('org:right');
   await expect(page.getByLabel('TARGET ORG 비교 소스')).toHaveValue('org:left');
   const scopeCombobox = page.getByRole('combobox', { name: 'Salesforce metadata type' });
-  await expect(scopeCombobox).toHaveValue('전체 메타데이터');
-  await expect(page.locator('#salesforce-deploy-metadata-types option')).toHaveCount(4);
-  await scopeCombobox.fill('ApexClass');
+  await expect(scopeCombobox).toHaveValue('ApexClass');
+  await expect(page.locator('#salesforce-deploy-metadata-types option')).toHaveCount(3);
+  await expect(page.getByText('전체 메타데이터', { exact: true })).toHaveCount(0);
   await expect(page.getByText('3개 metadata type 검색 가능 · source와 target의 합집합')).toBeVisible();
   const comparisonOptions = page.getByRole('region', { name: '메타데이터 검색' });
   const comparisonButton = comparisonOptions.getByRole('button', { name: /비교 실행$/u });
@@ -288,7 +288,8 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await page.route('**/api/v1/comparisons**', async (route) => {
     if (route.request().method() === 'POST') {
       expect(route.request().postDataJSON()).toMatchObject({
-        scope: 'all', leftSourceId: 'org:target', rightSourceId: 'project:project-1',
+        scope: 'all', metadataType: 'ApexClass',
+        leftSourceId: 'org:target', rightSourceId: 'project:project-1',
       });
       await route.fulfill({ status: 202, json: { job: deploymentComparisonFixture('QUEUED') } });
       return;
@@ -300,7 +301,9 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
     comparisonPolls += 1;
     await route.fulfill({ json: { job: deploymentComparisonFixture(comparisonPolls > 1 ? 'SUCCEEDED' : 'RUNNING') } });
   });
+  let dryRunSubmissions = 0;
   await page.route('**/api/v1/deployments/dry-run', async (route) => {
+    dryRunSubmissions += 1;
     expect(route.request().postDataJSON()).toMatchObject({
       scope: 'selected',
       components: [{ type: 'ApexClass', fullName: 'NewClass' }],
@@ -308,7 +311,9 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
       testLevel: 'RunSpecifiedTests', tests: ['Hello_Test'],
     });
     expect(route.request().postDataJSON()).not.toHaveProperty('manifest');
-    await route.fulfill({ status: 202, json: { job: dryRunFixture('QUEUED') } });
+    await route.fulfill({ status: 202, json: { job: dryRunFixture(
+      'QUEUED', dryRunSubmissions === 1 ? 'dry-run-1' : 'dry-run-failed',
+    ) } });
   });
   await page.route('**/api/v1/deployments/execute', async (route) => {
     expect(route.request().postDataJSON()).toMatchObject({
@@ -345,6 +350,10 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
       await route.fulfill({ json: { job: deploymentFixture(deploymentPolls > 1 ? 'SUCCEEDED' : 'DEPLOYING') } });
       return;
     }
+    if (new URL(route.request().url()).pathname.endsWith('/dry-run-failed')) {
+      await route.fulfill({ json: { job: failedDryRunFixture() } });
+      return;
+    }
     dryRunPolls += 1;
     await route.fulfill({ json: { job: dryRunFixture(dryRunPolls > 1 ? 'APPROVAL_PENDING' : 'DRY_RUN_RUNNING') } });
   });
@@ -365,7 +374,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await directTestInput.clear();
   await page.getByRole('button', { name: /비교 실행/u }).click();
   await expect(page.getByText('메타데이터 비교 중')).toBeVisible();
-  await expect(page.getByText('fixture-project → target · 전체 메타데이터', { exact: true })).toBeVisible();
+  await expect(page.getByText('fixture-project → target · ApexClass', { exact: true })).toBeVisible();
   await expect(page.getByText('NEW', { exact: true }).first()).toBeVisible({ timeout: 5_000 });
   await expect(page.getByRole('heading', { name: 'fixture-project → target' })).toBeVisible();
   const searchPanelBox = await page.getByRole('region', { name: '메타데이터 검색' }).boundingBox();
@@ -454,6 +463,19 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   expect(summaryBox).not.toBeNull();
   expect(summaryBox!.y).toBeGreaterThan(resultBox!.y + resultBox!.height);
   await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeVisible();
+
+  await page.getByRole('button', { name: '배포 대상 Dry-run' }).click();
+  await expect(page.getByText('dry-run이 실패했습니다.')).toBeVisible({ timeout: 5_000 });
+  const liveFailure = page.getByLabel('Dry-run 현황');
+  await expect(liveFailure.getByText('실패 원인', { exact: true })).toBeVisible();
+  await expect(liveFailure.getByText('CryptoUtil_Test.encryptsAndDecryptsWithConfiguredKey', { exact: true })).toBeVisible();
+  await expect(liveFailure.getByText('System.QueryException: List has no rows for assignment to SObject', { exact: true })).toBeVisible();
+  await expect(liveFailure.getByText(/8\.696%.*75%/u)).toBeVisible();
+  const diagnostics = page.getByRole('region', { name: 'Salesforce 상세 결과' });
+  await expect(diagnostics.getByText('CryptoUtil_Test.encryptsAndDecryptsWithConfiguredKey', { exact: true })).toBeVisible();
+  await expect(diagnostics.getByText('System.QueryException: List has no rows for assignment to SObject', { exact: true })).toBeVisible();
+  await expect(diagnostics.locator('pre')).toContainText('Class.CryptoUtil.<init>: line 22, column 1');
+  await expect(diagnostics.getByText(/8\.696%.*75%/u)).toBeVisible();
 });
 
 test('제품 파비콘을 제공한다', async ({ page, request }) => {
@@ -502,7 +524,7 @@ function comparisonFixture(status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED'): Comparis
 
 function deploymentComparisonFixture(status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED') {
   return {
-    id: 'deployment-comparison-1', status, scope: 'all', manifest: '전체 메타데이터',
+    id: 'deployment-comparison-1', status, scope: 'all', metadataType: 'ApexClass', manifest: 'ApexClass',
     left: { id: 'org:target', kind: 'org', label: 'target' },
     right: { id: 'project:project-1', kind: 'local', label: 'fixture-project' },
     ...(status !== 'SUCCEEDED' ? {} : { result: {
@@ -537,9 +559,9 @@ interface ComparisonFixture {
   };
 }
 
-function dryRunFixture(status: 'QUEUED' | 'DRY_RUN_RUNNING' | 'APPROVAL_PENDING') {
+function dryRunFixture(status: 'QUEUED' | 'DRY_RUN_RUNNING' | 'APPROVAL_PENDING', id = 'dry-run-1') {
   return {
-    id: 'dry-run-1', kind: 'DRY_RUN', status,
+    id, kind: 'DRY_RUN', status,
     source: { id: 'project:project-1', kind: 'local', label: 'fixture-project' },
     target: { id: 'org:target', kind: 'org', label: 'target' },
     manifest: 'manifest/package.xml', prepared: status === 'APPROVAL_PENDING',
@@ -557,6 +579,38 @@ function dryRunFixture(status: 'QUEUED' | 'DRY_RUN_RUNNING' | 'APPROVAL_PENDING'
       testPlan: { level: 'RunSpecifiedTests', tests: ['Hello_Test'], selection: 'suffix' },
       comparisonSummary: { added: 1, removed: 0, modified: 1, identical: 0, total: 2, different: 2 },
     }),
+  };
+}
+
+function failedDryRunFixture() {
+  return {
+    ...dryRunFixture('QUEUED', 'dry-run-failed'),
+    status: 'FAILED',
+    salesforceDeploymentId: '0AfWU00000b5KLl0AM',
+    startedAt: new Date(Date.now() - 2_000).toISOString(),
+    completedAt: new Date().toISOString(),
+    errorMessage: 'Salesforce 배포 0AfWU00000b5KLl0AM가 Failed 상태로 종료되었습니다. CryptoUtil_Test.encryptsAndDecryptsWithConfiguredKey: System.QueryException: List has no rows for assignment to SObject',
+    progress: {
+      phase: 'DRY_RUN', deploymentId: '0AfWU00000b5KLl0AM', status: 'Failed', done: true, success: false,
+      numberComponentsDeployed: 2, numberComponentsTotal: 2, numberComponentErrors: 0,
+      numberTestsCompleted: 0, numberTestsTotal: 1, numberTestErrors: 1,
+      checkedAt: new Date().toISOString(),
+      diagnostics: {
+        componentFailures: [],
+        testFailures: [{
+          name: 'CryptoUtil_Test', methodName: 'encryptsAndDecryptsWithConfiguredKey',
+          message: 'System.QueryException: List has no rows for assignment to SObject',
+          stackTrace: 'Class.CryptoUtil.<init>: line 22, column 1\nClass.CryptoUtil_Test.encryptsAndDecryptsWithConfiguredKey: line 5, column 1',
+          time: 85,
+        }],
+        codeCoverageWarnings: [{
+          name: 'CryptoUtil',
+          message: 'Test coverage of selected Apex Class is 8.696%, at least 75% test coverage is required',
+        }],
+        flowCoverageWarnings: [],
+        messages: [],
+      },
+    },
   };
 }
 

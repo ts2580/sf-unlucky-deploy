@@ -62,7 +62,7 @@ describe('프로젝트 업로드 API', () => {
         method: 'POST', url: '/api/v1/comparisons',
         headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
         payload: {
-          scope: 'all', leftSourceId: 'org:target', rightSourceId: source.id,
+          scope: 'all', metadataType: 'ApexClass', leftSourceId: 'org:target', rightSourceId: source.id,
           strict: false, showIdentical: false,
         },
       });

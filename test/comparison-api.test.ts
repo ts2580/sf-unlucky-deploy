@@ -135,6 +135,16 @@ describe('비교 API', () => {
         "SELECT COUNT(*) count FROM audit_events WHERE event_type = 'COMPARISON_SUCCEEDED'",
       )).toEqual({ count: 1 });
 
+      const unbounded = await server.inject({
+        method: 'POST', url: '/api/v1/comparisons',
+        headers: { cookie, 'x-sfud-csrf': csrfToken },
+        payload: { scope: 'all', leftSourceId: 'org:left', rightSourceId: 'org:right' },
+      });
+      expect(unbounded.statusCode).toBe(400);
+      expect(unbounded.json()).toMatchObject({ error: {
+        message: expect.stringContaining('전체 메타데이터 검색은 지원하지 않습니다'),
+      } });
+
       const allCreated = await server.inject({
         method: 'POST',
         url: '/api/v1/comparisons',

@@ -37,6 +37,41 @@ describe('Salesforce 비동기 배포', () => {
     });
     expect(result).toMatchObject({ result: { status: 'Succeeded' } });
   });
+
+  it('실패 보고서 JSON의 컴포넌트·테스트·커버리지 상세를 파싱한다', async () => {
+    const progress: SalesforceDeploymentProgress[] = [];
+
+    await expect(runAsyncSalesforceDeployment({
+      sfClient: new FailureReportSfClient(),
+      startArgs: ['project', 'deploy', 'start', '--target-org', 'target', '--metadata-dir', '/payload'],
+      targetAlias: 'target',
+      cwd: '/project',
+      phase: 'DRY_RUN',
+      sleep: async () => undefined,
+      onProgress: (entry) => { progress.push(entry); },
+    })).rejects.toThrow(/BrokenClass.*Unexpected token/u);
+
+    expect(progress.at(-1)).toMatchObject({
+      deploymentId: '0Af-failed',
+      status: 'Failed',
+      done: true,
+      success: false,
+      diagnostics: {
+        componentFailures: [{
+          componentType: 'ApexClass', fullName: 'BrokenClass', fileName: 'zip/classes/BrokenClass.cls',
+          lineNumber: 12, columnNumber: 7, problemType: 'Error', problem: 'Unexpected token',
+        }],
+        testFailures: [{
+          name: 'CryptoUtil_Test', methodName: 'encryptsAndDecryptsWithConfiguredKey',
+          message: 'System.QueryException: List has no rows for assignment to SObject',
+          stackTrace: 'Class.CryptoUtil.<init>: line 22, column 1',
+        }],
+        codeCoverageWarnings: [{ name: 'CryptoUtil', message: 'Test coverage is 8.696%, at least 75% is required' }],
+        flowCoverageWarnings: [],
+        messages: ['Deployment validation failed'],
+      },
+    });
+  });
 });
 
 class ProgressSfClient implements SfClient {
@@ -60,6 +95,36 @@ class ProgressSfClient implements SfClient {
       id: '0Af-progress', status: 'Succeeded', done: true, success: true,
       numberComponentsDeployed: 4, numberComponentsTotal: 4,
       numberTestsCompleted: 2, numberTestsTotal: 2,
+    } };
+  }
+}
+
+class FailureReportSfClient implements SfClient {
+  public async runJson(args: readonly string[]): Promise<unknown> {
+    if (args[2] === 'start') {
+      return { status: 0, result: { id: '0Af-failed', status: 'Queued', done: false } };
+    }
+    return { status: 0, result: {
+      id: '0Af-failed', status: 'Failed', done: true, success: false,
+      numberComponentsDeployed: 1, numberComponentsTotal: 2, numberComponentErrors: 1,
+      numberTestsCompleted: 0, numberTestsTotal: 1, numberTestErrors: 1,
+      errorMessage: 'Deployment validation failed',
+      details: {
+        componentFailures: [{
+          componentType: 'ApexClass', fullName: 'BrokenClass', fileName: 'zip/classes/BrokenClass.cls',
+          lineNumber: 12, columnNumber: 7, problemType: 'Error', problem: 'Unexpected token',
+        }],
+        runTestResult: {
+          failures: [{
+            name: 'CryptoUtil_Test', methodName: 'encryptsAndDecryptsWithConfiguredKey',
+            message: 'System.QueryException: List has no rows for assignment to SObject',
+            stackTrace: 'Class.CryptoUtil.<init>: line 22, column 1', time: 85,
+          }],
+          codeCoverageWarnings: [{
+            name: 'CryptoUtil', message: 'Test coverage is 8.696%, at least 75% is required',
+          }],
+        },
+      },
     } };
   }
 }
