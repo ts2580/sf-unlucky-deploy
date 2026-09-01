@@ -269,6 +269,9 @@ npm run dev -- deploy \
 3. 하나 이상 발견하면 `RunSpecifiedTests`로 전달
 4. 발견하지 못하면 `RunLocalTests`로 fallback
 
+웹 UI에서는 설정의 **배포 테스트 규칙**에서 사용자별 테스트 클래스 접미사를 변경할 수 있다.
+기본값은 `_Test`이며, 저장한 접미사는 이후 해당 사용자가 실행하는 Auto dry-run에 적용된다.
+
 자동 선택 예시:
 
 ```text

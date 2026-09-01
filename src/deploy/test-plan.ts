@@ -22,9 +22,10 @@ export async function selectApexTestPlan(
   packageRoot: string,
   requestedLevel: RequestedTestLevel = 'auto',
   requestedTests: readonly string[] = [],
+  testClassSuffix = '_Test',
 ): Promise<ApexTestPlan> {
   const explicitTests = normalizeTests(requestedTests);
-  const suffixTests = await discoverSuffixTests(packageRoot);
+  const suffixTests = await discoverSuffixTests(packageRoot, testClassSuffix);
 
   if (requestedLevel === 'auto') {
     if (explicitTests.length > 0) {
@@ -41,7 +42,7 @@ export async function selectApexTestPlan(
     if (tests.length === 0) {
       throw new SfudError(
         'INVALID_ARGUMENT',
-        'RunSpecifiedTests에 사용할 --tests가 없고 staging에서 *_Test.cls도 찾지 못했습니다.',
+        `RunSpecifiedTests에 사용할 --tests가 없고 staging에서 *${testClassSuffix}.cls도 찾지 못했습니다.`,
       );
     }
     return {
@@ -58,11 +59,19 @@ export async function selectApexTestPlan(
   return { level: requestedLevel, tests: [], selection: 'configured' };
 }
 
-export async function discoverSuffixTests(packageRoot: string): Promise<string[]> {
+export async function discoverSuffixTests(packageRoot: string, testClassSuffix = '_Test'): Promise<string[]> {
   return (await listFiles(packageRoot))
-    .filter((relativePath) => /^classes\/[^/]+_Test\.cls$/iu.test(relativePath))
+    .filter((relativePath) => {
+      const normalizedPath = relativePath.toLocaleLowerCase();
+      if (!normalizedPath.startsWith('classes/') || !normalizedPath.endsWith('.cls')) return false;
+      return hasTestClassSuffix(path.posix.basename(relativePath).slice(0, -4), testClassSuffix);
+    })
     .map((relativePath) => path.posix.basename(relativePath, '.cls'))
     .sort((left, right) => left.localeCompare(right));
+}
+
+export function hasTestClassSuffix(className: string, testClassSuffix: string): boolean {
+  return className.toLocaleLowerCase().endsWith(testClassSuffix.toLocaleLowerCase());
 }
 
 function normalizeTests(tests: readonly string[]): string[] {

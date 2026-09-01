@@ -33,6 +33,7 @@ export interface CreateDryRunInput {
   targetOrgId: string;
   testLevel: RequestedTestLevel;
   tests: string[];
+  testClassSuffix: string;
   waitMinutes: number;
   strict: boolean;
   createdBy: string;
@@ -97,6 +98,7 @@ export class DryRunService {
           dryRun: true,
           testLevel: input.testLevel,
           tests: input.tests,
+          testClassSuffix: input.testClassSuffix,
           ...(input.tests.length === 0 ? {} : { minimumCoverage: 75 }),
           wait: input.waitMinutes,
           strict: input.strict,
@@ -176,6 +178,7 @@ export class DryRunService {
           ...(tests.length === 0 ? {} : { minimumCoverage: 75 }),
           testLevel,
           tests,
+          testClassSuffix: input.testClassSuffix,
           wait: input.waitMinutes,
           strict: input.strict,
           color: false,
@@ -270,6 +273,7 @@ export class DryRunService {
       targetAlias,
       testLevel: input.testLevel,
       tests: [...input.tests].sort(),
+      testClassSuffix: input.testClassSuffix,
       waitMinutes: input.waitMinutes,
       strict: input.strict,
       scope,
@@ -302,6 +306,9 @@ function assertInput(input: CreateDryRunInput): void {
   }
   if (input.tests.length > 200 || input.tests.some((test) => !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(test))) {
     throw new SfudError('INVALID_ARGUMENT', 'Apex 테스트 클래스 이름이 올바르지 않습니다.');
+  }
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,39}$/u.test(input.testClassSuffix)) {
+    throw new SfudError('INVALID_ARGUMENT', 'Apex 테스트 클래스 접미사가 올바르지 않습니다.');
   }
 }
 

@@ -39,6 +39,7 @@ export interface DeployCommandOptions {
   minimumCoverage?: number;
   testLevel?: RequestedTestLevel;
   tests?: string[];
+  testClassSuffix?: string;
   wait?: number;
   strict?: boolean;
   json?: boolean;
@@ -148,6 +149,7 @@ export async function runDeployCommand(
     deploymentSnapshot.packageRoot,
     options.testLevel ?? 'auto',
     options.tests ?? [],
+    options.testClassSuffix ?? '_Test',
   );
   const reports = await writeComparisonReports(comparison, context.reportDirectory);
   await writeJson(path.join(context.logsDirectory, 'test-plan.json'), testPlan);

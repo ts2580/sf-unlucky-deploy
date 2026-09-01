@@ -13,10 +13,12 @@ import { WorkspaceService } from './workspace-service.js';
 import { DryRunService } from '../../deploy/dry-run-service.js';
 import { DeploymentService } from '../../deploy/deployment-service.js';
 import { WorkflowEventHub } from './workflow-events.js';
+import { UserSettingsRepository } from '../../storage/user-settings-repository.js';
 
 export interface WebRuntime {
   store: SqliteStore;
   users: UserRepository;
+  settings: UserSettingsRepository;
   deploymentJobs: DeploymentJobRepository;
   deploymentQueue: SingleJobQueue;
   deploymentCoordinator: DeploymentCoordinator;
@@ -85,6 +87,7 @@ export async function createWebRuntime(
   return {
     store,
     users: new UserRepository(store.database),
+    settings: new UserSettingsRepository(store.database),
     deploymentJobs,
     deploymentQueue,
     deploymentCoordinator,

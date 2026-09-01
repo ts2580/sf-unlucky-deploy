@@ -14,6 +14,25 @@ describe('dry-run API', () => {
     const fixture = await createFixture(new DryRunSfClient());
     try {
       const auth = await bootstrap(fixture.server);
+      const savedSettings = await fixture.server.inject({
+        method: 'PUT',
+        url: '/api/v1/settings',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: { testClassSuffix: 'Spec' },
+      });
+      expect(savedSettings.statusCode).toBe(200);
+      expect(savedSettings.json()).toEqual({ settings: { testClassSuffix: 'Spec' } });
+      expect((await fixture.server.inject({
+        url: '/api/v1/settings', headers: { cookie: auth.cookie },
+      })).json()).toEqual({ settings: { testClassSuffix: 'Spec' } });
+      const invalidSettings = await fixture.server.inject({
+        method: 'PUT',
+        url: '/api/v1/settings',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: { testClassSuffix: '-invalid' },
+      });
+      expect(invalidSettings.statusCode).toBe(400);
+      expect(invalidSettings.json()).toMatchObject({ error: { code: 'INVALID_SETTINGS_REQUEST' } });
       const workspace = await fixture.server.inject({ url: '/api/v1/workspace', headers: { cookie: auth.cookie } });
       const body = workspace.json<{
         projects: Array<{ id: string }>;
@@ -60,7 +79,7 @@ describe('dry-run API', () => {
             numberComponentsDeployed: 2, numberComponentsTotal: 2,
             numberTestsCompleted: 1, numberTestsTotal: 1,
           },
-          testPlan: { level: 'RunSpecifiedTests', tests: ['Hello_Test'], selection: 'suffix' },
+          testPlan: { level: 'RunSpecifiedTests', tests: ['HelloSpec'], selection: 'suffix' },
           comparisonSummary: { modified: 1 },
         },
       });
@@ -70,7 +89,7 @@ describe('dry-run API', () => {
       expect(deployCalls).toHaveLength(1);
       expect(deployCalls[0]!.args).toContain('--dry-run');
       expect(deployCalls[0]!.args).toEqual(expect.arrayContaining([
-        '--test-level', 'RunSpecifiedTests', '--tests', 'Hello_Test', '--async',
+        '--test-level', 'RunSpecifiedTests', '--tests', 'HelloSpec', '--async',
       ]));
       expect(deployCalls[0]!.args).not.toContain('--wait');
       expect(fixture.client.calls.some((call) => call.args.slice(0, 3).join(' ') === 'project deploy report')).toBe(true);
@@ -562,6 +581,8 @@ async function writeSnapshot(outputDirectory: string, value: string): Promise<vo
     'classes/Hello.cls-meta.xml': '<?xml version="1.0"?><ApexClass><status>Active</status></ApexClass>',
     'classes/Hello_Test.cls': 'public class Hello_Test {}\n',
     'classes/Hello_Test.cls-meta.xml': '<?xml version="1.0"?><ApexClass><status>Active</status></ApexClass>',
+    'classes/HelloSpec.cls': 'public class HelloSpec {}\n',
+    'classes/HelloSpec.cls-meta.xml': '<?xml version="1.0"?><ApexClass><status>Active</status></ApexClass>',
   });
 }
 

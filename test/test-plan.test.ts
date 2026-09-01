@@ -39,6 +39,20 @@ describe('Apex test plan', () => {
     });
   });
 
+  it('설정한 접미사로 테스트 클래스를 대소문자 구분 없이 선택한다', async () => {
+    const root = await fixtureRoot(temporaryDirectories, {
+      'classes/AccountSpec.cls': 'public class AccountSpec {}',
+      'classes/OrderSPEC.cls': 'public class OrderSPEC {}',
+      'classes/Legacy_Test.cls': 'public class Legacy_Test {}',
+    });
+
+    await expect(selectApexTestPlan(root, 'auto', [], 'Spec')).resolves.toEqual({
+      level: 'RunSpecifiedTests',
+      tests: ['AccountSpec', 'OrderSPEC'],
+      selection: 'suffix',
+    });
+  });
+
   it('*_Test.cls가 없으면 안전하게 RunLocalTests로 fallback한다', async () => {
     const root = await fixtureRoot(temporaryDirectories, {
       'classes/OrderService.cls': 'public class OrderService {}',
