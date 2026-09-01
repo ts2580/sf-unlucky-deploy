@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
 
+import { ComparisonFileDiff, type ComparisonFileDifference } from './ComparisonFileDiff';
+
 const METADATA_RESULTS_PER_PAGE = 20;
 
 type IconName =
@@ -127,7 +129,7 @@ interface ComparisonComponent {
   type: string;
   fullName: string;
   status: 'ADDED' | 'REMOVED' | 'MODIFIED' | 'IDENTICAL';
-  files: Array<{ path: string; status: string; unifiedDiff?: string; xmlChanges?: Array<{ path: string; before?: string; after?: string }> }>;
+  files: ComparisonFileDifference[];
 }
 
 interface DeploymentCartItem {
@@ -605,7 +607,7 @@ function ComparePage({ user }: { user: ApiUser }) {
       <PageIntro
         kicker="NEW COMPARISON"
         title="어떤 환경의 차이를 확인할까요?"
-        description="LEFT와 RIGHT의 배포 가능한 메타데이터를 같은 범위로 비교합니다. 아직 어떤 메타데이터도 변경하지 않습니다."
+        description="Source와 Target의 배포 가능한 메타데이터를 같은 범위로 비교합니다. 아직 어떤 메타데이터도 변경하지 않습니다."
       />
 
       <section className="workflow-panel" aria-labelledby="source-heading">
@@ -615,9 +617,9 @@ function ComparePage({ user }: { user: ApiUser }) {
           <span className="panel-state">{workspace === null ? '조회 중' : `${workspace.sources.length}개`}</span>
         </div>
         <div className="source-grid">
-          <WorkspaceSourceSelect side="LEFT" value={leftSourceId} sources={workspace?.sources ?? []} onChange={setLeftSourceId} tone="blue" />
+          <WorkspaceSourceSelect side="SOURCE" value={leftSourceId} sources={workspace?.sources ?? []} onChange={setLeftSourceId} tone="violet" />
           <div className="direction-marker"><span>비교 방향</span><Icon name="arrow" /></div>
-          <WorkspaceSourceSelect side="RIGHT" value={rightSourceId} sources={workspace?.sources ?? []} onChange={setRightSourceId} tone="violet" />
+          <WorkspaceSourceSelect side="TARGET" value={rightSourceId} sources={workspace?.sources ?? []} onChange={setRightSourceId} tone="blue" />
         </div>
       </section>
 
@@ -1185,7 +1187,7 @@ function DeployPage({ user }: { user: ApiUser }) {
       <div className="deploy-layout">
         <div className="page-stack">
           <section className="workflow-panel" aria-labelledby="deploy-source-heading">
-            <div className="panel-heading"><span className="step-number">01</span><div><h2 id="deploy-source-heading">소스와 대상</h2><p>배포 기준으로 target → desired source 방향의 차이를 계산합니다.</p></div><span className="panel-state">{workspace === null ? '조회 중' : 'DEPLOY VIEW'}</span></div>
+            <div className="panel-heading"><span className="step-number">01</span><div><h2 id="deploy-source-heading">소스와 대상</h2><p>desired source를 기준으로 target org에 적용할 차이를 계산합니다.</p></div><span className="panel-state">{workspace === null ? '조회 중' : 'DEPLOY VIEW'}</span></div>
             <div className="deploy-source-grid">
               <WorkspaceSourceSelect side="DESIRED SOURCE" value={sourceId} sources={workspace?.sources ?? []} onChange={setSourceId} tone="violet" />
               <div className="direction-marker"><span>배포 대상</span><Icon name="arrow" /></div>
@@ -1940,7 +1942,7 @@ function ComparisonResultPanel({
                 />
                 <span aria-hidden="true"><Icon name="check" /></span>
               </label>}<span className={`component-status status-${component.status.toLowerCase()}`}>{deploymentView ? deploymentDiffStatusLabel(component.status) : component.status}</span><div><strong>{component.fullName}</strong><small>{component.type} · 파일 {component.files.length}개{deploymentView && component.status === 'REMOVED' ? ' · 소스에 없어 선택 불가' : ''}</small></div><Icon name="chevron" /></summary>
-              <div className="component-files">{component.files.map((file) => <article key={file.path}><div><code>{file.path}</code><span>{file.status}</span></div>{file.xmlChanges !== undefined && file.xmlChanges.length > 0 && <p>XML 변경 {file.xmlChanges.length}개</p>}{file.unifiedDiff && <pre>{file.unifiedDiff}</pre>}</article>)}</div>
+              <div className="component-files">{component.files.map((file) => <article key={file.path}><div><code>{file.path}</code><span>{file.status}</span></div><ComparisonFileDiff file={file} sourceLabel={displaySource.label} targetLabel={displayTarget.label} sourceSide={deploymentView ? 'after' : 'before'} /></article>)}</div>
             </details>)}
         {job.result.components.length > METADATA_RESULTS_PER_PAGE && <nav className="component-pagination" aria-label="메타데이터 검색 결과 페이지">
           <button type="button" onClick={() => setResultPage((page) => Math.max(1, page - 1))} disabled={currentResultPage === 1} aria-label="이전 페이지"><Icon name="chevron" />이전</button>

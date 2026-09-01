@@ -187,8 +187,15 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   });
 
   await login(page, '/deploy');
-  await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue('org:right');
-  await expect(page.getByLabel('TARGET ORG 비교 소스')).toHaveValue('org:left');
+  const sourceSelect = page.getByLabel('DESIRED SOURCE 비교 소스');
+  const targetSelect = page.getByLabel('TARGET ORG 비교 소스');
+  await expect(sourceSelect).toHaveValue('org:right');
+  await expect(targetSelect).toHaveValue('org:left');
+  const sourceSelectBox = await sourceSelect.boundingBox();
+  const targetSelectBox = await targetSelect.boundingBox();
+  expect(sourceSelectBox).not.toBeNull();
+  expect(targetSelectBox).not.toBeNull();
+  expect(sourceSelectBox!.x).toBeLessThan(targetSelectBox!.x);
   const scopeCombobox = page.getByRole('combobox', { name: 'Salesforce metadata type' });
   await expect(scopeCombobox).toHaveValue('ApexClass');
   await expect(page.locator('#salesforce-deploy-metadata-types option')).toHaveCount(3);
@@ -226,6 +233,42 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(page.getByLabel('비교 현황')).toContainText('완료');
   await expect(page.getByText('Hello', { exact: true })).toBeVisible();
   await expect(page.locator('.component-status', { hasText: 'MODIFIED' })).toBeVisible();
+  const modifiedComponent = page.locator('details.component-result').filter({ hasText: 'Hello' });
+  await modifiedComponent.locator('summary').click();
+  const textDiff = page.getByRole('region', { name: 'classes/Hello.cls Source와 Target 차이' });
+  const sourceDiffHeader = textDiff.locator('[data-diff-side="source"]');
+  const targetDiffHeader = textDiff.locator('[data-diff-side="target"]');
+  await expect(sourceDiffHeader).toContainText('SOURCE');
+  await expect(sourceDiffHeader).toContainText('right');
+  await expect(targetDiffHeader).toContainText('TARGET');
+  await expect(targetDiffHeader).toContainText('left');
+  const sourceDiffHeaderBox = await sourceDiffHeader.boundingBox();
+  const targetDiffHeaderBox = await targetDiffHeader.boundingBox();
+  expect(sourceDiffHeaderBox).not.toBeNull();
+  expect(targetDiffHeaderBox).not.toBeNull();
+  expect(sourceDiffHeaderBox!.x).toBeLessThan(targetDiffHeaderBox!.x);
+  await expect(textDiff).not.toContainText('left/classes/Hello.cls');
+  await expect(textDiff).not.toContainText('right/classes/Hello.cls');
+  const removedLine = textDiff.locator('[data-diff-kind="removed"]', { hasText: "String value = 'target'" });
+  const addedLine = textDiff.locator('[data-diff-kind="added"]', { hasText: "String value = 'source'" });
+  await expect(removedLine).toHaveCSS('color', 'rgb(254, 202, 202)');
+  await expect(removedLine).toHaveCSS('background-color', 'rgb(58, 25, 33)');
+  await expect(addedLine).toHaveCSS('color', 'rgb(187, 247, 208)');
+  await expect(addedLine).toHaveCSS('background-color', 'rgb(18, 56, 39)');
+  const xmlDiff = page.getByRole('region', { name: 'classes/Hello.cls-meta.xml Source와 Target 차이' });
+  await expect(xmlDiff.getByLabel('XML 경로별 변경 내용')).toContainText('ApexClass.status');
+  const sourceXmlValue = xmlDiff.locator('.xml-diff-value[data-diff-side="source"]');
+  const targetXmlValue = xmlDiff.locator('.xml-diff-value[data-diff-side="target"]');
+  await expect(sourceXmlValue).toContainText('Active');
+  await expect(targetXmlValue).toContainText('Inactive');
+  const sourceXmlValueBox = await sourceXmlValue.boundingBox();
+  const targetXmlValueBox = await targetXmlValue.boundingBox();
+  expect(sourceXmlValueBox).not.toBeNull();
+  expect(targetXmlValueBox).not.toBeNull();
+  expect(sourceXmlValueBox!.x).toBeLessThan(targetXmlValueBox!.x);
+  expect(await page.evaluate(
+    () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+  )).toBe(false);
 });
 
 test('선택 변경 후 이전 비교 polling 결과를 폐기한다', async ({ page }) => {
@@ -534,7 +577,16 @@ function comparisonFixture(status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED'): Comparis
         warnings: [],
         components: [{
           key: 'ApexClass:Hello', type: 'ApexClass', fullName: 'Hello', status: 'MODIFIED',
-          files: [{ path: 'classes/Hello.cls', status: 'MODIFIED', unifiedDiff: '- left\n+ right' }],
+          files: [
+            {
+              path: 'classes/Hello.cls', status: 'MODIFIED', kind: 'text',
+              unifiedDiff: "Index: classes/Hello.cls\n===================================================================\n--- left/classes/Hello.cls\n+++ right/classes/Hello.cls\n@@ -1,1 +1,1 @@\n-public class Hello { String value = 'target'; }\n+public class Hello { String value = 'source'; }\n",
+            },
+            {
+              path: 'classes/Hello.cls-meta.xml', status: 'MODIFIED', kind: 'xml',
+              xmlChanges: [{ kind: 'MODIFIED', path: 'ApexClass.status', before: 'Inactive', after: 'Active' }],
+            },
+          ],
         }],
       },
     }),
@@ -573,7 +625,13 @@ interface ComparisonFixture {
     warnings: string[];
     components: Array<{
       key: string; type: string; fullName: string; status: 'MODIFIED';
-      files: Array<{ path: string; status: string; unifiedDiff: string }>;
+      files: Array<{
+        path: string;
+        status: string;
+        kind?: 'xml' | 'text' | 'binary';
+        unifiedDiff?: string;
+        xmlChanges?: Array<{ kind: 'MODIFIED'; path: string; before: string; after: string }>;
+      }>;
     }>;
   };
 }
