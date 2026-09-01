@@ -292,6 +292,17 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE deployment_jobs ADD COLUMN progress_json TEXT;
     `,
   },
+  {
+    version: 11,
+    name: 'user_test_class_suffix',
+    sql: `
+      CREATE TABLE user_settings (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        test_class_suffix TEXT NOT NULL DEFAULT '_Test',
+        updated_at TEXT NOT NULL
+      ) STRICT;
+    `,
+  },
 ];
 
 export async function applyMigrations(

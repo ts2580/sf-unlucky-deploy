@@ -119,6 +119,13 @@ test('설정에서 내 단말기의 DX 프로젝트를 임시 소스로 업로�
     orgs: [], projects: [], uploads: [], sources: [],
   } }));
   await login(page, '/settings');
+  const suffixInput = page.getByLabel('테스트 클래스 접미사');
+  await expect(suffixInput).toHaveValue('_Test');
+  await suffixInput.fill('Spec');
+  await page.getByRole('button', { name: '접미사 저장' }).click();
+  await expect(page.getByRole('status')).toContainText('테스트 클래스 접미사를 Spec(으)로 저장했습니다.');
+  await page.reload();
+  await expect(page.getByLabel('테스트 클래스 접미사')).toHaveValue('Spec');
   await expect(page.getByRole('heading', { name: '내 단말기 프로젝트' })).toBeVisible();
   const uploadInput = page.getByRole('region', { name: '내 단말기 프로젝트' }).locator('.upload-button input[type="file"]');
   await expect(uploadInput).toBeEnabled();
@@ -151,9 +158,9 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   }));
   await page.route('**/api/v1/metadata-types**', async (route) => route.fulfill({ json: {
     metadataTypes: [
-      { name: 'ApexClass', directoryName: 'classes' },
       { name: 'CustomObject', directoryName: 'objects' },
       { name: 'LightningComponentBundle', directoryName: 'lwc' },
+      { name: 'ApexClass', directoryName: 'classes' },
     ],
   } }));
   let polls = 0;
@@ -167,6 +174,7 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
       });
       expect(route.request().postDataJSON()).not.toHaveProperty('manifest');
       expect(route.request().postDataJSON()).not.toHaveProperty('projectId');
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
       await route.fulfill({ json: { job: comparisonFixture('QUEUED') }, status: 202 });
       return;
     }
@@ -182,18 +190,36 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue('org:right');
   await expect(page.getByLabel('TARGET ORG 비교 소스')).toHaveValue('org:left');
   const scopeCombobox = page.getByRole('combobox', { name: 'Salesforce metadata type' });
-  await expect(scopeCombobox).toHaveValue('전체 메타데이터');
-  await expect(page.locator('#salesforce-deploy-metadata-types option')).toHaveCount(4);
-  await scopeCombobox.fill('ApexClass');
+  await expect(scopeCombobox).toHaveValue('ApexClass');
+  await expect(page.locator('#salesforce-deploy-metadata-types option')).toHaveCount(3);
+  await expect(page.getByText('전체 메타데이터', { exact: true })).toHaveCount(0);
   await expect(page.getByText('3개 metadata type 검색 가능 · source와 target의 합집합')).toBeVisible();
-  const comparisonOptions = page.getByRole('region', { name: 'Apex 테스트와 표시 옵션' });
+  const comparisonOptions = page.getByRole('region', { name: '메타데이터 검색' });
+  const comparisonButton = comparisonOptions.getByRole('button', { name: /비교 실행$/u });
+  const apexTestOptions = page.getByRole('region', { name: 'Apex 테스트 설정' });
   await expect(comparisonOptions.getByText('Strict 비교')).toHaveCount(0);
-  await expect(comparisonOptions.getByRole('button', { name: /비교 실행$/u })).toBeVisible();
+  await expect(comparisonOptions.getByText('동일 항목 표시')).toBeVisible();
+  await expect(comparisonButton).toBeVisible();
+  await expect(apexTestOptions.getByRole('button', { name: /비교 실행/u })).toHaveCount(0);
   await expect(page.getByRole('complementary', { name: '배포 대상' }).getByRole('button', { name: /비교 실행/u })).toHaveCount(0);
+  const desktopComparisonButtonBox = await comparisonButton.boundingBox();
+  const desktopApexTestOptionsBox = await apexTestOptions.boundingBox();
+  expect(desktopComparisonButtonBox).not.toBeNull();
+  expect(desktopApexTestOptionsBox).not.toBeNull();
+  expect(desktopComparisonButtonBox!.y + desktopComparisonButtonBox!.height).toBeLessThan(desktopApexTestOptionsBox!.y);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobileComparisonButtonBox = await comparisonButton.boundingBox();
+  const mobileApexTestOptionsBox = await apexTestOptions.boundingBox();
+  expect(mobileComparisonButtonBox).not.toBeNull();
+  expect(mobileApexTestOptionsBox).not.toBeNull();
+  expect(mobileComparisonButtonBox!.y + mobileComparisonButtonBox!.height).toBeLessThan(mobileApexTestOptionsBox!.y);
   const workflowStatus = page.getByRole('region', { name: '실행 현황' });
   await expect(workflowStatus).toBeVisible();
   await expect(workflowStatus.getByText('실시간 연결')).toBeVisible();
   await comparisonOptions.getByRole('button', { name: /비교 실행$/u }).click();
+  await expect(comparisonOptions.getByRole('button', { name: '비교 실행 중……' })).toBeVisible({ timeout: 300 });
+  await expect(comparisonOptions.getByText('읽기 전용 비교')).toHaveCount(0);
+  await expect(comparisonOptions.getByText('현재 metadata type과 옵션으로 source와 target을 비교합니다.')).toHaveCount(0);
   await expect(page.getByLabel('비교 현황')).toContainText(/대기열|진행 중/u);
   await expect(page.getByText('메타데이터 비교 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'right → left' })).toBeVisible({ timeout: 5_000 });
@@ -213,8 +239,8 @@ test('선택 변경 후 이전 비교 polling 결과를 폐기한다', async ({ 
   } }));
   await page.route('**/api/v1/metadata-types**', async (route) => route.fulfill({ json: {
     metadataTypes: [
-      { name: 'ApexClass', directoryName: 'classes' },
       { name: 'CustomObject', directoryName: 'objects' },
+      { name: 'ApexClass', directoryName: 'classes' },
     ],
   } }));
   let pollingStarted = false;
@@ -262,14 +288,15 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await page.route('**/api/v1/apex-test-classes**', async (route) => {
     expect(new URL(route.request().url()).searchParams.get('sourceId')).toBe('project:project-1');
     await route.fulfill({ json: {
-      testClasses: ['Hello_Test', 'Order_Test', 'PaymentValidationSpec'],
+      testClasses: ['Hello_Test', 'Order_Test'],
     } });
   });
   let comparisonPolls = 0;
   await page.route('**/api/v1/comparisons**', async (route) => {
     if (route.request().method() === 'POST') {
       expect(route.request().postDataJSON()).toMatchObject({
-        scope: 'all', leftSourceId: 'org:target', rightSourceId: 'project:project-1',
+        scope: 'all', metadataType: 'ApexClass',
+        leftSourceId: 'org:target', rightSourceId: 'project:project-1',
       });
       await route.fulfill({ status: 202, json: { job: deploymentComparisonFixture('QUEUED') } });
       return;
@@ -281,7 +308,9 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
     comparisonPolls += 1;
     await route.fulfill({ json: { job: deploymentComparisonFixture(comparisonPolls > 1 ? 'SUCCEEDED' : 'RUNNING') } });
   });
+  let dryRunSubmissions = 0;
   await page.route('**/api/v1/deployments/dry-run', async (route) => {
+    dryRunSubmissions += 1;
     expect(route.request().postDataJSON()).toMatchObject({
       scope: 'selected',
       components: [{ type: 'ApexClass', fullName: 'NewClass' }],
@@ -289,12 +318,16 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
       testLevel: 'RunSpecifiedTests', tests: ['Hello_Test'],
     });
     expect(route.request().postDataJSON()).not.toHaveProperty('manifest');
-    await route.fulfill({ status: 202, json: { job: dryRunFixture('QUEUED') } });
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    await route.fulfill({ status: 202, json: { job: dryRunFixture(
+      'QUEUED', dryRunSubmissions === 1 ? 'dry-run-1' : 'dry-run-failed',
+    ) } });
   });
   await page.route('**/api/v1/deployments/execute', async (route) => {
     expect(route.request().postDataJSON()).toMatchObject({
       dryRunJobId: 'dry-run-1', targetAlias: 'target', confirmation: '실제 배포',
     });
+    await new Promise((resolve) => setTimeout(resolve, 750));
     await route.fulfill({ status: 202, json: { job: deploymentFixture('QUEUED') } });
   });
   await page.route('**/api/v1/deployments/direct', async (route) => {
@@ -304,6 +337,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
       sourceId: 'project:project-1', targetOrgId: 'org:target', tests: ['Hello_Test'],
       targetConfirmation: 'target', confirmation: '실제 배포',
     });
+    await new Promise((resolve) => setTimeout(resolve, 750));
     await route.fulfill({ status: 202, json: { job: directDeploymentFixture('QUEUED') } });
   });
   let dryRunPolls = 0;
@@ -326,6 +360,10 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
       await route.fulfill({ json: { job: deploymentFixture(deploymentPolls > 1 ? 'SUCCEEDED' : 'DEPLOYING') } });
       return;
     }
+    if (new URL(route.request().url()).pathname.endsWith('/dry-run-failed')) {
+      await route.fulfill({ json: { job: failedDryRunFixture() } });
+      return;
+    }
     dryRunPolls += 1;
     await route.fulfill({ json: { job: dryRunFixture(dryRunPolls > 1 ? 'APPROVAL_PENDING' : 'DRY_RUN_RUNNING') } });
   });
@@ -334,21 +372,35 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue('project:project-1');
   await expect(page.getByLabel('TARGET ORG 비교 소스')).toHaveValue('org:target');
   const directTestInput = page.getByLabel('테스트 클래스 직접 입력');
-  await directTestInput.fill('Hello_Test, pay');
+  await directTestInput.fill('Hello_Test, ord');
   const directTestSuggestions = page.getByRole('listbox', { name: 'source 테스트 클래스 검색 결과' });
-  const paymentSuggestion = directTestSuggestions.getByRole('option', { name: 'PaymentValidationSpec' });
-  await expect(paymentSuggestion).toBeVisible();
+  const orderSuggestion = directTestSuggestions.getByRole('option', { name: 'Order_Test' });
+  await expect(orderSuggestion).toBeVisible();
   await expect(directTestSuggestions.getByRole('option', { name: 'Hello_Test' })).toHaveCount(0);
   await directTestInput.press('Tab');
-  await expect(paymentSuggestion).toBeFocused();
-  await paymentSuggestion.press('Enter');
-  await expect(directTestInput).toHaveValue('Hello_Test, PaymentValidationSpec');
+  await expect(orderSuggestion).toBeFocused();
+  await orderSuggestion.press('Enter');
+  await expect(directTestInput).toHaveValue('Hello_Test, Order_Test');
+  await expect(directTestInput).toHaveAttribute('aria-expanded', 'false');
+  await expect(directTestSuggestions).toHaveCount(0);
+  await directTestInput.fill('ExternalOnly_Test');
+  await expect(directTestInput).toHaveValue('ExternalOnly_Test');
+  await expect(page.getByText('일치하는 source Apex 클래스가 없습니다.')).toHaveCount(0);
+  await expect(directTestInput).toHaveAttribute('aria-expanded', 'false');
   await directTestInput.clear();
   await page.getByRole('button', { name: /비교 실행/u }).click();
   await expect(page.getByText('메타데이터 비교 중')).toBeVisible();
-  await expect(page.getByText('fixture-project → target · 전체 메타데이터', { exact: true })).toBeVisible();
+  await expect(page.getByText('fixture-project → target · ApexClass', { exact: true })).toBeVisible();
   await expect(page.getByText('NEW', { exact: true }).first()).toBeVisible({ timeout: 5_000 });
   await expect(page.getByRole('heading', { name: 'fixture-project → target' })).toBeVisible();
+  const searchPanelBox = await page.getByRole('region', { name: '메타데이터 검색' }).boundingBox();
+  const searchResultBox = await page.locator('.comparison-result').first().boundingBox();
+  const testPanelBox = await page.getByRole('region', { name: 'Apex 테스트 설정' }).boundingBox();
+  expect(searchPanelBox).not.toBeNull();
+  expect(searchResultBox).not.toBeNull();
+  expect(testPanelBox).not.toBeNull();
+  expect(searchResultBox!.y).toBeGreaterThan(searchPanelBox!.y + searchPanelBox!.height);
+  expect(searchResultBox!.y + searchResultBox!.height).toBeLessThan(testPanelBox!.y);
   const metadataResults = page.locator('.component-results');
   await expect(metadataResults.locator('.component-result')).toHaveCount(20);
   const resultPagination = page.getByRole('navigation', { name: '메타데이터 검색 결과 페이지' });
@@ -367,13 +419,14 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByLabel('배포 대상').getByText('NewClass', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeVisible();
   await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeVisible();
-  await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeEnabled();
+  await expect(page.getByRole('region', { name: 'Target 바로 배포' }).getByRole('textbox')).toHaveCount(0);
   const apexTests = page.getByRole('region', { name: 'Apex 테스트 클래스 선택' });
   await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toBeVisible();
-  await page.getByLabel('테스트 클래스 검색').fill('validation');
-  await expect(apexTests.getByRole('checkbox', { name: 'PaymentValidationSpec' })).toBeVisible();
+  await page.getByLabel('테스트 클래스 검색').fill('order');
+  await expect(apexTests.getByRole('checkbox', { name: 'Order_Test' })).toBeVisible();
   await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toHaveCount(0);
-  await expect(apexTests.getByText('1 / 3개 표시')).toBeVisible();
+  await expect(apexTests.getByText('1 / 2개 표시')).toBeVisible();
   await page.getByLabel('테스트 클래스 검색').fill('');
   await page.getByLabel('테스트 수준').selectOption('RunSpecifiedTests');
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeDisabled();
@@ -381,9 +434,9 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByLabel('테스트 클래스 직접 입력')).toHaveValue('Hello_Test');
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeEnabled();
   await expect(page.getByText('코드 커버리지 75% 이상일 때만 배포합니다.')).toBeVisible();
-  await page.getByLabel('대상 org 별칭').fill('target');
-  await page.getByLabel('확인 문구').fill('실제 배포');
   await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
+  await expect(page.getByRole('button', { name: '배포 요청 중……' })).toBeVisible({ timeout: 300 });
+  await expect(page.getByLabel('실제 배포 현황')).toContainText('요청 제출 중');
   await expect(page.getByText('Salesforce 실제 배포 중')).toBeVisible();
   await expect(page.getByLabel('실제 배포 현황')).toContainText(/InProgress · \d+초/u);
   await expect(page.getByLabel('실제 배포 현황')).toContainText('컴포넌트 1/2');
@@ -393,16 +446,25 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByLabel('배포 대상').getByText('NewClass', { exact: true })).toBeVisible();
   await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toBeChecked();
   await page.getByRole('button', { name: '배포 대상 Dry-run' }).click();
-  await expect(page.getByLabel('Dry-run 현황')).toContainText(/대기열|진행 중/u);
+  await expect(page.getByRole('button', { name: 'Dry-run 요청 중……' })).toBeVisible({ timeout: 300 });
+  const dryRunStatus = page.getByLabel('Dry-run 현황');
+  await expect(dryRunStatus).toContainText('서버 응답 대기 중');
+  await expect(dryRunStatus).toContainText(/대기열|진행 중/u);
+  await expect(dryRunStatus).toContainText(/SSE (연결됨|재연결 중|연결 중)/u);
+  const dryRunStatusBox = await dryRunStatus.boundingBox();
+  const dryRunButtonBox = await page.getByRole('button', { name: /Dry-run 중/u }).boundingBox();
+  expect(dryRunStatusBox).not.toBeNull();
+  expect(dryRunButtonBox).not.toBeNull();
+  expect(dryRunStatusBox!.y + dryRunStatusBox!.height).toBeLessThanOrEqual(dryRunButtonBox!.y);
   await expect(page.getByText('Salesforce check-only 실행 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Salesforce dry-run 성공' })).toBeVisible({ timeout: 5_000 });
-  await expect(page.getByLabel('Dry-run 현황')).toContainText('승인 대기');
+  await expect(page.getByLabel('Dry-run 현황')).toContainText('Dry-run 성공 · 배포 가능');
   const result = page.getByLabel('Salesforce dry-run 성공');
   await expect(result.getByText('RunSpecifiedTests', { exact: true })).toBeVisible();
   await expect(result.getByText(/Hello_Test/u)).toBeVisible();
-  await page.getByLabel('대상 org 별칭').fill('target');
-  await page.getByLabel('확인 문구').fill('실제 배포');
   await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
+  await expect(page.getByRole('button', { name: '배포 요청 중……' })).toBeVisible({ timeout: 300 });
+  await expect(page.getByLabel('실제 배포 현황')).toContainText('요청 제출 중');
   await expect(page.getByLabel('실제 배포 현황')).toContainText(/대기열|진행 중/u);
   await expect(page.getByText('Salesforce 실제 배포 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Salesforce 실제 배포 성공' })).toBeVisible({ timeout: 5_000 });
@@ -420,6 +482,19 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   expect(summaryBox).not.toBeNull();
   expect(summaryBox!.y).toBeGreaterThan(resultBox!.y + resultBox!.height);
   await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeVisible();
+
+  await page.getByRole('button', { name: '배포 대상 Dry-run' }).click();
+  await expect(page.getByText('dry-run이 실패했습니다.')).toBeVisible({ timeout: 5_000 });
+  const liveFailure = page.getByLabel('Dry-run 현황');
+  await expect(liveFailure.getByText('실패 원인', { exact: true })).toBeVisible();
+  await expect(liveFailure.getByText('CryptoUtil_Test.encryptsAndDecryptsWithConfiguredKey', { exact: true })).toBeVisible();
+  await expect(liveFailure.getByText('System.QueryException: List has no rows for assignment to SObject', { exact: true })).toBeVisible();
+  await expect(liveFailure.getByText(/8\.696%.*75%/u)).toBeVisible();
+  const diagnostics = page.getByRole('region', { name: 'Salesforce 상세 결과' });
+  await expect(diagnostics.getByText('CryptoUtil_Test.encryptsAndDecryptsWithConfiguredKey', { exact: true })).toBeVisible();
+  await expect(diagnostics.getByText('System.QueryException: List has no rows for assignment to SObject', { exact: true })).toBeVisible();
+  await expect(diagnostics.locator('pre')).toContainText('Class.CryptoUtil.<init>: line 22, column 1');
+  await expect(diagnostics.getByText(/8\.696%.*75%/u)).toBeVisible();
 });
 
 test('제품 파비콘을 제공한다', async ({ page, request }) => {
@@ -468,7 +543,7 @@ function comparisonFixture(status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED'): Comparis
 
 function deploymentComparisonFixture(status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED') {
   return {
-    id: 'deployment-comparison-1', status, scope: 'all', manifest: '전체 메타데이터',
+    id: 'deployment-comparison-1', status, scope: 'all', metadataType: 'ApexClass', manifest: 'ApexClass',
     left: { id: 'org:target', kind: 'org', label: 'target' },
     right: { id: 'project:project-1', kind: 'local', label: 'fixture-project' },
     ...(status !== 'SUCCEEDED' ? {} : { result: {
@@ -503,9 +578,9 @@ interface ComparisonFixture {
   };
 }
 
-function dryRunFixture(status: 'QUEUED' | 'DRY_RUN_RUNNING' | 'APPROVAL_PENDING') {
+function dryRunFixture(status: 'QUEUED' | 'DRY_RUN_RUNNING' | 'APPROVAL_PENDING', id = 'dry-run-1') {
   return {
-    id: 'dry-run-1', kind: 'DRY_RUN', status,
+    id, kind: 'DRY_RUN', status,
     source: { id: 'project:project-1', kind: 'local', label: 'fixture-project' },
     target: { id: 'org:target', kind: 'org', label: 'target' },
     manifest: 'manifest/package.xml', prepared: status === 'APPROVAL_PENDING',
@@ -523,6 +598,38 @@ function dryRunFixture(status: 'QUEUED' | 'DRY_RUN_RUNNING' | 'APPROVAL_PENDING'
       testPlan: { level: 'RunSpecifiedTests', tests: ['Hello_Test'], selection: 'suffix' },
       comparisonSummary: { added: 1, removed: 0, modified: 1, identical: 0, total: 2, different: 2 },
     }),
+  };
+}
+
+function failedDryRunFixture() {
+  return {
+    ...dryRunFixture('QUEUED', 'dry-run-failed'),
+    status: 'FAILED',
+    salesforceDeploymentId: '0AfWU00000b5KLl0AM',
+    startedAt: new Date(Date.now() - 2_000).toISOString(),
+    completedAt: new Date().toISOString(),
+    errorMessage: 'Salesforce 배포 0AfWU00000b5KLl0AM가 Failed 상태로 종료되었습니다. CryptoUtil_Test.encryptsAndDecryptsWithConfiguredKey: System.QueryException: List has no rows for assignment to SObject',
+    progress: {
+      phase: 'DRY_RUN', deploymentId: '0AfWU00000b5KLl0AM', status: 'Failed', done: true, success: false,
+      numberComponentsDeployed: 2, numberComponentsTotal: 2, numberComponentErrors: 0,
+      numberTestsCompleted: 0, numberTestsTotal: 1, numberTestErrors: 1,
+      checkedAt: new Date().toISOString(),
+      diagnostics: {
+        componentFailures: [],
+        testFailures: [{
+          name: 'CryptoUtil_Test', methodName: 'encryptsAndDecryptsWithConfiguredKey',
+          message: 'System.QueryException: List has no rows for assignment to SObject',
+          stackTrace: 'Class.CryptoUtil.<init>: line 22, column 1\nClass.CryptoUtil_Test.encryptsAndDecryptsWithConfiguredKey: line 5, column 1',
+          time: 85,
+        }],
+        codeCoverageWarnings: [{
+          name: 'CryptoUtil',
+          message: 'Test coverage of selected Apex Class is 8.696%, at least 75% test coverage is required',
+        }],
+        flowCoverageWarnings: [],
+        messages: [],
+      },
+    },
   };
 }
 

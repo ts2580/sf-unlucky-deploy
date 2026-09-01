@@ -45,7 +45,7 @@ describe('SQLite 저장소', () => {
     expect(await store.database.get('PRAGMA journal_mode')).toEqual({ journal_mode: 'wal' });
     expect(await store.database.get('PRAGMA busy_timeout')).toEqual({ timeout: 5_000 });
     expect(await store.database.get('SELECT COUNT(*) count FROM schema_migrations'))
-      .toEqual({ count: 10 });
+      .toEqual({ count: 11 });
     expect((await stat(path.dirname(databasePath))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
     await expect(readFile(databasePath)).resolves.toBeInstanceOf(Buffer);
@@ -139,6 +139,10 @@ describe('SQLite 저장소', () => {
       dryRunJobId: dryRun.id,
       payloadChecksum: checksum,
       targetAlias: 'stdOrg',
+      prepared: true,
+      comparisonResult,
+      testPlan: { level: 'RunLocalTests', tests: [], selection: 'fallback' },
+      dryRunResult: { status: 0, result: { id: '0Af-dry-run' } },
     });
     const coordinator = new DeploymentCoordinator(jobs, new SingleJobQueue());
     expect(await coordinator.runDeployment(deploy.id, async () => ({

@@ -22,6 +22,7 @@ describe('비교 API', () => {
     }));
     await writeFile(path.join(manifestDirectory, 'package.xml'), '<Package/>\n');
     await writeFile(path.join(classesDirectory, 'Local_Test.cls'), '@IsTest private class Local_Test {}\n');
+    await writeFile(path.join(classesDirectory, 'LocalSpec.cls'), '@IsTest private class LocalSpec {}\n');
     await writeFile(path.join(classesDirectory, 'Helper.cls'), 'public class Helper {}\n');
     const sfClient = new ComparisonSfClient();
     const server = await createWebServer({
@@ -79,7 +80,7 @@ describe('비교 API', () => {
         url: '/api/v1/apex-test-classes?sourceId=org%3Aleft', headers: { cookie },
       });
       expect(orgTests.statusCode).toBe(200);
-      expect(orgTests.json()).toEqual({ testClasses: ['Account_Test', 'Helper', 'Order_test'] });
+      expect(orgTests.json()).toEqual({ testClasses: ['Account_Test', 'Order_test'] });
       expect(sfClient.calls).toContainEqual(expect.arrayContaining([
         'data', 'query', '--use-tooling-api', '--target-org', 'left', '--api-version', '64.0',
       ]));
@@ -87,7 +88,18 @@ describe('비교 API', () => {
         url: `/api/v1/apex-test-classes?sourceId=project%3A${projectId}`, headers: { cookie },
       });
       expect(localTests.statusCode).toBe(200);
-      expect(localTests.json()).toEqual({ testClasses: ['Helper', 'Local_Test'] });
+      expect(localTests.json()).toEqual({ testClasses: ['Local_Test'] });
+      expect((await server.inject({
+        method: 'PUT', url: '/api/v1/settings',
+        headers: { cookie, 'x-sfud-csrf': csrfToken },
+        payload: { testClassSuffix: 'Spec' },
+      })).statusCode).toBe(200);
+      expect((await server.inject({
+        url: '/api/v1/apex-test-classes?sourceId=org%3Aleft', headers: { cookie },
+      })).json()).toEqual({ testClasses: ['AccountSpec'] });
+      expect((await server.inject({
+        url: `/api/v1/apex-test-classes?sourceId=project%3A${projectId}`, headers: { cookie },
+      })).json()).toEqual({ testClasses: ['LocalSpec'] });
       const comparisonPayload = {
         projectId,
         manifest: 'manifest/package.xml',
@@ -134,6 +146,16 @@ describe('비교 API', () => {
       expect(await server.sfudRuntime.store.database.get(
         "SELECT COUNT(*) count FROM audit_events WHERE event_type = 'COMPARISON_SUCCEEDED'",
       )).toEqual({ count: 1 });
+
+      const unbounded = await server.inject({
+        method: 'POST', url: '/api/v1/comparisons',
+        headers: { cookie, 'x-sfud-csrf': csrfToken },
+        payload: { scope: 'all', leftSourceId: 'org:left', rightSourceId: 'org:right' },
+      });
+      expect(unbounded.statusCode).toBe(400);
+      expect(unbounded.json()).toMatchObject({ error: {
+        message: expect.stringContaining('전체 메타데이터 검색은 지원하지 않습니다'),
+      } });
 
       const allCreated = await server.inject({
         method: 'POST',
@@ -212,6 +234,7 @@ class ComparisonSfClient implements SfClient {
     if (args[0] === 'data' && args[1] === 'query') {
       return { status: 0, result: { records: [
         { Name: 'Account_Test' },
+        { Name: 'AccountSpec' },
         { Name: 'Helper' },
         { Name: 'Order_test' },
       ] } };

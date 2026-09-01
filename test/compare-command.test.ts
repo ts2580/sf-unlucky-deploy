@@ -1,4 +1,4 @@
-import { access, mkdtemp, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -37,6 +37,10 @@ describe('compare command', () => {
     expect(result.exitCode).toBe(1);
     expect(result.comparison.summary.modified).toBe(1);
     expect(client.calls.filter((call) => call.args.includes('retrieve'))).toHaveLength(2);
+    for (const call of client.calls.filter((entry) => entry.args.includes('retrieve'))) {
+      expect(flagValue(call.args, '--wait')).toBe('60');
+      expect(call.options.timeoutMs).toBe(61 * 60 * 1000);
+    }
     const requestWorkspaces = new Set(client.calls.map((call) => call.options.cwd));
     expect(requestWorkspaces.size).toBe(1);
     const requestWorkspace = [...requestWorkspaces][0]!;
@@ -74,7 +78,82 @@ describe('compare command', () => {
     expect(client.calls.filter((args) => args.includes('retrieve'))).toHaveLength(0);
     expect(client.calls.filter((args) => args.includes('manifest'))).toHaveLength(2);
   });
+
+  it('동적 비교는 합집합 범위를 유지하면서 각 source manifest로 retrieve한다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-source-scoped-compare-'));
+    temporaryDirectories.push(root);
+    await writeFile(path.join(root, 'sfdx-project.json'), JSON.stringify({
+      packageDirectories: [{ path: 'force-app' }], sourceApiVersion: '67.0',
+    }));
+    const client = new SourceScopedDynamicCompareSfClient();
+
+    const result = await runCompareCommand({
+      left: 'org:left',
+      right: 'org:right',
+      metadataType: 'ApexClass',
+      wait: 90,
+      reportDir: path.join(root, 'run'),
+      color: false,
+    }, { cwd: root, sfClient: client, stdout: () => undefined });
+
+    expect(result.comparison.summary).toMatchObject({ added: 1, removed: 1, total: 2, different: 2 });
+    expect(client.retrievals).toHaveLength(2);
+    const leftRetrieval = client.retrievals.find((entry) => entry.alias === 'left')!;
+    const rightRetrieval = client.retrievals.find((entry) => entry.alias === 'right')!;
+    for (const retrieval of client.retrievals) {
+      expect(retrieval.waitMinutes).toBe('90');
+      expect(retrieval.options.timeoutMs).toBe(91 * 60 * 1000);
+    }
+    expect(leftRetrieval.manifestPath).not.toBe(rightRetrieval.manifestPath);
+    await expect(readFile(leftRetrieval.manifestPath, 'utf8')).resolves.toContain('<members>leftOnly</members>');
+    await expect(readFile(leftRetrieval.manifestPath, 'utf8')).resolves.not.toContain('rightOnly');
+    await expect(readFile(rightRetrieval.manifestPath, 'utf8')).resolves.toContain('<members>rightOnly</members>');
+    await expect(readFile(rightRetrieval.manifestPath, 'utf8')).resolves.not.toContain('leftOnly');
+    expect(result.comparison.left.manifestSha256).toBe(result.comparison.right.manifestSha256);
+  });
 });
+
+class SourceScopedDynamicCompareSfClient implements SfClient {
+  public readonly retrievals: Array<{
+    alias: string;
+    manifestPath: string;
+    options: SfRunOptions;
+    waitMinutes: string;
+  }> = [];
+
+  public async runJson(args: readonly string[], options: SfRunOptions): Promise<unknown> {
+    if (args[0] === 'org' && args[1] === 'list' && args[2] === 'metadata-types') {
+      return { result: { metadataObjects: [
+        { directoryName: 'classes', suffix: 'cls', xmlName: 'ApexClass' },
+      ] } };
+    }
+    if (args[0] === 'project' && args[1] === 'generate' && args[2] === 'manifest') {
+      const alias = flagValue(args, '--from-org');
+      const outputDirectory = flagValue(args, '--output-dir');
+      await mkdir(outputDirectory, { recursive: true });
+      await writeFile(path.join(outputDirectory, flagValue(args, '--name')), [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<Package xmlns="http://soap.sforce.com/2006/04/metadata">',
+        `  <types><members>${alias}Only</members><name>ApexClass</name></types>`,
+        '  <version>67.0</version>',
+        '</Package>',
+      ].join('\n'));
+      return { status: 0 };
+    }
+    if (args[0] === 'project' && args[1] === 'retrieve') {
+      const alias = flagValue(args, '--target-org');
+      const manifestPath = flagValue(args, '--manifest');
+      this.retrievals.push({ alias, manifestPath, options, waitMinutes: flagValue(args, '--wait') });
+      await writeFixtureFiles(flagValue(args, '--target-metadata-dir'), {
+        'unpackaged/package.xml': '<Package/>\n',
+        [`unpackaged/classes/${alias}Only.cls`]: `public class ${alias}Only {}\n`,
+        [`unpackaged/classes/${alias}Only.cls-meta.xml`]: '<ApexClass/>\n',
+      });
+      return { status: 0 };
+    }
+    throw new Error(`지원하지 않는 테스트 명령: ${args.join(' ')}`);
+  }
+}
 
 class EmptyDynamicCompareSfClient implements SfClient {
   public readonly calls: string[][] = [];

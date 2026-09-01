@@ -335,6 +335,13 @@ export class DeploymentJobRepository {
         if (!dryRun.prepared) {
           throw new SfudError('APPROVAL_DENIED', 'payload 준비가 완료되지 않은 dry-run 작업입니다.');
         }
+        if (
+          dryRun.comparisonResult === undefined
+          || dryRun.testPlan === undefined
+          || dryRun.dryRunResult === undefined
+        ) {
+          throw new SfudError('APPROVAL_DENIED', 'dry-run 배포 아티팩트가 완전하지 않습니다.');
+        }
 
         const approver = await this.database.get<{ role: string; disabled_at: string | null }>(
           'SELECT role, disabled_at FROM users WHERE id = ?',
@@ -360,8 +367,10 @@ export class DeploymentJobRepository {
         await this.database.run(`
         INSERT INTO deployment_jobs (
           id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
-          run_directory, selected_components_json, dry_run_job_id, created_by, created_at, updated_at
-        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          run_directory, selected_components_json, dry_run_job_id, is_prepared,
+          comparison_result_json, test_plan_json, dry_run_result_json,
+          created_by, created_at, updated_at
+        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
       `,
         deployJobId,
         dryRun.source,
@@ -373,6 +382,9 @@ export class DeploymentJobRepository {
         dryRun.runDirectory ?? null,
         dryRun.selectedComponents === undefined ? null : JSON.stringify(dryRun.selectedComponents),
         dryRun.id,
+        JSON.stringify(dryRun.comparisonResult),
+        JSON.stringify(dryRun.testPlan),
+        JSON.stringify(dryRun.dryRunResult),
         input.approvedBy,
         timestamp,
         timestamp,

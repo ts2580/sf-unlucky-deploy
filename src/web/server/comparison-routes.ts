@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 
 import type { ComparisonJob } from '../../compare/comparison-job-repository.js';
 import { redactSensitiveText } from '../../salesforce/sf-client.js';
+import { hasTestClassSuffix } from '../../deploy/test-plan.js';
 import { requireAuthenticatedSession } from './auth-routes.js';
 
 interface CreateComparisonBody {
@@ -90,7 +91,9 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     if (session === undefined) return;
     try {
       const sourceId = requiredString(request.query.sourceId, '배포 소스');
-      const testClasses = await app.sfudRuntime.workspace.listApexTestClasses(sourceId, session.user.id);
+      const settings = await app.sfudRuntime.settings.get(session.user.id);
+      const testClasses = (await app.sfudRuntime.workspace.listApexTestClasses(sourceId, session.user.id))
+        .filter((className) => hasTestClassSuffix(className, settings.testClassSuffix));
       return reply.send({ testClasses });
     } catch (error) {
       return reply.code(400).send({ error: {

@@ -41,6 +41,7 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
     .option('--manifest <path>', '공통 package.xml 경로', 'manifest/package.xml')
     .option('--all-metadata', 'sf CLI로 양쪽 소스의 전체 배포 가능 메타데이터 manifest 생성')
     .option('--metadata-type <type>', 'sf CLI로 지정한 Salesforce metadata type만 비교')
+    .option('--wait <minutes>', 'Salesforce retrieve 대기 시간', parsePositiveInteger, 60)
     .option('--report-dir <path>', '실행 결과 저장 디렉터리')
     .option('--detail', '변경 상세를 터미널에 출력')
     .option('--show-identical', '동일한 컴포넌트도 터미널에 출력')

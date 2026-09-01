@@ -17,10 +17,12 @@ import type { SourceSpec } from './source-spec.js';
 export interface SnapshotOptions {
   source: SourceSpec;
   manifestPath: string;
+  retrievalManifestPath?: string;
   outputDir: string;
   commandProjectPath: string;
   sfClient: SfClient;
   waitMinutes?: number;
+  commandTimeoutMs?: number;
   metadataTypes?: MetadataTypeDescriptor[];
   empty?: boolean;
 }
@@ -37,7 +39,11 @@ export interface MetadataSnapshot {
 
 export async function createSnapshot(options: SnapshotOptions): Promise<MetadataSnapshot> {
   const manifestPath = path.resolve(options.manifestPath);
+  const retrievalManifestPath = path.resolve(options.retrievalManifestPath ?? options.manifestPath);
   await validateInputs(options.source, manifestPath);
+  if (retrievalManifestPath !== manifestPath && !(await pathExists(retrievalManifestPath))) {
+    throw new SfudError('INVALID_ARGUMENT', `retrieve manifest 파일을 찾을 수 없습니다: ${retrievalManifestPath}`);
+  }
   await ensureEmptyDirectory(options.outputDir);
 
   const rawDir = path.join(options.outputDir, 'raw');
@@ -57,7 +63,7 @@ export async function createSnapshot(options: SnapshotOptions): Promise<Metadata
         '--target-org',
         options.source.alias,
         '--manifest',
-        manifestPath,
+        retrievalManifestPath,
         '--target-metadata-dir',
         rawDir,
         '--unzip',
@@ -65,7 +71,10 @@ export async function createSnapshot(options: SnapshotOptions): Promise<Metadata
         '--wait',
         String(options.waitMinutes ?? 60),
       ],
-      { cwd: options.commandProjectPath },
+      {
+        cwd: options.commandProjectPath,
+        ...(options.commandTimeoutMs === undefined ? {} : { timeoutMs: options.commandTimeoutMs }),
+      },
     );
     packageRoot = await findPackageRoot(rawDir);
   } else {
@@ -75,13 +84,16 @@ export async function createSnapshot(options: SnapshotOptions): Promise<Metadata
         'convert',
         'source',
         '--manifest',
-        manifestPath,
+        retrievalManifestPath,
         '--output-dir',
         rawDir,
         '--package-name',
         'sfud',
       ],
-      { cwd: options.source.projectPath },
+      {
+        cwd: options.source.projectPath,
+        ...(options.commandTimeoutMs === undefined ? {} : { timeoutMs: options.commandTimeoutMs }),
+      },
     );
     packageRoot = await findPackageRoot(rawDir);
   }

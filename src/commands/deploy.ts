@@ -39,6 +39,7 @@ export interface DeployCommandOptions {
   minimumCoverage?: number;
   testLevel?: RequestedTestLevel;
   tests?: string[];
+  testClassSuffix?: string;
   wait?: number;
   strict?: boolean;
   json?: boolean;
@@ -92,27 +93,34 @@ export async function runDeployCommand(
     : undefined;
   const manifestPath = generatedManifest?.manifestPath
     ?? path.resolve(cwd, options.manifest ?? 'manifest/package.xml');
+  const sourceManifests = generatedManifest?.sourceManifests;
   await writeRunMetadata(context, 'deploy', targetSource, source.displayName, manifestPath);
 
   const [targetSnapshot, sourceSnapshot] = await Promise.all([
     createSnapshot({
       source: targetSource,
       manifestPath,
+      ...(sourceManifests === undefined ? {} : {
+        retrievalManifestPath: sourceManifests[0]!.manifestPath,
+      }),
       outputDir: context.leftSnapshotDirectory,
       commandProjectPath,
       sfClient,
       waitMinutes: options.wait ?? 60,
-      ...(generatedManifest?.empty === true ? { empty: true } : {}),
+      ...(sourceManifests?.[0]?.empty === true ? { empty: true } : {}),
       ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
     }),
     createSnapshot({
       source,
       manifestPath,
+      ...(sourceManifests === undefined ? {} : {
+        retrievalManifestPath: sourceManifests[1]!.manifestPath,
+      }),
       outputDir: context.rightSnapshotDirectory,
       commandProjectPath,
       sfClient,
       waitMinutes: options.wait ?? 60,
-      ...(generatedManifest?.empty === true ? { empty: true } : {}),
+      ...(sourceManifests?.[1]?.empty === true ? { empty: true } : {}),
       ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
     }),
   ]);
@@ -141,6 +149,7 @@ export async function runDeployCommand(
     deploymentSnapshot.packageRoot,
     options.testLevel ?? 'auto',
     options.tests ?? [],
+    options.testClassSuffix ?? '_Test',
   );
   const reports = await writeComparisonReports(comparison, context.reportDirectory);
   await writeJson(path.join(context.logsDirectory, 'test-plan.json'), testPlan);

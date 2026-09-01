@@ -40,6 +40,7 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
     });
     if (session === undefined) return;
     try {
+      const settings = await app.sfudRuntime.settings.get(session.user.id);
       const job = await app.sfudRuntime.dryRuns.create({
         ...(request.body?.projectId === undefined ? {} : { projectId: request.body.projectId }),
         ...(request.body?.manifest === undefined ? {} : { manifest: request.body.manifest }),
@@ -54,6 +55,7 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
         targetOrgId: requiredString(request.body?.targetOrgId, '대상 org'),
         testLevel: request.body?.testLevel ?? 'auto',
         tests: optionalStringArray(request.body?.tests, 'Apex 테스트 클래스'),
+        testClassSuffix: settings.testClassSuffix,
         waitMinutes: request.body?.waitMinutes ?? 60,
         strict: request.body?.strict === true,
         createdBy: session.user.id,
@@ -97,6 +99,7 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
     });
     if (session === undefined) return;
     try {
+      const settings = await app.sfudRuntime.settings.get(session.user.id);
       const job = await app.sfudRuntime.dryRuns.createDirect({
         ...(request.body?.projectId === undefined ? {} : { projectId: request.body.projectId }),
         ...(request.body?.manifest === undefined ? {} : { manifest: request.body.manifest }),
@@ -110,6 +113,7 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
         sourceId: requiredString(request.body?.sourceId, '배포 소스'),
         targetOrgId: requiredString(request.body?.targetOrgId, '대상 org'),
         tests: optionalStringArray(request.body?.tests, 'Apex 테스트 클래스'),
+        testClassSuffix: settings.testClassSuffix,
         waitMinutes: request.body?.waitMinutes ?? 60,
         strict: request.body?.strict === true,
         targetConfirmation: requiredString(request.body?.targetConfirmation, '대상 org 별칭 확인'),
