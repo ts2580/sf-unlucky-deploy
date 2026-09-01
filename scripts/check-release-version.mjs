@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 
 const tag = process.argv[2];
 if (tag === undefined) {
-  throw new Error('검증할 릴리즈 태그가 필요합니다. 예: npm run release:check -- v0.1.0');
+  throw new Error('검증할 릴리즈 태그가 필요합니다. 예: npm run release:check -- v0.2.0');
 }
 
 const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
