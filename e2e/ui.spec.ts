@@ -119,6 +119,13 @@ test('설정에서 내 단말기의 DX 프로젝트를 임시 소스로 업로�
     orgs: [], projects: [], uploads: [], sources: [],
   } }));
   await login(page, '/settings');
+  const suffixInput = page.getByLabel('테스트 클래스 접미사');
+  await expect(suffixInput).toHaveValue('_Test');
+  await suffixInput.fill('Spec');
+  await page.getByRole('button', { name: '접미사 저장' }).click();
+  await expect(page.getByRole('status')).toContainText('테스트 클래스 접미사를 Spec(으)로 저장했습니다.');
+  await page.reload();
+  await expect(page.getByLabel('테스트 클래스 접미사')).toHaveValue('Spec');
   await expect(page.getByRole('heading', { name: '내 단말기 프로젝트' })).toBeVisible();
   const uploadInput = page.getByRole('region', { name: '내 단말기 프로젝트' }).locator('.upload-button input[type="file"]');
   await expect(uploadInput).toBeEnabled();
@@ -281,7 +288,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await page.route('**/api/v1/apex-test-classes**', async (route) => {
     expect(new URL(route.request().url()).searchParams.get('sourceId')).toBe('project:project-1');
     await route.fulfill({ json: {
-      testClasses: ['Hello_Test', 'Order_Test', 'PaymentValidationSpec'],
+      testClasses: ['Hello_Test', 'Order_Test'],
     } });
   });
   let comparisonPolls = 0;
@@ -311,6 +318,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
       testLevel: 'RunSpecifiedTests', tests: ['Hello_Test'],
     });
     expect(route.request().postDataJSON()).not.toHaveProperty('manifest');
+    await new Promise((resolve) => setTimeout(resolve, 750));
     await route.fulfill({ status: 202, json: { job: dryRunFixture(
       'QUEUED', dryRunSubmissions === 1 ? 'dry-run-1' : 'dry-run-failed',
     ) } });
@@ -319,6 +327,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
     expect(route.request().postDataJSON()).toMatchObject({
       dryRunJobId: 'dry-run-1', targetAlias: 'target', confirmation: '실제 배포',
     });
+    await new Promise((resolve) => setTimeout(resolve, 750));
     await route.fulfill({ status: 202, json: { job: deploymentFixture('QUEUED') } });
   });
   await page.route('**/api/v1/deployments/direct', async (route) => {
@@ -328,6 +337,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
       sourceId: 'project:project-1', targetOrgId: 'org:target', tests: ['Hello_Test'],
       targetConfirmation: 'target', confirmation: '실제 배포',
     });
+    await new Promise((resolve) => setTimeout(resolve, 750));
     await route.fulfill({ status: 202, json: { job: directDeploymentFixture('QUEUED') } });
   });
   let dryRunPolls = 0;
@@ -362,15 +372,15 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue('project:project-1');
   await expect(page.getByLabel('TARGET ORG 비교 소스')).toHaveValue('org:target');
   const directTestInput = page.getByLabel('테스트 클래스 직접 입력');
-  await directTestInput.fill('Hello_Test, pay');
+  await directTestInput.fill('Hello_Test, ord');
   const directTestSuggestions = page.getByRole('listbox', { name: 'source 테스트 클래스 검색 결과' });
-  const paymentSuggestion = directTestSuggestions.getByRole('option', { name: 'PaymentValidationSpec' });
-  await expect(paymentSuggestion).toBeVisible();
+  const orderSuggestion = directTestSuggestions.getByRole('option', { name: 'Order_Test' });
+  await expect(orderSuggestion).toBeVisible();
   await expect(directTestSuggestions.getByRole('option', { name: 'Hello_Test' })).toHaveCount(0);
   await directTestInput.press('Tab');
-  await expect(paymentSuggestion).toBeFocused();
-  await paymentSuggestion.press('Enter');
-  await expect(directTestInput).toHaveValue('Hello_Test, PaymentValidationSpec');
+  await expect(orderSuggestion).toBeFocused();
+  await orderSuggestion.press('Enter');
+  await expect(directTestInput).toHaveValue('Hello_Test, Order_Test');
   await expect(directTestInput).toHaveAttribute('aria-expanded', 'false');
   await expect(directTestSuggestions).toHaveCount(0);
   await directTestInput.fill('ExternalOnly_Test');
@@ -409,13 +419,14 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByLabel('배포 대상').getByText('NewClass', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeVisible();
   await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeVisible();
-  await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeEnabled();
+  await expect(page.getByRole('region', { name: 'Target 바로 배포' }).getByRole('textbox')).toHaveCount(0);
   const apexTests = page.getByRole('region', { name: 'Apex 테스트 클래스 선택' });
   await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toBeVisible();
-  await page.getByLabel('테스트 클래스 검색').fill('validation');
-  await expect(apexTests.getByRole('checkbox', { name: 'PaymentValidationSpec' })).toBeVisible();
+  await page.getByLabel('테스트 클래스 검색').fill('order');
+  await expect(apexTests.getByRole('checkbox', { name: 'Order_Test' })).toBeVisible();
   await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toHaveCount(0);
-  await expect(apexTests.getByText('1 / 3개 표시')).toBeVisible();
+  await expect(apexTests.getByText('1 / 2개 표시')).toBeVisible();
   await page.getByLabel('테스트 클래스 검색').fill('');
   await page.getByLabel('테스트 수준').selectOption('RunSpecifiedTests');
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeDisabled();
@@ -423,9 +434,9 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByLabel('테스트 클래스 직접 입력')).toHaveValue('Hello_Test');
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeEnabled();
   await expect(page.getByText('코드 커버리지 75% 이상일 때만 배포합니다.')).toBeVisible();
-  await page.getByLabel('대상 org 별칭').fill('target');
-  await page.getByLabel('확인 문구').fill('실제 배포');
   await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
+  await expect(page.getByRole('button', { name: '배포 요청 중……' })).toBeVisible({ timeout: 300 });
+  await expect(page.getByLabel('실제 배포 현황')).toContainText('요청 제출 중');
   await expect(page.getByText('Salesforce 실제 배포 중')).toBeVisible();
   await expect(page.getByLabel('실제 배포 현황')).toContainText(/InProgress · \d+초/u);
   await expect(page.getByLabel('실제 배포 현황')).toContainText('컴포넌트 1/2');
@@ -435,7 +446,9 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByLabel('배포 대상').getByText('NewClass', { exact: true })).toBeVisible();
   await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toBeChecked();
   await page.getByRole('button', { name: '배포 대상 Dry-run' }).click();
+  await expect(page.getByRole('button', { name: 'Dry-run 요청 중……' })).toBeVisible({ timeout: 300 });
   const dryRunStatus = page.getByLabel('Dry-run 현황');
+  await expect(dryRunStatus).toContainText('서버 응답 대기 중');
   await expect(dryRunStatus).toContainText(/대기열|진행 중/u);
   await expect(dryRunStatus).toContainText(/SSE (연결됨|재연결 중|연결 중)/u);
   const dryRunStatusBox = await dryRunStatus.boundingBox();
@@ -445,13 +458,13 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   expect(dryRunStatusBox!.y + dryRunStatusBox!.height).toBeLessThanOrEqual(dryRunButtonBox!.y);
   await expect(page.getByText('Salesforce check-only 실행 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Salesforce dry-run 성공' })).toBeVisible({ timeout: 5_000 });
-  await expect(page.getByLabel('Dry-run 현황')).toContainText('Dry-run 성공 · 실제 배포 승인 대기');
+  await expect(page.getByLabel('Dry-run 현황')).toContainText('Dry-run 성공 · 배포 가능');
   const result = page.getByLabel('Salesforce dry-run 성공');
   await expect(result.getByText('RunSpecifiedTests', { exact: true })).toBeVisible();
   await expect(result.getByText(/Hello_Test/u)).toBeVisible();
-  await page.getByLabel('대상 org 별칭').fill('target');
-  await page.getByLabel('확인 문구').fill('실제 배포');
   await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
+  await expect(page.getByRole('button', { name: '배포 요청 중……' })).toBeVisible({ timeout: 300 });
+  await expect(page.getByLabel('실제 배포 현황')).toContainText('요청 제출 중');
   await expect(page.getByLabel('실제 배포 현황')).toContainText(/대기열|진행 중/u);
   await expect(page.getByText('Salesforce 실제 배포 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Salesforce 실제 배포 성공' })).toBeVisible({ timeout: 5_000 });
