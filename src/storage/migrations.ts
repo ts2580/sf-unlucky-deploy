@@ -172,9 +172,144 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE deployment_jobs ADD COLUMN dry_run_result_json TEXT;
     `,
   },
+  {
+    version: 5,
+    name: 'comparison_scope',
+    sql: `
+      ALTER TABLE comparison_jobs
+      ADD COLUMN scope TEXT NOT NULL DEFAULT 'MANIFEST' CHECK (scope IN ('MANIFEST', 'ALL'));
+    `,
+  },
+  {
+    version: 6,
+    name: 'comparison_metadata_type',
+    sql: `
+      ALTER TABLE comparison_jobs ADD COLUMN metadata_type TEXT;
+    `,
+  },
+  {
+    version: 7,
+    name: 'deployment_scope',
+    sql: `
+      ALTER TABLE deployment_jobs
+      ADD COLUMN scope TEXT NOT NULL DEFAULT 'MANIFEST' CHECK (scope IN ('MANIFEST', 'ALL'));
+      ALTER TABLE deployment_jobs ADD COLUMN metadata_type TEXT;
+    `,
+  },
+  {
+    version: 8,
+    name: 'selected_component_deployments',
+    sql: `
+      ALTER TABLE deployment_jobs ADD COLUMN selected_components_json TEXT;
+      ALTER TABLE deployment_jobs ADD COLUMN deployment_result_json TEXT;
+    `,
+  },
+  {
+    version: 9,
+    name: 'direct_deployments',
+    sql: `
+      PRAGMA defer_foreign_keys = ON;
+      DROP INDEX idx_deployment_jobs_status_created;
+      DROP INDEX idx_deployment_jobs_target_created;
+      ALTER TABLE deployment_approvals RENAME TO deployment_approvals_legacy;
+      ALTER TABLE deployment_jobs RENAME TO deployment_jobs_legacy;
+
+      CREATE TABLE deployment_jobs (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind IN ('DRY_RUN', 'DEPLOY')),
+        status TEXT NOT NULL CHECK (status IN (
+          'QUEUED',
+          'DRY_RUN_RUNNING',
+          'APPROVAL_PENDING',
+          'DEPLOYING',
+          'SUCCEEDED',
+          'FAILED',
+          'RECONCILE_REQUIRED'
+        )),
+        source TEXT NOT NULL,
+        target_alias TEXT NOT NULL,
+        manifest_path TEXT NOT NULL,
+        payload_checksum TEXT NOT NULL,
+        run_directory TEXT,
+        salesforce_deployment_id TEXT,
+        dry_run_job_id TEXT REFERENCES deployment_jobs(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+        error_code TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT,
+        is_prepared INTEGER NOT NULL DEFAULT 0 CHECK (is_prepared IN (0, 1)),
+        comparison_result_json TEXT,
+        test_plan_json TEXT,
+        dry_run_result_json TEXT,
+        scope TEXT NOT NULL DEFAULT 'MANIFEST' CHECK (scope IN ('MANIFEST', 'ALL')),
+        metadata_type TEXT,
+        selected_components_json TEXT,
+        deployment_result_json TEXT,
+        CHECK (kind = 'DEPLOY' OR dry_run_job_id IS NULL)
+      ) STRICT;
+
+      INSERT INTO deployment_jobs (
+        id, kind, status, source, target_alias, manifest_path, payload_checksum, run_directory,
+        salesforce_deployment_id, dry_run_job_id, created_by, error_code, error_message,
+        created_at, updated_at, started_at, completed_at, is_prepared, comparison_result_json,
+        test_plan_json, dry_run_result_json, scope, metadata_type, selected_components_json,
+        deployment_result_json
+      )
+      SELECT
+        id, kind, status, source, target_alias, manifest_path, payload_checksum, run_directory,
+        salesforce_deployment_id, dry_run_job_id, created_by, error_code, error_message,
+        created_at, updated_at, started_at, completed_at, is_prepared, comparison_result_json,
+        test_plan_json, dry_run_result_json, scope, metadata_type, selected_components_json,
+        deployment_result_json
+      FROM deployment_jobs_legacy;
+
+      CREATE TABLE deployment_approvals (
+        id TEXT PRIMARY KEY,
+        dry_run_job_id TEXT NOT NULL REFERENCES deployment_jobs(id) ON DELETE RESTRICT UNIQUE,
+        deploy_job_id TEXT NOT NULL REFERENCES deployment_jobs(id) ON DELETE RESTRICT UNIQUE,
+        approved_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+        payload_checksum TEXT NOT NULL,
+        target_alias TEXT NOT NULL,
+        approved_at TEXT NOT NULL
+      ) STRICT;
+
+      INSERT INTO deployment_approvals
+      SELECT * FROM deployment_approvals_legacy;
+      DROP TABLE deployment_approvals_legacy;
+      DROP TABLE deployment_jobs_legacy;
+
+      CREATE INDEX idx_deployment_jobs_status_created ON deployment_jobs(status, created_at);
+      CREATE INDEX idx_deployment_jobs_target_created ON deployment_jobs(target_alias, created_at);
+    `,
+  },
+  {
+    version: 10,
+    name: 'salesforce_deployment_progress',
+    sql: `
+      ALTER TABLE deployment_jobs ADD COLUMN progress_json TEXT;
+    `,
+  },
+  {
+    version: 11,
+    name: 'user_test_class_suffix',
+    sql: `
+      CREATE TABLE user_settings (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        test_class_suffix TEXT NOT NULL DEFAULT '_Test',
+        updated_at TEXT NOT NULL
+      ) STRICT;
+    `,
+  },
 ];
 
-export async function applyMigrations(database: Database, now: () => string): Promise<void> {
+export async function applyMigrations(
+  database: Database,
+  now: () => string,
+  maximumVersion = Number.POSITIVE_INFINITY,
+): Promise<void> {
   await database.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY,
@@ -188,7 +323,7 @@ export async function applyMigrations(database: Database, now: () => string): Pr
       .map((row) => row.version),
   );
 
-  for (const migration of MIGRATIONS) {
+  for (const migration of MIGRATIONS.filter((entry) => entry.version <= maximumVersion)) {
     if (!appliedVersions.has(migration.version)) {
       await database.exec('BEGIN IMMEDIATE');
       try {

@@ -2,15 +2,26 @@ import type { FastifyInstance } from 'fastify';
 
 import type { ComparisonJob } from '../../compare/comparison-job-repository.js';
 import { redactSensitiveText } from '../../salesforce/sf-client.js';
+import { hasTestClassSuffix } from '../../deploy/test-plan.js';
 import { requireAuthenticatedSession } from './auth-routes.js';
 
 interface CreateComparisonBody {
   projectId?: string;
+  scope?: 'manifest' | 'all';
   manifest?: string;
   leftSourceId?: string;
   rightSourceId?: string;
   strict?: boolean;
   showIdentical?: boolean;
+  metadataType?: string;
+}
+
+interface MetadataTypesQuery {
+  sourceIds?: string;
+}
+
+interface ApexTestClassesQuery {
+  sourceId?: string;
 }
 
 export async function registerComparisonRoutes(app: FastifyInstance): Promise<void> {
@@ -18,31 +29,75 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
     try {
-      const [orgs, projects] = await Promise.all([
+      const [orgs, projects, uploads] = await Promise.all([
         app.sfudRuntime.workspace.listOrgs(),
         Promise.resolve(app.sfudRuntime.workspace.listProjects()),
+        Promise.resolve(app.sfudRuntime.workspace.listUploadedProjects(session.user.id)),
       ]);
       return reply.send({
         orgs,
         projects,
+        uploads,
         sources: [
           ...orgs.filter((org) => org.connected).map((org) => ({
             id: org.id,
             kind: 'org' as const,
+            location: 'org' as const,
             label: org.alias,
             detail: [org.label, org.edition].filter(Boolean).join(' · '),
           })),
           ...projects.map((project) => ({
             id: `project:${project.id}`,
             kind: 'local' as const,
+            location: 'server' as const,
             label: project.displayName,
-            detail: 'Local DX project',
+            detail: '서버에 명시적으로 등록된 DX 프로젝트',
+          })),
+          ...uploads.map((project) => ({
+            id: `upload:${project.id}`,
+            kind: 'local' as const,
+            location: 'upload' as const,
+            label: project.displayName,
+            detail: '내 단말기에서 임시 업로드 · 마지막 사용 후 4시간',
           })),
         ],
       });
     } catch (error) {
       return reply.code(502).send({ error: {
         code: 'WORKSPACE_LOAD_FAILED',
+        message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
+      } });
+    }
+  });
+
+  app.get<{ Querystring: MetadataTypesQuery }>('/api/v1/metadata-types', async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply);
+    if (session === undefined) return;
+    try {
+      const sourceIds = (request.query.sourceIds ?? '').split(',').filter((value) => value.length > 0);
+      if (sourceIds.length > 2) throw new Error('metadata type 조회 소스는 최대 2개입니다.');
+      const metadataTypes = await app.sfudRuntime.workspace.listMetadataTypes(sourceIds, session.user.id);
+      return reply.send({ metadataTypes });
+    } catch (error) {
+      return reply.code(400).send({ error: {
+        code: 'METADATA_TYPES_LOAD_FAILED',
+        message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
+      } });
+    }
+  });
+
+  app.get<{ Querystring: ApexTestClassesQuery }>('/api/v1/apex-test-classes', async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply);
+    if (session === undefined) return;
+    try {
+      const sourceId = requiredString(request.query.sourceId, '배포 소스');
+      const settings = await app.sfudRuntime.settings.get(session.user.id);
+      const testClasses = (await app.sfudRuntime.workspace.listApexTestClasses(sourceId, session.user.id))
+        .filter((className) => hasTestClassSuffix(className, settings.testClassSuffix));
+      return reply.send({ testClasses });
+    } catch (error) {
+      return reply.code(400).send({ error: {
+        code: 'APEX_TEST_CLASSES_LOAD_FAILED',
         message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
       } });
     }
@@ -55,9 +110,16 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     });
     if (session === undefined) return;
     try {
+      const scope = comparisonScope(request.body?.scope);
       const job = await app.sfudRuntime.comparisons.create({
-        projectId: requiredString(request.body?.projectId, '프로젝트'),
-        manifest: requiredString(request.body?.manifest, 'manifest'),
+        ...(scope === 'manifest'
+          ? { projectId: requiredString(request.body?.projectId, 'manifest 프로젝트') }
+          : {}),
+        scope,
+        ...(request.body?.manifest === undefined ? {} : { manifest: request.body.manifest }),
+        ...(request.body?.metadataType === undefined
+          ? {}
+          : { metadataType: requiredMetadataType(request.body.metadataType) }),
         leftSourceId: requiredString(request.body?.leftSourceId, 'LEFT 소스'),
         rightSourceId: requiredString(request.body?.rightSourceId, 'RIGHT 소스'),
         strict: request.body?.strict === true,
@@ -106,7 +168,11 @@ function publicJob(app: FastifyInstance, job: ComparisonJob, includeResult: bool
     id: job.id,
     status: job.status,
     projectId: app.sfudRuntime.workspace.publicSource(`local:${job.projectPath}`).id.replace(/^project:/u, ''),
-    manifest: app.sfudRuntime.workspace.publicManifest(job.projectPath, job.manifestPath),
+    scope: job.scope === 'ALL' ? 'all' : 'manifest',
+    ...(job.metadataType === undefined ? {} : { metadataType: job.metadataType }),
+    manifest: job.scope === 'ALL'
+      ? job.metadataType ?? '전체 배포 가능 메타데이터 (SF CLI)'
+      : app.sfudRuntime.workspace.publicManifest(job.projectPath, job.manifestPath),
     left,
     right,
     strict: job.strict,
@@ -124,5 +190,18 @@ function publicJob(app: FastifyInstance, job: ComparisonJob, includeResult: bool
 
 function requiredString(value: unknown, label: string): string {
   if (typeof value !== 'string' || value.length === 0) throw new Error(`${label} 선택이 필요합니다.`);
+  return value;
+}
+
+function comparisonScope(value: unknown): 'manifest' | 'all' {
+  if (value === undefined || value === 'manifest') return 'manifest';
+  if (value === 'all') return 'all';
+  throw new Error('지원하지 않는 비교 범위입니다.');
+}
+
+function requiredMetadataType(value: unknown): string {
+  if (typeof value !== 'string' || !/^[A-Za-z][A-Za-z0-9_]*$/u.test(value)) {
+    throw new Error('Salesforce metadata type이 올바르지 않습니다.');
+  }
   return value;
 }

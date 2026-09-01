@@ -91,6 +91,52 @@ describe('metadata comparator', () => {
     expect(strictResult.summary.modified).toBe(1);
     expect(strictResult.components[0]?.files[0]?.unifiedDiff).toContain('Profile beta');
   });
+
+  it('제한 병렬 비교에서도 컴포넌트 순서와 동일 XML 결과를 결정적으로 유지한다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-concurrent-comparator-'));
+    temporaryDirectories.push(root);
+    const leftRoot = path.join(root, 'left');
+    const rightRoot = path.join(root, 'right');
+    await Promise.all([mkdir(leftRoot), mkdir(rightRoot)]);
+
+    const files = Object.fromEntries(
+      Array.from({ length: 20 }, (_, index) => {
+        const name = `Class${String(19 - index).padStart(2, '0')}`;
+        return [
+          [`classes/${name}.cls`, `public class ${name} {}\n`],
+          [
+            `classes/${name}.cls-meta.xml`,
+            '<?xml version="1.0"?><ApexClass><status>Active</status></ApexClass>',
+          ],
+        ];
+      }).flat(),
+    );
+    await Promise.all([
+      writeFixtureFiles(leftRoot, { 'package.xml': '<Package/>', ...files }),
+      writeFixtureFiles(rightRoot, { 'package.xml': '<Package/>', ...files }),
+    ]);
+
+    const result = await compareSnapshots(snapshot(leftRoot, 'left'), snapshot(rightRoot, 'right'));
+
+    expect(result.summary).toEqual({
+      added: 0,
+      removed: 0,
+      modified: 0,
+      identical: 20,
+      total: 20,
+      different: 0,
+    });
+    expect(result.components.map((component) => component.key)).toEqual(
+      Array.from({ length: 20 }, (_, index) => `ApexClass:Class${String(index).padStart(2, '0')}`),
+    );
+    expect(
+      result.components.flatMap((component) => component.files).filter((file) => file.kind === 'xml'),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: 'IDENTICAL', xmlChanges: [] }),
+      ]),
+    );
+  });
 });
 
 function snapshot(packageRoot: string, name: string): MetadataSnapshot {

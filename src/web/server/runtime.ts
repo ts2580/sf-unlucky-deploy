@@ -11,10 +11,14 @@ import { ComparisonJobRepository } from '../../compare/comparison-job-repository
 import { ComparisonService } from '../../compare/comparison-service.js';
 import { WorkspaceService } from './workspace-service.js';
 import { DryRunService } from '../../deploy/dry-run-service.js';
+import { DeploymentService } from '../../deploy/deployment-service.js';
+import { WorkflowEventHub } from './workflow-events.js';
+import { UserSettingsRepository } from '../../storage/user-settings-repository.js';
 
 export interface WebRuntime {
   store: SqliteStore;
   users: UserRepository;
+  settings: UserSettingsRepository;
   deploymentJobs: DeploymentJobRepository;
   deploymentQueue: SingleJobQueue;
   deploymentCoordinator: DeploymentCoordinator;
@@ -24,6 +28,8 @@ export interface WebRuntime {
   comparisonQueue: SingleJobQueue;
   comparisons: ComparisonService;
   dryRuns: DryRunService;
+  deployments: DeploymentService;
+  workflowEvents: WorkflowEventHub;
   recoveredJobCount: number;
   recoveredComparisonCount: number;
 }
@@ -36,7 +42,19 @@ export async function createWebRuntime(
   sfClient: SfClient = new ProcessSfClient(),
 ): Promise<WebRuntime> {
   const store = await openSqliteStore({ databasePath });
-  const deploymentJobs = new DeploymentJobRepository(store.database);
+  const workflowEvents = new WorkflowEventHub();
+  const deploymentJobs = new DeploymentJobRepository(
+    store.database,
+    undefined,
+    undefined,
+    (job) => workflowEvents.publish({
+      resource: 'deployment',
+      jobId: job.id,
+      kind: job.kind,
+      status: job.status,
+      updatedAt: job.updatedAt,
+    }),
+  );
   const recoveredJobCount = await deploymentJobs.recoverInterruptedJobs();
   const deploymentQueue = new SingleJobQueue();
   const userCount = await store.database.get<{ count: number }>('SELECT COUNT(*) count FROM users');
@@ -47,7 +65,18 @@ export async function createWebRuntime(
       : undefined,
   );
   const workspace = await WorkspaceService.create(sfClient, cwd, projectPaths);
-  const comparisonJobs = new ComparisonJobRepository(store.database);
+  const comparisonJobs = new ComparisonJobRepository(
+    store.database,
+    undefined,
+    undefined,
+    (job) => workflowEvents.publish({
+      resource: 'comparison',
+      jobId: job.id,
+      kind: 'COMPARE',
+      status: job.status,
+      updatedAt: job.updatedAt,
+    }),
+  );
   const recoveredComparisonCount = await comparisonJobs.recoverInterrupted();
   const comparisonQueue = new SingleJobQueue();
   const runsDirectory = path.join(
@@ -58,6 +87,7 @@ export async function createWebRuntime(
   return {
     store,
     users: new UserRepository(store.database),
+    settings: new UserSettingsRepository(store.database),
     deploymentJobs,
     deploymentQueue,
     deploymentCoordinator,
@@ -79,6 +109,13 @@ export async function createWebRuntime(
       sfClient,
       runsDirectory,
     ),
+    deployments: new DeploymentService(
+      deploymentJobs,
+      deploymentCoordinator,
+      workspace,
+      sfClient,
+    ),
+    workflowEvents,
     recoveredJobCount,
     recoveredComparisonCount,
   };

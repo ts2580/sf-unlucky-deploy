@@ -68,6 +68,7 @@ describe('로컬 관리자 인증', () => {
       expect(cookieHeader).not.toContain(storedSession!.token_hash);
 
       expect((await server.inject('/api/v1/deployment-jobs')).statusCode).toBe(401);
+      expect((await server.inject('/api/v1/settings')).statusCode).toBe(401);
       expect((await server.inject({
         url: '/api/v1/deployment-jobs',
         headers: { cookie: cookieHeader },

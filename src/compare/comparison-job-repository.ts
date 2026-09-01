@@ -6,10 +6,13 @@ import type { ComparisonResult } from '../metadata/comparator.js';
 import { runInImmediateTransaction } from '../storage/transaction.js';
 
 export type ComparisonJobStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
+export type ComparisonScope = 'MANIFEST' | 'ALL';
 
 export interface ComparisonJob {
   id: string;
   status: ComparisonJobStatus;
+  scope: ComparisonScope;
+  metadataType?: string;
   projectPath: string;
   manifestPath: string;
   leftSource: string;
@@ -28,6 +31,8 @@ export interface ComparisonJob {
 }
 
 export interface CreateComparisonJobInput {
+  scope?: ComparisonScope;
+  metadataType?: string;
   projectPath: string;
   manifestPath: string;
   leftSource: string;
@@ -40,6 +45,8 @@ export interface CreateComparisonJobInput {
 interface ComparisonJobRow {
   id: string;
   status: ComparisonJobStatus;
+  scope: ComparisonScope;
+  metadata_type: string | null;
   project_path: string;
   manifest_path: string;
   left_source: string;
@@ -62,6 +69,7 @@ export class ComparisonJobRepository {
     private readonly database: Database,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly createId: () => string = randomUUID,
+    private readonly onChanged?: (job: ComparisonJob) => void,
   ) {}
 
   public async create(input: CreateComparisonJobInput): Promise<ComparisonJob> {
@@ -70,17 +78,18 @@ export class ComparisonJobRepository {
     await runInImmediateTransaction(this.database, async () => {
       await this.database.run(`
         INSERT INTO comparison_jobs (
-          id, status, project_path, manifest_path, left_source, right_source,
+          id, status, scope, metadata_type, project_path, manifest_path, left_source, right_source,
           strict, show_identical, created_by, created_at, updated_at
-        ) VALUES (?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, id, input.projectPath, input.manifestPath, input.leftSource, input.rightSource,
+        ) VALUES (?, 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, id, input.scope ?? 'MANIFEST', input.metadataType ?? null,
+      input.projectPath, input.manifestPath, input.leftSource, input.rightSource,
       input.strict ? 1 : 0, input.showIdentical ? 1 : 0, input.createdBy, timestamp, timestamp);
       await this.writeAudit(input.createdBy, 'COMPARISON_QUEUED', id, {
         left: input.leftSource,
         right: input.rightSource,
       }, timestamp);
     });
-    return this.getRequired(id);
+    return this.notify(await this.getRequired(id));
   }
 
   public async get(id: string): Promise<ComparisonJob | undefined> {
@@ -101,6 +110,7 @@ export class ComparisonJobRepository {
       WHERE id = ? AND status = 'QUEUED'
     `, timestamp, timestamp, id);
     if (result.changes !== 1) throw new Error(`실행할 수 없는 비교 작업입니다: ${id}`);
+    this.notify(await this.getRequired(id));
   }
 
   public async markSucceeded(id: string, resultValue: ComparisonResult, runDirectory: string): Promise<void> {
@@ -115,10 +125,12 @@ export class ComparisonJobRepository {
       const job = await this.getRequired(id);
       await this.writeAudit(job.createdBy, 'COMPARISON_SUCCEEDED', id, { ...resultValue.summary }, timestamp);
     });
+    this.notify(await this.getRequired(id));
   }
 
   public async markFailed(id: string, code: string, message: string): Promise<void> {
     const timestamp = this.now();
+    let changed = false;
     await runInImmediateTransaction(this.database, async () => {
       const result = await this.database.run(`
         UPDATE comparison_jobs
@@ -126,9 +138,11 @@ export class ComparisonJobRepository {
         WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
       `, code, message, timestamp, timestamp, id);
       if (result.changes !== 1) return;
+      changed = true;
       const job = await this.getRequired(id);
       await this.writeAudit(job.createdBy, 'COMPARISON_FAILED', id, { code }, timestamp);
     });
+    if (changed) this.notify(await this.getRequired(id));
   }
 
   public async recoverInterrupted(): Promise<number> {
@@ -149,6 +163,11 @@ export class ComparisonJobRepository {
     `, Math.min(Math.max(limit, 1), 100))).map(mapRow);
   }
 
+  private notify(job: ComparisonJob): ComparisonJob {
+    this.onChanged?.(job);
+    return job;
+  }
+
   private async writeAudit(
     actorUserId: string,
     eventType: string,
@@ -167,6 +186,8 @@ function mapRow(row: ComparisonJobRow): ComparisonJob {
   return {
     id: row.id,
     status: row.status,
+    scope: row.scope,
+    ...(row.metadata_type === null ? {} : { metadataType: row.metadata_type }),
     projectPath: row.project_path,
     manifestPath: row.manifest_path,
     leftSource: row.left_source,
