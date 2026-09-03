@@ -363,7 +363,7 @@ export class UserAdministrationError extends Error {
   }
 }
 
-export function hashSecret(value: string): string {
+function hashSecret(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 

@@ -770,6 +770,7 @@ function dryRunFixture(status: 'QUEUED' | 'DRY_RUN_RUNNING' | 'APPROVAL_PENDING'
     source: { id: 'project:project-1', kind: 'local', label: 'fixture-project' },
     target: { id: 'org:target', kind: 'org', label: 'target' },
     manifest: 'manifest/package.xml', prepared: status === 'APPROVAL_PENDING',
+    remoteStatus: status === 'APPROVAL_PENDING' ? 'SUCCEEDED' : 'NOT_SUBMITTED',
     createdAt: '2026-08-23T06:00:00.000Z',
     ...(status === 'DRY_RUN_RUNNING' ? {
       startedAt: new Date(Date.now() - 2_000).toISOString(),
@@ -827,6 +828,7 @@ function deploymentFixture(status: 'QUEUED' | 'DEPLOYING' | 'SUCCEEDED') {
     source: { id: 'project:project-1', kind: 'local', label: 'fixture-project' },
     target: { id: 'org:target', kind: 'org', label: 'target' },
     manifest: 'selected.xml', scope: 'selected', prepared: false,
+    remoteStatus: status === 'SUCCEEDED' ? 'SUCCEEDED' : status === 'DEPLOYING' ? 'RUNNING' : 'NOT_SUBMITTED',
     createdAt: '2026-08-23T06:01:00.000Z',
     ...(status === 'DEPLOYING' ? {
       startedAt: new Date(Date.now() - 2_000).toISOString(),

@@ -1,45 +1,40 @@
 import type { FastifyInstance } from 'fastify';
 
+import {
+  CreateDirectDeploymentRequestSchema,
+  CreateDryRunRequestSchema,
+  DeploymentJobListResponseSchema,
+  DeploymentJobResponseSchema,
+  ExecuteDeploymentRequestSchema,
+  type CreateDirectDeploymentRequest,
+  type CreateDryRunRequest,
+  type ExecuteDeploymentRequest,
+} from '../../api/deployment-contracts.js';
 import { SfudError } from '../../core/errors.js';
 import type { DeploymentJob } from '../../deploy/deployment-job-repository.js';
-import type { RequestedTestLevel } from '../../deploy/test-plan.js';
 import { apexCoverageSummary } from '../../deploy/test-coverage.js';
 import { redactSensitiveText } from '../../salesforce/sf-client.js';
 import { requireAuthenticatedSession } from './auth-routes.js';
 
-interface CreateDryRunBody {
-  projectId?: string;
-  scope?: 'manifest' | 'all' | 'selected';
-  metadataType?: string;
-  manifest?: string;
-  components?: unknown;
-  sourceId?: string;
-  targetOrgId?: string;
-  testLevel?: RequestedTestLevel;
-  tests?: unknown;
-  waitMinutes?: number;
-  strict?: boolean;
-}
-
-interface ExecuteDeploymentBody {
-  dryRunJobId?: string;
-  payloadChecksum?: string;
-  targetAlias?: string;
-  confirmation?: string;
-}
-
-interface CreateDirectDeploymentBody extends CreateDryRunBody {
-  targetConfirmation?: string;
-  confirmation?: string;
-}
-
 export async function registerDeploymentRoutes(app: FastifyInstance): Promise<void> {
-  app.post<{ Body: CreateDryRunBody }>('/api/v1/deployments/dry-run', async (request, reply) => {
+  app.post<{ Body: CreateDryRunRequest }>('/api/v1/deployments/dry-run', {
+    attachValidation: true,
+    schema: {
+      body: CreateDryRunRequestSchema,
+      response: { 202: DeploymentJobResponseSchema },
+    },
+  }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply, {
       csrf: true,
       roles: ['OPERATOR', 'DEPLOYER', 'ADMIN'],
     });
     if (session === undefined) return;
+    if (request.validationError !== undefined) {
+      return reply.code(400).send({ error: {
+        code: 'INVALID_DRY_RUN_REQUEST',
+        message: redactSensitiveText(request.validationError.message),
+      } });
+    }
     try {
       const settings = await app.sfudRuntime.settings.get(session.user.id);
       const job = await app.sfudRuntime.dryRuns.create({
@@ -70,12 +65,24 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
     }
   });
 
-  app.post<{ Body: ExecuteDeploymentBody }>('/api/v1/deployments/execute', async (request, reply) => {
+  app.post<{ Body: ExecuteDeploymentRequest }>('/api/v1/deployments/execute', {
+    attachValidation: true,
+    schema: {
+      body: ExecuteDeploymentRequestSchema,
+      response: { 202: DeploymentJobResponseSchema },
+    },
+  }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply, {
       csrf: true,
       roles: ['DEPLOYER', 'ADMIN'],
     });
     if (session === undefined) return;
+    if (request.validationError !== undefined) {
+      return reply.code(400).send({ error: {
+        code: 'DEPLOYMENT_APPROVAL_DENIED',
+        message: redactSensitiveText(request.validationError.message),
+      } });
+    }
     try {
       const job = await app.sfudRuntime.deployments.approveAndExecute({
         dryRunJobId: requiredString(request.body?.dryRunJobId, 'dry-run 작업'),
@@ -93,12 +100,24 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
     }
   });
 
-  app.post<{ Body: CreateDirectDeploymentBody }>('/api/v1/deployments/direct', async (request, reply) => {
+  app.post<{ Body: CreateDirectDeploymentRequest }>('/api/v1/deployments/direct', {
+    attachValidation: true,
+    schema: {
+      body: CreateDirectDeploymentRequestSchema,
+      response: { 200: DeploymentJobResponseSchema, 202: DeploymentJobResponseSchema },
+    },
+  }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply, {
       csrf: true,
       roles: ['DEPLOYER', 'ADMIN'],
     });
     if (session === undefined) return;
+    if (request.validationError !== undefined) {
+      return reply.code(400).send({ error: {
+        code: 'DIRECT_DEPLOYMENT_DENIED',
+        message: redactSensitiveText(request.validationError.message),
+      } });
+    }
     try {
       const clientRequestId = idempotencyKey(request.headers['idempotency-key']);
       const settings = await app.sfudRuntime.settings.get(session.user.id);
@@ -134,14 +153,18 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
     }
   });
 
-  app.get('/api/v1/deployment-jobs', async (request, reply) => {
+  app.get('/api/v1/deployment-jobs', {
+    schema: { response: { 200: DeploymentJobListResponseSchema } },
+  }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
     const jobs = await app.sfudRuntime.deploymentJobs.listRecentSummary();
     return reply.send({ jobs: jobs.map((job) => publicJob(app, job, false)) });
   });
 
-  app.get<{ Params: { id: string } }>('/api/v1/deployment-jobs/:id', async (request, reply) => {
+  app.get<{ Params: { id: string } }>('/api/v1/deployment-jobs/:id', {
+    schema: { response: { 200: DeploymentJobResponseSchema } },
+  }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
     const job = await app.sfudRuntime.deploymentJobs.get(request.params.id);
@@ -153,6 +176,7 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
 
   app.post<{ Params: { id: string } }>(
     '/api/v1/deployment-jobs/:id/reconcile',
+    { schema: { response: { 200: DeploymentJobResponseSchema } } },
     async (request, reply) => {
       const session = await requireAuthenticatedSession(app, request, reply, {
         csrf: true,

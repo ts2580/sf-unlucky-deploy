@@ -27,7 +27,7 @@ Salesforce org와 로컬 Salesforce DX 프로젝트의 메타데이터를 같은
 
 ## 요구 사항
 
-- Node.js 20 이상
+- Node.js 20.19 이상
 - npm
 - Salesforce CLI v2 (`sf`)
 - Git
@@ -48,6 +48,10 @@ npm ci
 npx playwright install chromium
 npm run verify
 ```
+
+의존성 설치 기준은 배포 tarball에도 포함되는 `npm-shrinkwrap.json`이다. 패키징과 릴리스
+설치 검증은 `packageManager`에 고정한 npm 11.7.0으로 수행해 서로 다른 로컬 npm 버전이
+배포 dependency tree를 바꾸지 않게 한다.
 
 도움말은 TypeScript 소스에서 바로 실행할 수 있다.
 
@@ -328,6 +332,11 @@ diff 결과만으로 destructive deployment를 자동 생성하거나 실행하�
 
 웹 UI는 사용자·권한·배포 승인·작업 상태와 감사 로그를 SQLite에 저장한다. 기본 위치는 현재 프로젝트의 `.sfud/sfud.db`다. 비교 리포트와 원본 실행 결과는 기존 `.sfud/runs` 파일 구조를 유지하며 데이터베이스에는 인덱스와 무결성 정보만 기록한다.
 
+프런트엔드는 `deployment`, `comparison`, `auth`, `admin` 기능 단위로 나뉜다. 배포 요청과 응답은
+TypeBox schema를 서버와 UI가 공유하며 Fastify와 브라우저 API client가 같은 계약을 runtime에
+검증한다. 공통 client는 CSRF header, 401 알림, 오류 응답, timeout·abort와 직접 배포
+idempotency key를 한곳에서 처리한다.
+
 ```bash
 npm run build
 node dist/cli.js ui --no-open
@@ -500,11 +509,28 @@ deploy:  QUEUED → DEPLOYING → SUCCEEDED | FAILED | RECONCILE_REQUIRED
 |---|---|
 | `npm run dev -- <args>` | TypeScript 소스에서 CLI 실행 |
 | `npm run typecheck` | CLI와 E2E TypeScript 검사 |
+| `npm run lint` | JavaScript 설정·스크립트 ESLint 검사 |
+| `npm run dead-code` | Knip 미사용 파일·export 검사 |
+| `npm run quality` | lint와 미사용 코드 검사 |
 | `npm test` | Vitest 단위·fixture 테스트 |
 | `npm run test:e2e` | Playwright HTML 리포트 테스트 |
+| `npm run test:platform` | process·path·upload·SQLite 플랫폼 스모크 |
 | `npm run build` | `dist/` 빌드 |
-| `npm run check` | 타입 검사, Vitest, 빌드 |
-| `npm run verify` | 타입 검사, Vitest, Playwright, 빌드 전체 검증 |
+| `npm run check` | 타입, 품질, Vitest, 빌드 검사 |
+| `npm run package:smoke` | tarball 생성·설치, dependency tree와 CLI 실행 검증 |
+| `npm run verify` | `check`와 Playwright 전체 검증 |
+
+## CI와 릴리스 산출물
+
+Pull Request와 공유 브랜치는 Linux Node.js 24의 전체 단위·브라우저·패키지 검증, Linux
+Node.js 20.19의 최소 지원 버전 검증, Windows Node.js 20.19·24의 플랫폼 및 설치 스모크를
+통과해야 한다. TypeScript의 미사용 선언 검사와 Knip의 미사용 export·파일 검사도 `check`에
+포함된다.
+
+태그 릴리스는 npm 11.7.0으로 `npm-shrinkwrap.json`이 포함된 tarball을 만든 뒤, 그 tarball을
+새 prefix에 설치해 전체 dependency tree와 `sfud --version`을 검증한다. GitHub Release에는
+tarball, SHA-256 체크섬과 CycloneDX JSON SBOM을 각각 첨부한다. SBOM은 공급망 구성의 가시성을
+위한 별도 산출물이며, 설치 재현성은 `npm-shrinkwrap.json`과 tarball 설치 검증으로 확보한다.
 
 ## 브랜치 승격 규칙
 

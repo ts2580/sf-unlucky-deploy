@@ -3,7 +3,6 @@ import path from 'node:path';
 
 import { SfudError } from '../core/errors.js';
 
-const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024 * 1024;
 const DEFAULT_MIN_FREE_BYTES = 512 * 1024 * 1024;
 

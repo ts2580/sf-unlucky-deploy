@@ -1,7 +1,7 @@
 import type { DatabaseExecutor } from './database-executor.js';
 import { runInImmediateTransaction } from './transaction.js';
 
-export const DEFAULT_TEST_CLASS_SUFFIX = '_Test';
+const DEFAULT_TEST_CLASS_SUFFIX = '_Test';
 
 export interface UserSettings {
   testClassSuffix: string;
@@ -41,7 +41,7 @@ export class UserSettingsRepository {
   }
 }
 
-export function normalizeTestClassSuffix(value: string): string {
+function normalizeTestClassSuffix(value: string): string {
   const suffix = value.trim();
   if (!/^[A-Za-z_][A-Za-z0-9_]{0,39}$/u.test(suffix)) {
     throw new Error('테스트 클래스 접미사는 영문자, 숫자, 밑줄로 1~40자까지 입력하세요. 첫 글자는 숫자일 수 없습니다.');

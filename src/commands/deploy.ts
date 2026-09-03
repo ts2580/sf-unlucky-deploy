@@ -186,7 +186,7 @@ export async function runDeployCommand(
   }
 
   await assertPayloadUnchanged(deploymentSnapshot.packageRoot, deploymentSnapshot.payloadSha256);
-  const deployArgs = buildDeployArgs(options, deploymentSnapshot.packageRoot, targetAlias, testPlan);
+  const deployArgs = buildDeployArgs(deploymentSnapshot.packageRoot, targetAlias, testPlan);
   const payloadEmpty = generatedManifest?.sourceManifests[1]?.empty === true;
   const persistenceWarnings: string[] = [];
   const dryRunResult = options.skipDryRun === true
@@ -320,7 +320,6 @@ async function runDeploymentRequest(
 }
 
 function buildDeployArgs(
-  options: DeployCommandOptions,
   metadataDirectory: string,
   targetAlias: string,
   testPlan: ApexTestPlan,

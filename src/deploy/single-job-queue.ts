@@ -4,7 +4,7 @@ export interface JobQueueStatus {
   accepting: boolean;
 }
 
-export class JobQueueClosedError extends Error {
+class JobQueueClosedError extends Error {
   public constructor() {
     super('서버가 종료 중이어서 새 작업을 받을 수 없습니다.');
     this.name = 'JobQueueClosedError';

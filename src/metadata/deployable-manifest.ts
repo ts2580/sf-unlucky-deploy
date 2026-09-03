@@ -4,7 +4,7 @@ import path from 'node:path';
 import { XMLParser } from 'fast-xml-parser';
 
 import { SfudError } from '../core/errors.js';
-import { listFiles, pathExists, writeJson } from '../core/files.js';
+import { pathExists, writeJson } from '../core/files.js';
 import { readProjectApiVersion } from '../core/request-workspace.js';
 import type { SfClient } from '../salesforce/sf-client.js';
 import type { SourceSpec } from '../sources/source-spec.js';
