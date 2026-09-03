@@ -9,7 +9,7 @@ import path from 'node:path';
 import { ProcessSfClient, type SfClient } from '../../salesforce/sf-client.js';
 import { ComparisonJobRepository } from '../../compare/comparison-job-repository.js';
 import { ComparisonService } from '../../compare/comparison-service.js';
-import { WorkspaceService } from './workspace-service.js';
+import { WorkspaceService, type WorkspaceServiceOptions } from './workspace-service.js';
 import { DryRunService } from '../../deploy/dry-run-service.js';
 import { DeploymentService } from '../../deploy/deployment-service.js';
 import { WorkflowEventHub } from './workflow-events.js';
@@ -42,6 +42,7 @@ export async function createWebRuntime(
   projectPaths: string[] = [],
   cwd = process.cwd(),
   sfClient: SfClient = new ProcessSfClient(),
+  workspaceOptions: WorkspaceServiceOptions = {},
 ): Promise<WebRuntime> {
   const store = await openSqliteStore({ databasePath });
   const workflowEvents = new WorkflowEventHub();
@@ -66,7 +67,7 @@ export async function createWebRuntime(
       ? bootstrapToken ?? process.env.SFUD_BOOTSTRAP_TOKEN ?? randomBytes(18).toString('base64url')
       : undefined,
   );
-  const workspace = await WorkspaceService.create(sfClient, cwd, projectPaths);
+  const workspace = await WorkspaceService.create(sfClient, cwd, projectPaths, workspaceOptions);
   const comparisonJobs = new ComparisonJobRepository(
     store.database,
     undefined,

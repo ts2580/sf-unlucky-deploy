@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { access, chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -9,6 +9,13 @@ import type { SfClient } from '../../salesforce/sf-client.js';
 import type { OrgIdentitySnapshot } from '../../deploy/org-identity.js';
 
 const UPLOAD_TTL_MS = 4 * 60 * 60 * 1_000;
+const DEFAULT_USER_UPLOAD_QUOTA_BYTES = 500 * 1024 * 1024;
+const DEFAULT_SERVER_UPLOAD_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
+
+export interface WorkspaceServiceOptions {
+  userUploadQuotaBytes?: number;
+  serverUploadQuotaBytes?: number;
+}
 
 export interface WorkspaceOrg {
   id: string;
@@ -30,6 +37,7 @@ export interface WorkspaceProject {
 export interface UploadedProject extends AllowedProject {
   ownerUserId: string;
   expiresAt: number;
+  sizeBytes: number;
 }
 
 export interface WorkspaceMetadataType {
@@ -61,15 +69,23 @@ export class WorkspaceService {
   private readonly uploadedProjects = new Map<string, UploadedProject>();
   private readonly uploadExpirationTimers = new Map<string, NodeJS.Timeout>();
   private readonly uploadPins = new Map<string, number>();
+  private readonly pendingUploads = new Map<string, { ownerUserId: string; sizeBytes: number }>();
 
   private constructor(
     private readonly sfClient: SfClient,
     private readonly projects: AllowedProject[],
     private readonly commandProject: AllowedProject,
     private readonly uploadRoot: string,
+    private readonly userUploadQuotaBytes: number,
+    private readonly serverUploadQuotaBytes: number,
   ) {}
 
-  public static async create(sfClient: SfClient, cwd: string, configuredPaths: string[]): Promise<WorkspaceService> {
+  public static async create(
+    sfClient: SfClient,
+    cwd: string,
+    configuredPaths: string[],
+    options: WorkspaceServiceOptions = {},
+  ): Promise<WorkspaceService> {
     const commandProjectPath = await realpath(cwd);
     const projects: AllowedProject[] = [];
     for (const candidate of configuredPaths) {
@@ -83,14 +99,25 @@ export class WorkspaceService {
         manifests: await findManifests(projectPath),
       });
     }
-    const uploadRoot = await mkdtemp(path.join(os.tmpdir(), 'sfud-uploads-'));
+    await scavengeStaleUploadRoots();
+    const uploadRoot = await mkdtemp(path.join(os.tmpdir(), `sfud-uploads-${process.pid}-`));
     await chmod(uploadRoot, 0o700);
     return new WorkspaceService(sfClient, projects, {
       id: 'command-workspace',
       displayName: 'sfud command workspace',
       realPath: commandProjectPath,
       manifests: [],
-    }, uploadRoot);
+    }, uploadRoot,
+    configuredQuota(
+      options.userUploadQuotaBytes,
+      process.env.SFUD_USER_UPLOAD_QUOTA_BYTES,
+      DEFAULT_USER_UPLOAD_QUOTA_BYTES,
+    ),
+    configuredQuota(
+      options.serverUploadQuotaBytes,
+      process.env.SFUD_SERVER_UPLOAD_QUOTA_BYTES,
+      DEFAULT_SERVER_UPLOAD_QUOTA_BYTES,
+    ));
   }
 
   public listProjects(): WorkspaceProject[] {
@@ -105,11 +132,39 @@ export class WorkspaceService {
       .sort((left, right) => left.displayName.localeCompare(right.displayName));
   }
 
-  public async beginProjectUpload(): Promise<{ id: string; directory: string }> {
+  public async beginProjectUpload(ownerUserId: string): Promise<{ id: string; directory: string }> {
     const id = randomUUID();
     const directory = path.join(this.uploadRoot, id);
     await mkdir(directory, { mode: 0o700 });
+    this.pendingUploads.set(id, { ownerUserId, sizeBytes: 0 });
     return { id, directory };
+  }
+
+  public recordProjectUploadBytes(id: string, bytes: number): void {
+    const upload = this.pendingUploads.get(id);
+    if (upload === undefined) throw new Error('진행 중인 업로드를 찾을 수 없습니다.');
+    const nextSize = upload.sizeBytes + bytes;
+    const completed = [...this.uploadedProjects.values()];
+    const pending = [...this.pendingUploads.entries()];
+    const userTotal = completed
+      .filter((project) => project.ownerUserId === upload.ownerUserId)
+      .reduce((total, project) => total + project.sizeBytes, 0)
+      + pending
+        .filter(([pendingId, entry]) => pendingId !== id && entry.ownerUserId === upload.ownerUserId)
+        .reduce((total, [, entry]) => total + entry.sizeBytes, 0)
+      + nextSize;
+    const serverTotal = completed.reduce((total, project) => total + project.sizeBytes, 0)
+      + pending
+        .filter(([pendingId]) => pendingId !== id)
+        .reduce((total, [, entry]) => total + entry.sizeBytes, 0)
+      + nextSize;
+    if (userTotal > this.userUploadQuotaBytes) {
+      throw new UploadQuotaError('사용자별 업로드 저장 공간 한도를 초과했습니다.');
+    }
+    if (serverTotal > this.serverUploadQuotaBytes) {
+      throw new UploadQuotaError('서버 전체 업로드 저장 공간 한도를 초과했습니다.');
+    }
+    upload.sizeBytes = nextSize;
   }
 
   public async completeProjectUpload(
@@ -118,6 +173,10 @@ export class WorkspaceService {
     requestedLabel?: string,
   ): Promise<UploadedProject> {
     assertUploadId(id);
+    const pending = this.pendingUploads.get(id);
+    if (pending === undefined || pending.ownerUserId !== ownerUserId) {
+      throw new Error('진행 중인 업로드를 찾을 수 없습니다.');
+    }
     const directory = path.join(this.uploadRoot, id);
     const configurationPaths = (await readdir(directory, { recursive: true, withFileTypes: true }))
       .filter((entry) => entry.isFile() && entry.name === 'sfdx-project.json')
@@ -136,7 +195,9 @@ export class WorkspaceService {
       manifests: await findManifests(projectPath),
       ownerUserId,
       expiresAt: Date.now() + UPLOAD_TTL_MS,
+      sizeBytes: pending.sizeBytes,
     };
+    this.pendingUploads.delete(id);
     this.uploadedProjects.set(id, project);
     this.scheduleUploadExpiration(project);
     return project;
@@ -154,6 +215,7 @@ export class WorkspaceService {
     const timer = this.uploadExpirationTimers.get(id);
     if (timer !== undefined) clearTimeout(timer);
     this.uploadExpirationTimers.delete(id);
+    this.pendingUploads.delete(id);
     this.uploadedProjects.delete(id);
     await rm(path.join(this.uploadRoot, id), { recursive: true, force: true });
   }
@@ -162,6 +224,7 @@ export class WorkspaceService {
     for (const timer of this.uploadExpirationTimers.values()) clearTimeout(timer);
     this.uploadExpirationTimers.clear();
     this.uploadPins.clear();
+    this.pendingUploads.clear();
     this.uploadedProjects.clear();
     await rm(this.uploadRoot, { recursive: true, force: true });
   }
@@ -530,7 +593,7 @@ function assertUploadId(id: string): void {
   }
 }
 
-async function findManifests(projectPath: string): Promise<string[]> {
+export async function findManifests(projectPath: string): Promise<string[]> {
   const manifestDirectory = path.join(projectPath, 'manifest');
   try {
     const entries = await readdir(manifestDirectory, { recursive: true, withFileTypes: true });
@@ -538,9 +601,41 @@ async function findManifests(projectPath: string): Promise<string[]> {
       .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.xml'))
       .map((entry) => path.relative(projectPath, path.join(entry.parentPath, entry.name)))
       .sort((left, right) => left.localeCompare(right));
-  } catch {
-    return [];
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return [];
+    throw error;
   }
+}
+
+export async function scavengeStaleUploadRoots(
+  temporaryDirectory = os.tmpdir(),
+  now = Date.now(),
+): Promise<number> {
+  let removed = 0;
+  for (const entry of await readdir(temporaryDirectory, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !/^sfud-uploads-(?:\d+-)?[A-Za-z0-9_-]+$/u.test(entry.name)) {
+      continue;
+    }
+    const candidate = path.join(temporaryDirectory, entry.name);
+    try {
+      const candidateStat = await lstat(candidate);
+      if (!candidateStat.isDirectory()
+        || (candidateStat.mode & 0o777) !== 0o700
+        || (typeof process.getuid === 'function' && candidateStat.uid !== process.getuid())
+        || now - candidateStat.mtimeMs <= UPLOAD_TTL_MS) {
+        continue;
+      }
+      const pid = Number(entry.name.match(/^sfud-uploads-(\d+)-/u)?.[1]);
+      if (Number.isInteger(pid) && pid > 0 && processExists(pid)) continue;
+      const resolved = await realpath(candidate);
+      if (path.dirname(resolved) !== await realpath(temporaryDirectory)) continue;
+      await rm(resolved, { recursive: true, force: true });
+      removed += 1;
+    } catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+    }
+  }
+  return removed;
 }
 
 function isInside(parent: string, child: string): boolean {
@@ -568,6 +663,28 @@ function normalizeInstanceUrl(value: string): string {
     return `${url.protocol}//${url.host}`.toLowerCase();
   } catch {
     return value.trim().toLowerCase().replace(/\/+$/u, '');
+  }
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error instanceof Error && 'code' in error && error.code === 'EPERM';
+  }
+}
+
+function configuredQuota(value: number | undefined, environmentValue: string | undefined, fallback: number): number {
+  const quota = value ?? (environmentValue === undefined ? fallback : Number(environmentValue));
+  if (!Number.isSafeInteger(quota) || quota < 1) throw new Error('업로드 quota는 1 이상의 정수여야 합니다.');
+  return quota;
+}
+
+export class UploadQuotaError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = 'UploadQuotaError';
   }
 }
 

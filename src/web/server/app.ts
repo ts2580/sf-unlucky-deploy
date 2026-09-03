@@ -37,6 +37,8 @@ export interface WebServerOptions {
   sfClient?: SfClient;
   trustedProxies?: string[];
   publicOrigin?: string;
+  userUploadQuotaBytes?: number;
+  serverUploadQuotaBytes?: number;
 }
 
 export async function createWebServer(options: WebServerOptions): Promise<FastifyInstance> {
@@ -55,6 +57,14 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     options.projectPaths,
     process.cwd(),
     options.sfClient,
+    {
+      ...(options.userUploadQuotaBytes === undefined
+        ? {}
+        : { userUploadQuotaBytes: options.userUploadQuotaBytes }),
+      ...(options.serverUploadQuotaBytes === undefined
+        ? {}
+        : { serverUploadQuotaBytes: options.serverUploadQuotaBytes }),
+    },
   );
   app.decorate('sfudRuntime', runtime);
   app.addHook('onClose', async () => {
