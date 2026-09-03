@@ -26,6 +26,11 @@ interface ApexTestClassesQuery {
   sourceId?: string;
 }
 
+interface ApexTestClassCandidate {
+  name: string;
+  matchesConfiguredSuffix: boolean;
+}
+
 interface ComponentPageQuery {
   page?: string;
   pageSize?: string;
@@ -109,8 +114,14 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     try {
       const sourceId = requiredString(request.query.sourceId, '배포 소스');
       const settings = await app.sfudRuntime.settings.get(session.user.id);
-      const testClasses = (await app.sfudRuntime.workspace.listApexTestClasses(sourceId, session.user.id))
-        .filter((className) => hasTestClassSuffix(className, settings.testClassSuffix));
+      const testClasses: ApexTestClassCandidate[] = (
+        await app.sfudRuntime.workspace.listApexTestClasses(sourceId, session.user.id)
+      ).map((name) => ({
+        name,
+        matchesConfiguredSuffix: hasTestClassSuffix(name, settings.testClassSuffix),
+      })).sort((left, right) =>
+        Number(right.matchesConfiguredSuffix) - Number(left.matchesConfiguredSuffix)
+          || left.name.localeCompare(right.name));
       return reply.send({ testClasses });
     } catch (error) {
       return reply.code(400).send({ error: {

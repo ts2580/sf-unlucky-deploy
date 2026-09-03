@@ -10,6 +10,7 @@ import { sha256File } from '../core/files.js';
 import type { MetadataSnapshot } from '../sources/snapshot.js';
 import { resolveMetadataComponents, type MetadataComponent } from './component-resolver.js';
 import { compareXml, type XmlChange } from './xml-diff.js';
+import { hasXmlSemanticPolicy } from './xml-semantics.js';
 
 export type DifferenceStatus = 'ADDED' | 'REMOVED' | 'MODIFIED' | 'IDENTICAL';
 export type FileKind = 'xml' | 'text' | 'binary';
@@ -23,6 +24,9 @@ export interface FileDifference {
   leftSize?: number;
   rightSize?: number;
   xmlChanges?: XmlChange[];
+  xmlSemanticStatus?: 'EQUAL' | 'DIFFERENT';
+  xmlComparisonPolicy?: 'REGISTERED' | 'GENERIC';
+  rawContentChanged?: boolean;
   unifiedDiff?: string;
   diffTruncated?: boolean;
 }
@@ -111,6 +115,16 @@ export async function compareSnapshots(
   if (components.some((component) => component.files.some((file) => file.diffTruncated === true))) {
     warnings.push('크기 상한을 넘은 파일은 checksum만 비교했으며 상세 diff 일부를 생략했습니다.');
   }
+  const genericXmlTypes = [...new Set(components.flatMap((component) =>
+    component.files.some((file) =>
+      file.rawContentChanged === true && file.xmlComparisonPolicy === 'GENERIC')
+      ? [component.type]
+      : []))].sort((leftType, rightType) => leftType.localeCompare(rightType));
+  if (genericXmlTypes.length > 0) {
+    warnings.push(
+      `등록된 XML semantic 정책이 없어 generic 비교를 사용한 metadata type: ${genericXmlTypes.join(', ')}`,
+    );
+  }
 
   return {
     generatedAt: new Date().toISOString(),
@@ -170,6 +184,7 @@ async function compareComponent(
         rightFilePaths.has(relativePath),
         relativePath,
         strict,
+        descriptor.type,
       ),
     );
   }
@@ -215,6 +230,7 @@ async function compareFile(
   hasRight: boolean,
   relativePath: string,
   strict: boolean,
+  metadataType: string,
 ): Promise<FileDifference> {
   if (!hasLeft) {
     return (await describeOneSidedFiles(rightRoot, [relativePath], 'ADDED'))[0]!;
@@ -282,12 +298,20 @@ async function compareFile(
   const rightText = normalizeText(rightContent.toString('utf8'));
 
   if (kind === 'xml') {
-    const allXmlChanges = compareXml(leftText, rightText);
+    const registeredPolicy = hasXmlSemanticPolicy(metadataType);
+    const allXmlChanges = compareXml(leftText, rightText, { metadataType });
     const xmlChanges = allXmlChanges.slice(0, MAX_XML_CHANGES);
     const xmlChangesTruncated = allXmlChanges.length > xmlChanges.length;
     const strictTextChanged = strict && leftText !== rightText;
     if (xmlChanges.length === 0 && !strictTextChanged) {
-      return { ...common, status: 'IDENTICAL', xmlChanges: [] };
+      return {
+        ...common,
+        status: 'IDENTICAL',
+        xmlChanges: [],
+        xmlSemanticStatus: 'EQUAL',
+        xmlComparisonPolicy: registeredPolicy ? 'REGISTERED' : 'GENERIC',
+        rawContentChanged: true,
+      };
     }
     const unified: { unifiedDiff?: string; diffTruncated?: true } = strictTextChanged
       ? boundedUnifiedDiff(createTwoFilesPatch(
@@ -304,6 +328,9 @@ async function compareFile(
       ...common,
       status: 'MODIFIED',
       xmlChanges,
+      xmlSemanticStatus: xmlChanges.length === 0 ? 'EQUAL' : 'DIFFERENT',
+      xmlComparisonPolicy: registeredPolicy ? 'REGISTERED' : 'GENERIC',
+      rawContentChanged: true,
       ...unified,
       ...(xmlChangesTruncated || unified.diffTruncated === true ? { diffTruncated: true } : {}),
     };

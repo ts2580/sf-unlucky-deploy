@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { access, chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -7,6 +7,7 @@ import { listFiles } from '../../core/files.js';
 import { readProjectApiVersion, withRequestWorkspace } from '../../core/request-workspace.js';
 import type { SfClient } from '../../salesforce/sf-client.js';
 import type { OrgIdentitySnapshot } from '../../deploy/org-identity.js';
+import { discoverLocalMetadataTypes, resolveLocalPackageDirectories } from '../../metadata/local-metadata.js';
 
 const UPLOAD_TTL_MS = 4 * 60 * 60 * 1_000;
 const DEFAULT_USER_UPLOAD_QUOTA_BYTES = 500 * 1024 * 1024;
@@ -263,14 +264,19 @@ export class WorkspaceService {
   ): Promise<WorkspaceMetadataType[]> {
     const resolvedSources = await Promise.all(sourceIds.map((sourceId) =>
       this.resolveSource(sourceId, ownerUserId)));
-    const project = this.projectForSources(resolvedSources);
     const aliases = [...new Set(resolvedSources.flatMap((source) =>
       source.startsWith('org:') ? [source.slice('org:'.length)] : []))];
-    if (aliases.length === 0) {
-      const fallback = (await this.listOrgs()).find((org) => org.connected);
-      if (fallback !== undefined) aliases.push(fallback.alias);
-    }
-    const values = await Promise.all(aliases.map((alias) => this.listMetadataTypesForOrg(alias, project)));
+    const localProjectPaths = [...new Set(resolvedSources.flatMap((source) =>
+      source.startsWith('local:') ? [source.slice('local:'.length)] : []))];
+    const project = this.projectForSources(resolvedSources);
+    const values = await Promise.all([
+      ...aliases.map((alias) => this.listMetadataTypesForOrg(alias, project)),
+      ...localProjectPaths.map(async (projectPath) =>
+        (await discoverLocalMetadataTypes(projectPath)).map((descriptor) => ({
+          name: descriptor.xmlName,
+          directoryName: descriptor.directoryName,
+        }))),
+    ]);
     const unique = new Map<string, WorkspaceMetadataType>();
     for (const value of values.flat()) unique.set(value.name, value);
     return [...unique.values()].sort((left, right) => left.name.localeCompare(right.name));
@@ -528,14 +534,14 @@ export class WorkspaceService {
 }
 
 async function validatePackageDirectories(projectPath: string, configurationPath: string): Promise<void> {
-  await readPackageDirectories(projectPath, configurationPath);
+  if (configurationPath !== path.join(projectPath, 'sfdx-project.json')) {
+    throw new Error('sfdx-project.json 경로가 올바르지 않습니다.');
+  }
+  await resolveLocalPackageDirectories(projectPath);
 }
 
 async function listLocalApexTestClasses(projectPath: string): Promise<string[]> {
-  const packageDirectories = await readPackageDirectories(
-    projectPath,
-    path.join(projectPath, 'sfdx-project.json'),
-  );
+  const packageDirectories = await resolveLocalPackageDirectories(projectPath);
   const names: string[] = [];
   for (const directory of packageDirectories) {
     for (const relativePath of await listFiles(directory)) {
@@ -544,35 +550,6 @@ async function listLocalApexTestClasses(projectPath: string): Promise<string[]> 
     }
   }
   return normalizeApexClassCandidates(names);
-}
-
-async function readPackageDirectories(projectPath: string, configurationPath: string): Promise<string[]> {
-  let configuration: unknown;
-  try {
-    configuration = JSON.parse(await readFile(configurationPath, 'utf8')) as unknown;
-  } catch {
-    throw new Error('sfdx-project.json 형식이 올바르지 않습니다.');
-  }
-  if (!isRecord(configuration) || !Array.isArray(configuration.packageDirectories)) {
-    throw new Error('packageDirectories가 없는 Salesforce DX 프로젝트입니다.');
-  }
-  const directories = configuration.packageDirectories.flatMap((entry) =>
-    isRecord(entry) && typeof entry.path === 'string' && entry.path.length > 0 ? [entry.path] : []);
-  if (directories.length === 0) throw new Error('packageDirectories가 없는 Salesforce DX 프로젝트입니다.');
-  const resolved: string[] = [];
-  for (const directory of directories) {
-    let packageDirectory: string;
-    try {
-      packageDirectory = await realpath(path.resolve(projectPath, directory));
-    } catch {
-      throw new Error('존재하지 않는 packageDirectory가 포함되어 있습니다.');
-    }
-    if (packageDirectory !== projectPath && !isInside(projectPath, packageDirectory)) {
-      throw new Error('프로젝트 외부 packageDirectory는 사용할 수 없습니다.');
-    }
-    resolved.push(packageDirectory);
-  }
-  return resolved;
 }
 
 function normalizeApexClassCandidates(values: readonly string[]): string[] {

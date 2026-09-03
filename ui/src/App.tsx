@@ -136,6 +136,11 @@ interface ComparisonComponent {
   files: ComparisonFileDifference[];
 }
 
+interface ApexTestClassCandidate {
+  name: string;
+  matchesConfiguredSuffix: boolean;
+}
+
 interface DeploymentCartItem {
   key: string;
   type: string;
@@ -716,7 +721,7 @@ function DeployPage({ user }: { user: ApiUser }) {
   const [deploymentJob, setDeploymentJob] = useState<DryRunJobResponse | null>(null);
   const [deploymentCart, setDeploymentCart] = useState<DeploymentCartItem[]>([]);
   const [error, setError] = useState('');
-  const [apexTestClasses, setApexTestClasses] = useState<string[]>([]);
+  const [apexTestClasses, setApexTestClasses] = useState<ApexTestClassCandidate[]>([]);
   const [apexTestClassQuery, setApexTestClassQuery] = useState('');
   const [apexTestClassesLoading, setApexTestClassesLoading] = useState(false);
   const [apexTestClassesError, setApexTestClassesError] = useState('');
@@ -844,7 +849,10 @@ function DeployPage({ user }: { user: ApiUser }) {
       credentials: 'same-origin', signal: controller.signal,
     })
       .then(async (response) => {
-        const data = await response.json() as { testClasses?: string[]; error?: { message: string } };
+        const data = await response.json() as {
+          testClasses?: ApexTestClassCandidate[];
+          error?: { message: string };
+        };
         if (!response.ok || data.testClasses === undefined) {
           throw new Error(data.error?.message ?? 'Apex 테스트 클래스 후보를 불러오지 못했습니다.');
         }
@@ -1024,16 +1032,16 @@ function DeployPage({ user }: { user: ApiUser }) {
   const selectedTestNames = new Set(testNames);
   const normalizedApexTestClassQuery = apexTestClassQuery.trim().toLocaleLowerCase();
   const filteredApexTestClasses = apexTestClasses.filter((testClass) =>
-    testClass.toLocaleLowerCase().includes(normalizedApexTestClassQuery));
+    testClass.name.toLocaleLowerCase().includes(normalizedApexTestClassQuery));
   const currentTestToken = tests.match(/[^\s,]*$/u)?.[0] ?? '';
   const normalizedCurrentTestToken = currentTestToken.toLocaleLowerCase();
   const directInputSuggestions = normalizedCurrentTestToken.length === 0
     ? []
     : apexTestClasses.filter((testClass) =>
-      testClass.toLocaleLowerCase().includes(normalizedCurrentTestToken)
-      && !selectedTestNames.has(testClass)).slice(0, 8);
+      testClass.name.toLocaleLowerCase().includes(normalizedCurrentTestToken)
+      && !selectedTestNames.has(testClass.name)).slice(0, 8);
   const directInputMatchesSource = apexTestClasses.some((testClass) =>
-    testClass.toLocaleLowerCase() === normalizedCurrentTestToken);
+    testClass.name.toLocaleLowerCase() === normalizedCurrentTestToken);
   const directInputSearchOpen = testInputFocused
     && currentTestToken.length > 0
     && ['auto', 'RunSpecifiedTests'].includes(testLevel)
@@ -1327,7 +1335,7 @@ function DeployPage({ user }: { user: ApiUser }) {
                     ? <p><Icon name="refresh" />Apex 클래스 검색 중……</p>
                     : apexTestClassesError
                       ? <p className="test-class-suggestions-error">{apexTestClassesError}</p>
-                      : directInputSuggestions.map((testClass) => <button key={testClass} type="button" role="option" aria-selected="false" onClick={() => selectDirectTestClass(testClass)}><Icon name="code" />{testClass}</button>)}
+                      : directInputSuggestions.map((testClass) => <button key={testClass.name} type="button" role="option" aria-selected="false" onClick={() => selectDirectTestClass(testClass.name)}><Icon name="code" />{testClass.name}{testClass.matchesConfiguredSuffix && <small>접미사 일치</small>}</button>)}
                 </div>}
               </div>
             </div>
@@ -1344,7 +1352,7 @@ function DeployPage({ user }: { user: ApiUser }) {
                         <label className="apex-test-search"><span>테스트 클래스 검색</span><input value={apexTestClassQuery} onChange={(event) => setApexTestClassQuery(event.target.value)} placeholder="클래스 이름 검색" autoComplete="off" /><small>{filteredApexTestClasses.length} / {apexTestClasses.length}개 표시</small></label>
                         {filteredApexTestClasses.length === 0
                           ? <p className="apex-test-message">검색 조건과 일치하는 Apex Class가 없습니다.</p>
-                          : <div className="apex-test-options">{filteredApexTestClasses.map((testClass) => <label key={testClass}><input type="checkbox" checked={selectedTestNames.has(testClass)} disabled={dryRunning || deploying || !['auto', 'RunSpecifiedTests'].includes(testLevel)} onChange={(event) => setApexTestSelected(testClass, event.target.checked)} /><span><Icon name="check" />{testClass}</span></label>)}</div>}
+                          : <div className="apex-test-options">{filteredApexTestClasses.map((testClass) => <label key={testClass.name}><input type="checkbox" checked={selectedTestNames.has(testClass.name)} disabled={dryRunning || deploying || !['auto', 'RunSpecifiedTests'].includes(testLevel)} onChange={(event) => setApexTestSelected(testClass.name, event.target.checked)} /><span><Icon name="check" />{testClass.name}{testClass.matchesConfiguredSuffix && <small>접미사 일치</small>}</span></label>)}</div>}
                       </>}
               </section>
               : <p className="apex-test-empty"><Icon name="code" />Apex Class를 배포 대상에 추가하면 테스트 클래스 선택 목록을 불러옵니다.</p>}

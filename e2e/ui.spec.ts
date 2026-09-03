@@ -284,6 +284,7 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(sourceOnlyResult.getByText('TARGET ONLY', { exact: true })).toHaveCount(0);
   await compareCurrentType.check();
   await expect(showIdentical).toBeEnabled();
+  await showIdentical.check();
   await expect(comparisonOptions.getByText('3개 metadata type 검색 가능 · source와 target의 합집합')).toBeVisible();
   await comparisonOptions.getByRole('button', { name: '메타데이터 받아오기' }).click();
   await expect(comparisonOptions.getByRole('button', { name: '메타데이터 받는 중……' })).toBeVisible({ timeout: 300 });
@@ -294,6 +295,11 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(page.getByRole('heading', { name: 'right → left' })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByLabel('비교 현황')).toContainText('완료');
   await expect(page.getByText('Hello', { exact: true })).toBeVisible();
+  const semanticEqualComponent = page.locator('details.component-result').filter({ hasText: 'Admin' });
+  await expect(semanticEqualComponent.locator('.component-status')).toHaveText('IDENTICAL');
+  await semanticEqualComponent.locator('summary').click();
+  await expect(semanticEqualComponent).toContainText('원문 SHA-256은 다릅니다. XML 의미 비교는 동일');
+  await expect(semanticEqualComponent).toContainText('metadata type 등록 정책');
   await expect(page.locator('.component-status', { hasText: 'MODIFIED' })).toBeVisible();
   const modifiedComponent = page.locator('details.component-result').filter({ hasText: 'Hello' });
   await modifiedComponent.locator('summary').click();
@@ -400,7 +406,11 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await page.route('**/api/v1/apex-test-classes**', async (route) => {
     expect(new URL(route.request().url()).searchParams.get('sourceId')).toBe('project:project-1');
     await route.fulfill({ json: {
-      testClasses: ['Hello_Test', 'Order_Test'],
+      testClasses: [
+        { name: 'Hello_Test', matchesConfiguredSuffix: true },
+        { name: 'Order_Test', matchesConfiguredSuffix: true },
+        { name: 'Helper', matchesConfiguredSuffix: false },
+      ],
     } });
   });
   let comparisonPolls = 0;
@@ -548,10 +558,16 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByRole('region', { name: 'Target 바로 배포' }).getByRole('textbox')).toHaveCount(0);
   const apexTests = page.getByRole('region', { name: 'Apex 테스트 클래스 선택' });
   await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toBeVisible();
+  await expect(apexTests.getByRole('checkbox', { name: 'Helper' })).toBeVisible();
+  await expect(apexTests.locator('.apex-test-options label')).toHaveText([
+    /Hello_Test.*접미사 일치/u,
+    /Order_Test.*접미사 일치/u,
+    /Helper/u,
+  ]);
   await page.getByLabel('테스트 클래스 검색').fill('order');
   await expect(apexTests.getByRole('checkbox', { name: 'Order_Test' })).toBeVisible();
   await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toHaveCount(0);
-  await expect(apexTests.getByText('1 / 2개 표시')).toBeVisible();
+  await expect(apexTests.getByText('1 / 3개 표시')).toBeVisible();
   await page.getByLabel('테스트 클래스 검색').fill('');
   await page.getByLabel('테스트 수준').selectOption('RunSpecifiedTests');
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeDisabled();
@@ -657,7 +673,7 @@ function comparisonFixture(status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED'): Comparis
     right: { id: 'org:right', kind: 'org', label: 'right' },
     ...(status !== 'SUCCEEDED' ? {} : {
       result: {
-        summary: { added: 0, removed: 0, modified: 1, identical: 0, total: 1, different: 1 },
+        summary: { added: 0, removed: 0, modified: 1, identical: 1, total: 2, different: 1 },
         warnings: [],
         components: [{
           key: 'ApexClass:Hello', type: 'ApexClass', fullName: 'Hello', status: 'MODIFIED',
@@ -671,6 +687,13 @@ function comparisonFixture(status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED'): Comparis
               xmlChanges: [{ kind: 'MODIFIED', path: 'ApexClass.status', before: 'Inactive', after: 'Active' }],
             },
           ],
+        }, {
+          key: 'Profile:Admin', type: 'Profile', fullName: 'Admin', status: 'IDENTICAL',
+          files: [{
+            path: 'profiles/Admin.profile', status: 'IDENTICAL', kind: 'xml', xmlChanges: [],
+            leftSha256: 'left-profile', rightSha256: 'right-profile', rawContentChanged: true,
+            xmlSemanticStatus: 'EQUAL', xmlComparisonPolicy: 'REGISTERED',
+          }],
         }],
       },
     }),
@@ -724,13 +747,18 @@ interface ComparisonFixture {
     summary: { added: number; removed: number; modified: number; identical: number; total: number; different: number };
     warnings: string[];
     components: Array<{
-      key: string; type: string; fullName: string; status: 'MODIFIED';
+      key: string; type: string; fullName: string; status: 'MODIFIED' | 'IDENTICAL';
       files: Array<{
         path: string;
         status: string;
         kind?: 'xml' | 'text' | 'binary';
         unifiedDiff?: string;
         xmlChanges?: Array<{ kind: 'MODIFIED'; path: string; before: string; after: string }>;
+        leftSha256?: string;
+        rightSha256?: string;
+        rawContentChanged?: boolean;
+        xmlSemanticStatus?: 'EQUAL' | 'DIFFERENT';
+        xmlComparisonPolicy?: 'REGISTERED' | 'GENERIC';
       }>;
     }>;
   };

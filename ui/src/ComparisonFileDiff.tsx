@@ -11,6 +11,9 @@ export interface ComparisonFileDifference {
   kind?: 'xml' | 'text' | 'binary';
   unifiedDiff?: string;
   xmlChanges?: XmlComparisonChange[];
+  xmlSemanticStatus?: 'EQUAL' | 'DIFFERENT';
+  xmlComparisonPolicy?: 'REGISTERED' | 'GENERIC';
+  rawContentChanged?: boolean;
   leftSha256?: string;
   rightSha256?: string;
   leftSize?: number;
@@ -28,7 +31,9 @@ export function ComparisonFileDiff({ file, sourceLabel, targetLabel, sourceSide 
   const hasTextDiff = file.unifiedDiff !== undefined && file.unifiedDiff.length > 0;
   const hasXmlDiff = file.xmlChanges !== undefined && file.xmlChanges.length > 0;
   const hasBinaryDiff = file.kind === 'binary' && file.status === 'MODIFIED';
-  if (!hasTextDiff && !hasXmlDiff && !hasBinaryDiff) return null;
+  const hasSemanticNote = file.kind === 'xml' && file.rawContentChanged === true
+    && file.xmlSemanticStatus !== undefined;
+  if (!hasTextDiff && !hasXmlDiff && !hasBinaryDiff && !hasSemanticNote) return null;
   const targetSide = sourceSide === 'before' ? 'after' : 'before';
 
   return (
@@ -39,6 +44,10 @@ export function ComparisonFileDiff({ file, sourceLabel, targetLabel, sourceSide 
       </div>
       {hasTextDiff && <UnifiedDiff diff={file.unifiedDiff!} />}
       {hasXmlDiff && <XmlDiff changes={file.xmlChanges!} sourceSide={sourceSide} />}
+      {hasSemanticNote && <p className={`xml-semantic-note xml-semantic-${file.xmlSemanticStatus!.toLowerCase()}`}>
+        원문 SHA-256은 다릅니다. XML 의미 비교는 {file.xmlSemanticStatus === 'EQUAL' ? '동일' : '변경'}이며,
+        {' '}{file.xmlComparisonPolicy === 'REGISTERED' ? 'metadata type 등록 정책' : 'generic 정책'}을 사용했습니다.
+      </p>}
       {hasBinaryDiff && <BinaryDiff file={file} sourceSide={sourceSide} />}
     </section>
   );

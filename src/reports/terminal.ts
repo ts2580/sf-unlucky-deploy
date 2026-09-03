@@ -93,8 +93,14 @@ function renderComponentLine(component: ComponentDifference, paint: Painter): st
 
 function renderFileDetails(files: FileDifference[], paint: Painter): string[] {
   const lines: string[] = [];
-  for (const file of files.filter((candidate) => candidate.status !== 'IDENTICAL')) {
+  for (const file of files.filter((candidate) =>
+    candidate.status !== 'IDENTICAL'
+      || (candidate.rawContentChanged === true && candidate.xmlSemanticStatus === 'EQUAL'))) {
     lines.push(`  ${paintStatus(file.status, file.status.padEnd(10), paint)} ${file.path}`);
+    if (file.rawContentChanged === true && file.xmlSemanticStatus !== undefined) {
+      const policy = file.xmlComparisonPolicy === 'REGISTERED' ? 'metadata type 등록' : 'generic';
+      lines.push(`    XML 의미 ${file.xmlSemanticStatus === 'EQUAL' ? '동일' : '변경'} · ${policy} 정책 · 원문 SHA-256 다름`);
+    }
     for (const change of file.xmlChanges ?? []) {
       if (change.kind === 'ADDED') {
         lines.push(paint.added(`    + ${change.path}: ${change.after ?? ''}`));

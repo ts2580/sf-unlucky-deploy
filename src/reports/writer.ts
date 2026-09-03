@@ -52,6 +52,15 @@ async function writeSecureText(filePath: string, contents: string): Promise<void
 
 function renderContentDiff(result: ComparisonResult): string {
   const lines: string[] = [];
+  for (const component of result.components) {
+    for (const file of component.files) {
+      if (file.rawContentChanged === true && file.xmlSemanticStatus === 'EQUAL') {
+        const policy = file.xmlComparisonPolicy === 'REGISTERED' ? 'metadata type 등록' : 'generic';
+        lines.push(`# XML SEMANTIC EQUAL ${component.type}:${component.fullName}`);
+        lines.push(`## RAW SHA-256 DIFFERENT ${file.path} (${policy} 정책)`, '');
+      }
+    }
+  }
   for (const component of result.components.filter((candidate) => candidate.status !== 'IDENTICAL')) {
     lines.push(`# ${component.status} ${component.type}:${component.fullName}`);
     for (const file of component.files.filter((candidate) => candidate.status !== 'IDENTICAL')) {

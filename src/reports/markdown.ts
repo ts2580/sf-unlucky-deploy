@@ -21,6 +21,21 @@ export function renderMarkdownReport(result: ComparisonResult): string {
     lines.push('## 주의', '', ...result.warnings.map((warning) => `- ${warning}`), '');
   }
 
+  const semanticEqualFiles = result.components.flatMap((component) =>
+    component.files.flatMap((file) =>
+      file.rawContentChanged === true && file.xmlSemanticStatus === 'EQUAL'
+        ? [{ component, file }]
+        : []));
+  if (semanticEqualFiles.length > 0) {
+    lines.push('## 원문이 다른 semantic 동일 XML', '');
+    for (const { component, file } of semanticEqualFiles) {
+      lines.push(
+        `- ${component.type} · \`${escapeInlineCode(component.fullName)}\` · \`${escapeInlineCode(file.path)}\` · ${xmlPolicyLabel(file)}`,
+      );
+    }
+    lines.push('');
+  }
+
   lines.push('## 변경된 컴포넌트', '');
   const changed = result.components.filter((component) => component.status !== 'IDENTICAL');
   if (changed.length === 0) {
@@ -40,6 +55,12 @@ export function renderMarkdownReport(result: ComparisonResult): string {
 
 function renderFileDifference(file: FileDifference): string[] {
   const lines: string[] = [];
+  if (file.rawContentChanged === true && file.xmlSemanticStatus !== undefined) {
+    lines.push(
+      `- XML 의미 비교: ${file.xmlSemanticStatus === 'EQUAL' ? '동일' : '변경'} (${xmlPolicyLabel(file)}), 원문 SHA-256은 다름`,
+      '',
+    );
+  }
   if (file.xmlChanges && file.xmlChanges.length > 0) {
     lines.push('| 상태 | 경로 | 이전 값 | 새 값 |', '|---|---|---|---|');
     for (const change of file.xmlChanges) {
@@ -62,6 +83,10 @@ function renderFileDifference(file: FileDifference): string[] {
     );
   }
   return lines;
+}
+
+function xmlPolicyLabel(file: FileDifference): string {
+  return file.xmlComparisonPolicy === 'REGISTERED' ? 'metadata type 등록 정책' : 'generic 정책';
 }
 
 function escapeInlineCode(value: string): string {
