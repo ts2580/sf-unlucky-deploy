@@ -694,6 +694,7 @@ function DeployPage({ user }: { user: ApiUser }) {
   const [comparisonSubmitting, setComparisonSubmitting] = useState(false);
   const [dryRunSubmitting, setDryRunSubmitting] = useState(false);
   const [deploymentSubmitting, setDeploymentSubmitting] = useState(false);
+  const [reconcilingJobId, setReconcilingJobId] = useState<string | null>(null);
   const [comparisonJob, setComparisonJob] = useState<ComparisonJobResponse | null>(null);
   const [dryRunJob, setDryRunJob] = useState<DryRunJobResponse | null>(null);
   const [deploymentJob, setDeploymentJob] = useState<DryRunJobResponse | null>(null);
@@ -1209,6 +1210,29 @@ function DeployPage({ user }: { user: ApiUser }) {
     }
   };
 
+  const reconcileDeployment = async (job: DryRunJobResponse) => {
+    if (!canDeploy || job.status !== 'RECONCILE_REQUIRED') return;
+    setError('');
+    setReconcilingJobId(job.id);
+    try {
+      const response = await fetch(`/api/v1/deployment-jobs/${job.id}/reconcile`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'x-sfud-csrf': readCookie('sfud_csrf') ?? '' },
+      });
+      const data = await response.json() as { job?: DryRunJobResponse; error?: { message: string } };
+      if (!response.ok || data.job === undefined) {
+        throw new Error(data.error?.message ?? 'Salesforce 상태를 재확인하지 못했습니다.');
+      }
+      if (data.job.kind === 'DRY_RUN') setDryRunJob(data.job);
+      else setDeploymentJob(data.job);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Salesforce 상태를 재확인하지 못했습니다.');
+    } finally {
+      setReconcilingJobId(null);
+    }
+  };
+
   return (
     <div className="page-stack">
       <PageIntro kicker="COMPARE, SELECT, DEPLOY" title="검색한 메타데이터를 배포 대상으로 선택합니다.">
@@ -1319,8 +1343,8 @@ function DeployPage({ user }: { user: ApiUser }) {
           />
 
           {error && <section className="compare-error" role="alert"><strong>비교 및 배포 작업을 실행하지 못했습니다.</strong><p>{error}</p></section>}
-          {dryRunJob !== null && <DryRunResultPanel job={dryRunJob} />}
-          {deploymentJob !== null && <DryRunResultPanel job={deploymentJob} />}
+          {dryRunJob !== null && <DryRunResultPanel job={dryRunJob} canReconcile={canDeploy} reconciling={reconcilingJobId === dryRunJob.id} onReconcile={reconcileDeployment} />}
+          {deploymentJob !== null && <DryRunResultPanel job={deploymentJob} canReconcile={canDeploy} reconciling={reconcilingJobId === deploymentJob.id} onReconcile={reconcileDeployment} />}
         </div>
 
         <aside className="deploy-summary" aria-label="배포 대상">
@@ -1989,7 +2013,17 @@ function ComparisonResultPanel({
   );
 }
 
-function DryRunResultPanel({ job }: { job: DryRunJobResponse }) {
+function DryRunResultPanel({
+  job,
+  canReconcile,
+  reconciling,
+  onReconcile,
+}: {
+  job: DryRunJobResponse;
+  canReconcile: boolean;
+  reconciling: boolean;
+  onReconcile: (job: DryRunJobResponse) => Promise<void>;
+}) {
   if (job.kind === 'DEPLOY' && ['QUEUED', 'DEPLOYING'].includes(job.status)) {
     return <><section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? '실제 배포 대기 중' : `Salesforce 실제 배포 중${job.progress === undefined ? '' : ` · ${job.progress.status}`}`}</strong><p>{job.progress === undefined ? `${job.source.label} → ${job.target.label} · dry-run으로 고정한 payload를 배포합니다.` : progressSummary(job.progress)}</p></div></section><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></>;
   }
@@ -1997,7 +2031,7 @@ function DryRunResultPanel({ job }: { job: DryRunJobResponse }) {
     return <><section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? 'dry-run 대기 중' : `Salesforce check-only 실행 중${job.progress === undefined ? '' : ` · ${job.progress.status}`}`}</strong><p>{job.progress === undefined ? `${job.source.label} → ${job.target.label} · snapshot, 차이, 테스트를 검증합니다.` : progressSummary(job.progress)}</p></div></section><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></>;
   }
   if (job.status === 'FAILED' || job.status === 'RECONCILE_REQUIRED') {
-    return <section className="compare-error" role="alert"><strong>{job.status === 'FAILED' ? `${job.kind === 'DEPLOY' ? '실제 배포' : 'dry-run'}이 실패했습니다.` : 'Salesforce 상태 재확인이 필요합니다.'}</strong><p>{job.errorMessage ?? '상세 오류가 기록되지 않았습니다.'}</p>{job.persistenceWarning !== undefined && <p>로컬 저장 경고: {job.persistenceWarning}</p>}<SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></section>;
+    return <section className="compare-error" role="alert"><strong>{job.status === 'FAILED' ? `${job.kind === 'DEPLOY' ? '실제 배포' : 'dry-run'}이 실패했습니다.` : 'Salesforce 상태 재확인이 필요합니다.'}</strong><p>{job.errorMessage ?? '상세 오류가 기록되지 않았습니다.'}</p>{job.persistenceWarning !== undefined && <p>로컬 저장 경고: {job.persistenceWarning}</p>}{job.status === 'RECONCILE_REQUIRED' && <button className={`button button-secondary reconcile-button${reconciling ? ' button-busy' : ''}`} type="button" disabled={!canReconcile || reconciling} onClick={() => void onReconcile(job)}><Icon name={reconciling ? 'refresh' : 'shield'} />{reconciling ? 'Salesforce 상태 확인 중……' : 'Salesforce 상태 다시 확인'}</button>}<SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></section>;
   }
   if (job.kind === 'DEPLOY' && job.status === 'SUCCEEDED') {
     return <section className="dry-run-result" aria-label="Salesforce 실제 배포 성공"><div className="comparison-result-head"><div><p className="eyebrow">DEPLOYMENT COMPLETE</p><h2>Salesforce 실제 배포 성공</h2><small>{job.salesforceDeploymentId ?? 'deployment ID 없음'}</small></div><span className="result-success"><Icon name="check" />배포 성공</span></div>{job.persistenceWarning !== undefined && <div className="warning-note" role="alert"><Icon name="shield" /><p><strong>Salesforce 배포는 성공했지만 로컬 저장을 확인해야 합니다.</strong>{job.persistenceWarning}</p></div>}<div className="approval-preview"><Icon name="shield" /><div><strong>선택한 payload 배포를 완료했습니다.</strong><p>{job.testPlan?.tests.length

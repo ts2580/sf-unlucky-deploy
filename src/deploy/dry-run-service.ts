@@ -75,9 +75,11 @@ export class DryRunService {
   ) {}
 
   public async create(input: CreateDryRunInput): Promise<DeploymentJob> {
+    this.coordinator.assertAccepting();
     const prepared = await this.prepare(input);
     let job: DeploymentJob;
     try {
+      this.coordinator.assertAccepting();
       job = await this.jobs.createDryRun({
         source: prepared.source,
         targetAlias: prepared.targetAlias,
@@ -95,7 +97,7 @@ export class DryRunService {
       throw error;
     }
 
-    void this.coordinator.runDryRun(job.id, async () => {
+    void this.coordinator.runDryRun(job.id, async (signal) => {
       const persistenceWarnings: string[] = [];
       try {
         await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
@@ -121,6 +123,7 @@ export class DryRunService {
           cwd: prepared.project.realPath,
           sfClient: this.sfClient,
           stdout: () => undefined,
+          signal,
           beforeDeploymentSubmit: async () => {
             await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
           },
@@ -166,11 +169,13 @@ export class DryRunService {
   }
 
   public async createDirect(input: CreateDirectDeploymentInput): Promise<CreateDirectDeploymentResult> {
+    this.coordinator.assertAccepting();
     const tests = [...new Set(input.tests)].sort((left, right) => left.localeCompare(right));
     const request: CreateDryRunInput = { ...input, tests };
     const prepared = await this.prepare(request);
     let creation: CreateDirectDeploymentResult;
     try {
+      this.coordinator.assertAccepting();
       creation = await this.jobs.createDirectDeployment({
         source: prepared.source,
         targetAlias: prepared.targetAlias,
@@ -199,7 +204,7 @@ export class DryRunService {
       return creation;
     }
 
-    void this.coordinator.runDeployment(job.id, async () => {
+    void this.coordinator.runDeployment(job.id, async (signal) => {
       const persistenceWarnings: string[] = [];
       try {
         await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
@@ -226,6 +231,7 @@ export class DryRunService {
           cwd: prepared.project.realPath,
           sfClient: this.sfClient,
           stdout: () => undefined,
+          signal,
           beforeDeploymentSubmit: async () => {
             await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
           },

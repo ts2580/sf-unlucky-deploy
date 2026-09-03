@@ -150,6 +150,26 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
     }
     return reply.send({ job: publicJob(app, job, true) });
   });
+
+  app.post<{ Params: { id: string } }>(
+    '/api/v1/deployment-jobs/:id/reconcile',
+    async (request, reply) => {
+      const session = await requireAuthenticatedSession(app, request, reply, {
+        csrf: true,
+        roles: ['DEPLOYER', 'ADMIN'],
+      });
+      if (session === undefined) return;
+      try {
+        const job = await app.sfudRuntime.deployments.reconcile(request.params.id, session.user.id);
+        return reply.send({ job: publicJob(app, job, true) });
+      } catch (error) {
+        return reply.code(400).send({ error: {
+          code: 'DEPLOYMENT_RECONCILIATION_FAILED',
+          message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
+        } });
+      }
+    },
+  );
 }
 
 function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: boolean) {

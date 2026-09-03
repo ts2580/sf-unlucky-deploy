@@ -1,6 +1,7 @@
 import path from 'node:path';
 
 import { SfudError } from '../core/errors.js';
+import { salesforceWaitCommandTimeoutMs } from '../core/deadline.js';
 import { sha256Directory, writeJson } from '../core/files.js';
 import { withRequestWorkspace } from '../core/request-workspace.js';
 import {
@@ -59,6 +60,7 @@ export interface DeployCommandDependencies {
     error: unknown,
     phase: 'DRY_RUN' | 'DEPLOY',
   ) => Promise<void> | void;
+  signal?: AbortSignal;
 }
 
 export interface DeployCommandResult {
@@ -89,6 +91,8 @@ export async function runDeployCommand(
   const source = parseSourceSpec(options.from, cwd);
   const targetAlias = normalizeTargetAlias(options.to);
   const targetSource = parseSourceSpec(`org:${targetAlias}`, cwd);
+  const snapshotWaitMinutes = options.wait ?? 60;
+  const snapshotCommandTimeoutMs = salesforceWaitCommandTimeoutMs(snapshotWaitMinutes);
   const context = await createRunContext(cwd, options.reportDir, 'deploy');
   const generatedManifest = options.allMetadata === true || options.metadataType !== undefined
     ? await generateDeployableManifest({
@@ -97,6 +101,7 @@ export async function runDeployCommand(
       outputDirectory: path.join(context.rootDirectory, 'generated-manifest'),
       commandProjectPath,
       sfClient,
+      ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
     })
     : undefined;
   const manifestPath = generatedManifest?.manifestPath
@@ -115,6 +120,8 @@ export async function runDeployCommand(
       commandProjectPath,
       sfClient,
       waitMinutes: options.wait ?? 60,
+      commandTimeoutMs: snapshotCommandTimeoutMs,
+      ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
       ...(sourceManifests?.[0]?.empty === true ? { empty: true } : {}),
       ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
     }),
@@ -128,6 +135,8 @@ export async function runDeployCommand(
       commandProjectPath,
       sfClient,
       waitMinutes: options.wait ?? 60,
+      commandTimeoutMs: snapshotCommandTimeoutMs,
+      ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
       ...(sourceManifests?.[1]?.empty === true ? { empty: true } : {}),
       ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
     }),
@@ -150,6 +159,8 @@ export async function runDeployCommand(
       commandProjectPath,
       sfClient,
       waitMinutes: options.wait ?? 60,
+      commandTimeoutMs: snapshotCommandTimeoutMs,
+      ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
       metadataTypes: generatedManifest.metadataTypes,
       ...(generatedManifest.sourceManifests[1]!.empty ? { empty: true } : {}),
     });
@@ -193,6 +204,7 @@ export async function runDeployCommand(
         dependencies.onDeploymentSubmitted,
         dependencies.onDeploymentProgress,
         dependencies.onDeploymentPersistenceError,
+        dependencies.signal,
       ));
   if (dryRunResult !== undefined) {
     try {
@@ -221,6 +233,7 @@ export async function runDeployCommand(
         dependencies.onDeploymentSubmitted,
         dependencies.onDeploymentProgress,
         dependencies.onDeploymentPersistenceError,
+        dependencies.signal,
       ));
     try {
       await writeJson(path.join(context.logsDirectory, 'deploy.json'), deployResult);
@@ -281,6 +294,7 @@ async function runDeploymentRequest(
     error: unknown,
     phase: 'DRY_RUN' | 'DEPLOY',
   ) => Promise<void> | void,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   return await runAsyncSalesforceDeployment({
     sfClient,
@@ -301,6 +315,7 @@ async function runDeploymentRequest(
         await onPersistenceError(stage, error, phase);
       },
     }),
+    ...(signal === undefined ? {} : { signal }),
   });
 }
 

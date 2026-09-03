@@ -25,6 +25,7 @@ export interface SnapshotOptions {
   commandTimeoutMs?: number;
   metadataTypes?: MetadataTypeDescriptor[];
   empty?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface MetadataSnapshot {
@@ -74,6 +75,7 @@ export async function createSnapshot(options: SnapshotOptions): Promise<Metadata
       {
         cwd: options.commandProjectPath,
         ...(options.commandTimeoutMs === undefined ? {} : { timeoutMs: options.commandTimeoutMs }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       },
     );
     packageRoot = await findPackageRoot(rawDir);
@@ -93,6 +95,7 @@ export async function createSnapshot(options: SnapshotOptions): Promise<Metadata
       {
         cwd: options.source.projectPath,
         ...(options.commandTimeoutMs === undefined ? {} : { timeoutMs: options.commandTimeoutMs }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       },
     );
     packageRoot = await findPackageRoot(rawDir);

@@ -13,7 +13,7 @@ import {
 import type { WorkspaceService } from '../web/server/workspace-service.js';
 import { DeploymentCoordinator, ReconciliationRequiredError } from './deployment-coordinator.js';
 import { DeploymentJobRepository, type DeploymentJob } from './deployment-job-repository.js';
-import { runAsyncSalesforceDeployment } from './salesforce-deployment.js';
+import { reportSalesforceDeployment, runAsyncSalesforceDeployment } from './salesforce-deployment.js';
 import { assertDeploymentOrgIdentities } from './org-identity-verifier.js';
 
 export interface ApproveDeploymentRequest {
@@ -38,8 +38,9 @@ export class DeploymentService {
   ) {}
 
   public async approveAndExecute(input: ApproveDeploymentRequest): Promise<DeploymentJob> {
+    this.coordinator.assertAccepting();
     const job = await this.jobs.approveAndQueueDeployment(input);
-    void this.coordinator.runDeployment(job.id, async () => {
+    void this.coordinator.runDeployment(job.id, async (signal) => {
       const persistenceWarnings: string[] = [];
       try {
         const current = await this.jobs.getRequired(job.id);
@@ -67,6 +68,7 @@ export class DeploymentService {
             targetAlias: current.targetAlias,
             cwd,
             phase: 'DEPLOY',
+            signal,
             beforeSubmit: async () => {
               await assertDeploymentOrgIdentities(current, this.jobs, this.workspace);
             },
@@ -101,6 +103,49 @@ export class DeploymentService {
       }
     }).catch(() => undefined);
     return job;
+  }
+
+  public async reconcile(jobId: string, actorUserId: string): Promise<DeploymentJob> {
+    const job = await this.jobs.getRequired(jobId);
+    if (job.status !== 'RECONCILE_REQUIRED' || job.salesforceDeploymentId === undefined) {
+      throw new SfudError('INVALID_JOB_STATE', 'Salesforce 상태를 재확인할 수 있는 작업이 아닙니다.');
+    }
+    await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
+    const result = await withRequestWorkspace(this.workspace.defaultProject().realPath, async (cwd) =>
+      reportSalesforceDeployment({
+        sfClient: this.sfClient,
+        deploymentId: job.salesforceDeploymentId!,
+        targetAlias: job.targetAlias,
+        cwd,
+        phase: job.kind === 'DRY_RUN' ? 'DRY_RUN' : 'DEPLOY',
+      }));
+    const persistenceWarning = job.kind === 'DRY_RUN' && result.progress.done
+      && result.progress.success !== false && !job.prepared
+      ? '원격 dry-run은 성공했지만 고정 payload artifact가 없어 dry-run을 다시 실행해야 합니다.'
+      : undefined;
+    let reconciled = await this.jobs.recordReconciliationReport({
+      id: job.id,
+      actorUserId,
+      report: result.report,
+      progress: result.progress,
+      ...(persistenceWarning === undefined ? {} : { persistenceWarning }),
+    });
+    if (!result.progress.done) return reconciled;
+    if (result.progress.success === false
+      || !['Succeeded', 'SucceededPartial'].includes(result.progress.status)) {
+      return await this.jobs.transition(job.id, 'FAILED', {
+        remoteStatus: 'FAILED',
+        errorCode: 'REMOTE_DEPLOYMENT_FAILED',
+        errorMessage: `Salesforce 배포가 ${result.progress.status} 상태로 종료되었습니다.`,
+      });
+    }
+    if (job.kind === 'DRY_RUN' && !job.prepared) return reconciled;
+    reconciled = await this.jobs.transition(
+      job.id,
+      job.kind === 'DRY_RUN' ? 'APPROVAL_PENDING' : 'SUCCEEDED',
+      { remoteStatus: 'SUCCEEDED' },
+    );
+    return reconciled;
   }
 
   private async resolvePreparedPackageRoot(dryRun: DeploymentJob): Promise<string> {

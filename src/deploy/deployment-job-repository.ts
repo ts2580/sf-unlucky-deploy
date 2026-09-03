@@ -147,7 +147,7 @@ const ALLOWED_TRANSITIONS: Record<DeploymentJobStatus, ReadonlySet<DeploymentJob
   DEPLOYING: new Set(['SUCCEEDED', 'FAILED', 'RECONCILE_REQUIRED']),
   SUCCEEDED: new Set(),
   FAILED: new Set(),
-  RECONCILE_REQUIRED: new Set(['SUCCEEDED', 'FAILED']),
+  RECONCILE_REQUIRED: new Set(['APPROVAL_PENDING', 'SUCCEEDED', 'FAILED']),
 };
 
 export class DeploymentJobRepository {
@@ -538,6 +538,42 @@ export class DeploymentJobRepository {
       const job = await getRequired(transaction, id);
       await this.writeAudit(transaction, job.createdBy, 'ORG_IDENTITY_MISMATCH', id, detail, timestamp);
     });
+  }
+
+  public async recordReconciliationReport(input: {
+    id: string;
+    actorUserId: string;
+    report: unknown;
+    progress: SalesforceDeploymentProgress;
+    persistenceWarning?: string;
+  }): Promise<DeploymentJob> {
+    const timestamp = this.now();
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const current = await getRequired(transaction, input.id);
+      if (current.status !== 'RECONCILE_REQUIRED') {
+        throw new SfudError('INVALID_JOB_STATE', '재확인 가능한 배포 작업이 아닙니다.');
+      }
+      await transaction.run(`
+        UPDATE deployment_jobs
+        SET progress_json = ?, salesforce_deployment_id = ?, remote_status = ?,
+            deployment_result_json = CASE WHEN kind = 'DEPLOY' THEN ? ELSE deployment_result_json END,
+            persistence_warning = COALESCE(?, persistence_warning), updated_at = ?
+        WHERE id = ? AND status = 'RECONCILE_REQUIRED'
+      `,
+      JSON.stringify(input.progress),
+      input.progress.deploymentId,
+      remoteStatusFromProgress(input.progress),
+      JSON.stringify(input.report),
+      input.persistenceWarning ?? null,
+      timestamp,
+      input.id);
+      await this.writeAudit(transaction, input.actorUserId, 'DEPLOYMENT_RECONCILED', input.id, {
+        deploymentId: input.progress.deploymentId,
+        remoteStatus: remoteStatusFromProgress(input.progress),
+        done: input.progress.done,
+      }, timestamp);
+    });
+    return this.notify(await this.getRequired(input.id));
   }
 
   public async recordDirectDeploymentArtifacts(input: {

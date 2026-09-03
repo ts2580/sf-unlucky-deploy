@@ -104,6 +104,37 @@ describe('Salesforce 비동기 배포', () => {
       { stage: 'progress', message: 'database locked' },
     ]);
   });
+
+  it('report command timeout을 전체 deadline의 남은 시간 이하로 제한한다', async () => {
+    let currentTimeMs = 0;
+    const calls: Array<{ args: readonly string[]; options: SfRunOptions }> = [];
+    const client: SfClient = {
+      async runJson(args, options) {
+        calls.push({ args, options });
+        if (args[2] === 'start') {
+          currentTimeMs = 50_000;
+          return { status: 0, result: { id: '0Af-deadline', status: 'Queued', done: false } };
+        }
+        return { status: 0, result: {
+          id: '0Af-deadline', status: 'Succeeded', done: true, success: true,
+        } };
+      },
+    };
+
+    await runAsyncSalesforceDeployment({
+      sfClient: client,
+      startArgs: ['project', 'deploy', 'start', '--target-org', 'target', '--metadata-dir', '/payload'],
+      targetAlias: 'target',
+      cwd: '/project',
+      phase: 'DEPLOY',
+      waitMinutes: 1,
+      now: () => new Date(currentTimeMs),
+      sleep: async () => undefined,
+    });
+
+    const reportCall = calls.find((call) => call.args[2] === 'report');
+    expect(reportCall?.options.timeoutMs).toBe(10_000);
+  });
 });
 
 class ProgressSfClient implements SfClient {

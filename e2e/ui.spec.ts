@@ -458,18 +458,25 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   let deploymentPolls = 0;
   let directDeploymentPolls = 0;
   await page.route('**/api/v1/deployment-jobs**', async (route) => {
-    if (new URL(route.request().url()).pathname === '/api/v1/deployment-jobs') {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname === '/api/v1/deployment-jobs') {
       await route.fulfill({ json: { jobs: [] } });
       return;
     }
-    if (new URL(route.request().url()).pathname.endsWith('/direct-deploy-1')) {
+    if (pathname.endsWith('/direct-deploy-1/reconcile')) {
+      expect(route.request().method()).toBe('POST');
+      expect(route.request().headers()['x-sfud-csrf']).toMatch(/^[A-Za-z0-9_-]{32,}$/u);
+      await route.fulfill({ json: { job: directDeploymentFixture('SUCCEEDED') } });
+      return;
+    }
+    if (pathname.endsWith('/direct-deploy-1')) {
       directDeploymentPolls += 1;
       await route.fulfill({ json: { job: directDeploymentFixture(
-        directDeploymentPolls > 1 ? 'SUCCEEDED' : 'DEPLOYING',
+        directDeploymentPolls > 1 ? 'RECONCILE_REQUIRED' : 'DEPLOYING',
       ) } });
       return;
     }
-    if (new URL(route.request().url()).pathname.endsWith('/deploy-1')) {
+    if (pathname.endsWith('/deploy-1')) {
       deploymentPolls += 1;
       await route.fulfill({ json: { job: deploymentFixture(deploymentPolls > 1 ? 'SUCCEEDED' : 'DEPLOYING') } });
       return;
@@ -558,6 +565,8 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByText('Salesforce 실제 배포 중')).toBeVisible();
   await expect(page.getByLabel('실제 배포 현황')).toContainText(/InProgress · 소요시간 \d+초/u);
   await expect(page.getByLabel('실제 배포 현황')).toContainText('컴포넌트 1/2');
+  await expect(page.getByText('Salesforce 상태 재확인이 필요합니다.')).toBeVisible({ timeout: 5_000 });
+  await page.getByRole('button', { name: 'Salesforce 상태 다시 확인' }).click();
   await expect(page.getByRole('heading', { name: 'Salesforce 실제 배포 성공' })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByText(/Hello_Test · 코드 커버리지 80.00%/u)).toBeVisible();
   await page.getByRole('combobox', { name: 'Salesforce metadata type' }).fill('CustomObject');
@@ -807,11 +816,17 @@ function deploymentFixture(status: 'QUEUED' | 'DEPLOYING' | 'SUCCEEDED') {
   };
 }
 
-function directDeploymentFixture(status: 'QUEUED' | 'DEPLOYING' | 'SUCCEEDED') {
+function directDeploymentFixture(status: 'QUEUED' | 'DEPLOYING' | 'SUCCEEDED' | 'RECONCILE_REQUIRED') {
   return {
-    ...deploymentFixture(status),
+    ...deploymentFixture(status === 'RECONCILE_REQUIRED' ? 'DEPLOYING' : status),
     id: 'direct-deploy-1',
+    status,
     testPlan: { level: 'RunSpecifiedTests', tests: ['Hello_Test'], selection: 'explicit' },
     ...(status === 'SUCCEEDED' ? { testCoverage: 80 } : {}),
+    ...(status === 'RECONCILE_REQUIRED' ? {
+      salesforceDeploymentId: '0Af-direct-deploy',
+      remoteStatus: 'UNKNOWN',
+      errorMessage: 'Salesforce CLI 연결이 종료되어 원격 상태를 확인하지 못했습니다.',
+    } : {}),
   };
 }

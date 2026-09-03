@@ -16,6 +16,7 @@ interface DeployableManifestOptions {
   outputDirectory: string;
   commandProjectPath: string;
   sfClient: SfClient;
+  signal?: AbortSignal;
 }
 
 interface ParsedManifest {
@@ -70,6 +71,7 @@ export async function generateDeployableManifest(
       await options.sfClient.runJson(args, {
         cwd: options.commandProjectPath,
         timeoutMs: options.metadataTypes === undefined ? 35 * 60 * 1000 : 5 * 60 * 1000,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
       metadataTypes = parseMetadataTypes(await options.sfClient.runJson([
         'org',
@@ -79,7 +81,11 @@ export async function generateDeployableManifest(
         source.alias,
         '--api-version',
         apiVersion,
-      ], { cwd: options.commandProjectPath, timeoutMs: 60_000 }));
+      ], {
+        cwd: options.commandProjectPath,
+        timeoutMs: 60_000,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      }));
     } else {
       const sourceDirectories = await readPackageDirectories(source.projectPath);
       for (const sourcePath of sourceDirectories) {
@@ -88,6 +94,7 @@ export async function generateDeployableManifest(
       await options.sfClient.runJson(args, {
         cwd: source.projectPath,
         timeoutMs: options.metadataTypes === undefined ? 35 * 60 * 1000 : 5 * 60 * 1000,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
       metadataTypes = await discoverLocalMetadataTypes(sourceDirectories);
     }

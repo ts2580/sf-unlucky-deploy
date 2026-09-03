@@ -30,13 +30,13 @@ export class DeploymentCoordinator {
 
   public runDryRun(
     jobId: string,
-    task: () => Promise<SalesforceJobResult>,
+    task: (signal: AbortSignal) => Promise<SalesforceJobResult>,
   ): Promise<DeploymentJob> {
-    return this.queue.enqueue(jobId, async () => {
+    return this.queue.enqueue(jobId, async (signal) => {
       await this.jobs.transition(jobId, 'DRY_RUN_RUNNING');
       let result: SalesforceJobResult;
       try {
-        result = await task();
+        result = await task(signal);
       } catch (error) {
         await this.recordFailure(jobId, error);
         throw error;
@@ -47,19 +47,23 @@ export class DeploymentCoordinator {
 
   public runDeployment(
     jobId: string,
-    task: () => Promise<SalesforceJobResult>,
+    task: (signal: AbortSignal) => Promise<SalesforceJobResult>,
   ): Promise<DeploymentJob> {
-    return this.queue.enqueue(jobId, async () => {
+    return this.queue.enqueue(jobId, async (signal) => {
       await this.jobs.transition(jobId, 'DEPLOYING');
       let result: SalesforceJobResult;
       try {
-        result = await task();
+        result = await task(signal);
       } catch (error) {
         await this.recordFailure(jobId, error);
         throw error;
       }
       return await this.jobs.transition(jobId, 'SUCCEEDED', successDetails(result));
     });
+  }
+
+  public assertAccepting(): void {
+    this.queue.assertAccepting();
   }
 
   private async recordFailure(jobId: string, error: unknown): Promise<void> {

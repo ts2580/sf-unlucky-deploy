@@ -30,6 +30,7 @@ export class ComparisonService {
   ) {}
 
   public async create(input: CreateComparisonInput): Promise<ComparisonJob> {
+    this.queue.assertAccepting();
     const scope = input.scope ?? 'manifest';
     const rightSource = await this.workspace.resolveSource(input.rightSourceId, input.createdBy);
     const leftSource = input.sourceOnly === true
@@ -66,6 +67,7 @@ export class ComparisonService {
     );
     let job: ComparisonJob;
     try {
+      this.queue.assertAccepting();
       job = await this.repository.create({
         scope: scope === 'all' ? 'ALL' : 'MANIFEST',
         ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
@@ -81,9 +83,9 @@ export class ComparisonService {
       releaseSources();
       throw error;
     }
-    void this.queue.enqueue(job.id, async () => {
+    void this.queue.enqueue(job.id, async (signal) => {
       try {
-        await this.execute(job.id);
+        await this.execute(job.id, signal);
       } finally {
         releaseSources();
       }
@@ -91,7 +93,7 @@ export class ComparisonService {
     return job;
   }
 
-  private async execute(jobId: string): Promise<void> {
+  private async execute(jobId: string, signal: AbortSignal): Promise<void> {
     await this.repository.markRunning(jobId);
     const job = await this.repository.getRequired(jobId);
     try {
@@ -113,6 +115,7 @@ export class ComparisonService {
         cwd: job.projectPath,
         sfClient: this.sfClient,
         stdout: () => undefined,
+        signal,
       });
       await this.repository.markSucceeded(job.id, result.comparison, result.runDirectory);
     } catch (error) {

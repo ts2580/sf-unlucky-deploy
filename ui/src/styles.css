@@ -89,6 +89,7 @@ button:focus-visible, a:focus-visible { outline: 3px solid #60a5fa; outline-offs
 .button-primary { color: white; background: linear-gradient(135deg, #1789e9, #0867c9); box-shadow: 0 8px 18px #0867c939; }
 .button-primary .icon:last-child { width: .95rem; margin-left: 2px; }
 .button-secondary { color: #25415f; border: 1px solid #d7e2ed; background: white; }
+.compare-error .reconcile-button{margin-top:12px}
 .button-danger { color: white; border: 1px solid #b42318; background: linear-gradient(135deg,#cf3f32,#a9271e); box-shadow: 0 7px 17px rgba(180,35,24,.18); }
 .button-busy .icon:first-child { animation: spin 1.05s linear infinite; }
 .hero-visual { position: relative; z-index: 2; height: 100%; min-height: 335px; display: grid; place-items: center; }

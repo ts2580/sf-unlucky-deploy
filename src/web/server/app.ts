@@ -51,8 +51,7 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
   );
   app.decorate('sfudRuntime', runtime);
   app.addHook('onClose', async () => {
-    await runtime.workspace.close();
-    await runtime.store.close();
+    await runtime.shutdown();
   });
 
   await app.register(fastifyMultipart, {

@@ -32,6 +32,7 @@ export interface WebRuntime {
   workflowEvents: WorkflowEventHub;
   recoveredJobCount: number;
   recoveredComparisonCount: number;
+  shutdown(graceMs?: number): Promise<void>;
 }
 
 export async function createWebRuntime(
@@ -84,7 +85,8 @@ export async function createWebRuntime(
     'runs',
   );
   const deploymentCoordinator = new DeploymentCoordinator(deploymentJobs, deploymentQueue);
-  return {
+  let shutdownRequest: Promise<void> | undefined;
+  const runtime: WebRuntime = {
     store,
     users: new UserRepository(store.database),
     settings: new UserSettingsRepository(store.database),
@@ -118,5 +120,33 @@ export async function createWebRuntime(
     workflowEvents,
     recoveredJobCount,
     recoveredComparisonCount,
+    shutdown(graceMs = 10_000): Promise<void> {
+      if (shutdownRequest !== undefined) return shutdownRequest;
+      deploymentQueue.stopAccepting();
+      comparisonQueue.stopAccepting();
+      shutdownRequest = (async () => {
+        const drained = await Promise.all([
+          deploymentQueue.waitForIdle(graceMs),
+          comparisonQueue.waitForIdle(graceMs),
+        ]);
+        if (drained.some((value) => !value)) {
+          deploymentQueue.abort();
+          comparisonQueue.abort();
+          const aborted = await Promise.all([
+            deploymentQueue.waitForIdle(5_000),
+            comparisonQueue.waitForIdle(5_000),
+          ]);
+          if (aborted.some((value) => !value)) {
+            throw new Error('실행 중인 작업이 종료 제한시간 안에 중단되지 않았습니다. 저장소를 닫지 않습니다.');
+          }
+        }
+        await deploymentJobs.recoverInterruptedJobs();
+        await comparisonJobs.recoverInterrupted();
+        await workspace.close();
+        await store.close();
+      })();
+      return shutdownRequest;
+    },
   };
+  return runtime;
 }
