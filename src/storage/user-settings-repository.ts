@@ -1,5 +1,4 @@
-import type { Database } from 'sqlite';
-
+import type { DatabaseExecutor } from './database-executor.js';
 import { runInImmediateTransaction } from './transaction.js';
 
 export const DEFAULT_TEST_CLASS_SUFFIX = '_Test';
@@ -10,7 +9,7 @@ export interface UserSettings {
 
 export class UserSettingsRepository {
   public constructor(
-    private readonly database: Database,
+    private readonly database: DatabaseExecutor,
     private readonly now: () => string = () => new Date().toISOString(),
   ) {}
 
@@ -24,15 +23,15 @@ export class UserSettingsRepository {
   public async update(userId: string, testClassSuffixInput: string): Promise<UserSettings> {
     const testClassSuffix = normalizeTestClassSuffix(testClassSuffixInput);
     const timestamp = this.now();
-    await runInImmediateTransaction(this.database, async () => {
-      await this.database.run(`
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      await transaction.run(`
         INSERT INTO user_settings (user_id, test_class_suffix, updated_at)
         VALUES (?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
           test_class_suffix = excluded.test_class_suffix,
           updated_at = excluded.updated_at
       `, userId, testClassSuffix, timestamp);
-      await this.database.run(`
+      await transaction.run(`
         INSERT INTO audit_events (
           actor_user_id, event_type, entity_type, entity_id, detail_json, created_at
         ) VALUES (?, 'USER_SETTINGS_UPDATED', 'USER_SETTINGS', ?, ?, ?)

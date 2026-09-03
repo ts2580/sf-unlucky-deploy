@@ -51,6 +51,49 @@ describe('SQLite 저장소', () => {
     await expect(readFile(databasePath)).resolves.toBeInstanceOf(Buffer);
   });
 
+  it('트랜잭션 롤백 중 독립 쿼리를 대기시키고 롤백 뒤 순서대로 실행한다', async () => {
+    const store = await openMemoryStore();
+    await store.database.exec(`
+      CREATE TABLE executor_regression (
+        id TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
+    `);
+    await store.database.run(`
+      INSERT INTO executor_regression (id, value) VALUES ('inside', 'initial'), ('outside', 'initial')
+    `);
+
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const transaction = store.database.transaction(async (database) => {
+      await database.run("UPDATE executor_regression SET value = 'rolled-back' WHERE id = 'inside'");
+      entered.resolve();
+      await release.promise;
+      throw new Error('rollback requested');
+    });
+    const rejected = expect(transaction).rejects.toThrow('rollback requested');
+
+    await entered.promise;
+    let outsideSettled = false;
+    const outsideWrite = store.database.run(
+      "UPDATE executor_regression SET value = 'committed' WHERE id = 'outside'",
+    ).then(() => {
+      outsideSettled = true;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(outsideSettled).toBe(false);
+
+    release.resolve();
+    await rejected;
+    await outsideWrite;
+    await expect(store.database.all(`
+      SELECT id, value FROM executor_regression ORDER BY id
+    `)).resolves.toEqual([
+      { id: 'inside', value: 'initial' },
+      { id: 'outside', value: 'committed' },
+    ]);
+  });
+
   it('v8 승인 이력을 보존하면서 직접 배포를 허용하는 v9로 마이그레이션한다', async () => {
     const database = await open({ filename: ':memory:', driver: sqlite3.Database });
     try {
@@ -285,6 +328,17 @@ async function openMemoryStore(): Promise<SqliteStore> {
   const store = await openSqliteStore({ databasePath: ':memory:', now: fixedNow });
   stores.push(store);
   return store;
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
 }
 
 function fixedNow(): string {

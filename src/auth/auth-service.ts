@@ -1,7 +1,6 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 
-import type { Database } from 'sqlite';
-
+import type { DatabaseExecutor, DatabaseHandle } from '../storage/database-executor.js';
 import { runInImmediateTransaction } from '../storage/transaction.js';
 import type { SfudUser, UserRole } from '../storage/user-repository.js';
 import { hashPassword, verifyPassword } from './password.js';
@@ -48,7 +47,7 @@ export class AuthService {
   private bootstrapToken: string | undefined;
 
   public constructor(
-    private readonly database: Database,
+    private readonly database: DatabaseExecutor,
     bootstrapToken: string | undefined,
     private readonly now: () => Date = () => new Date(),
     private readonly createId: () => string = randomUUID,
@@ -81,20 +80,20 @@ export class AuthService {
     const userId = this.createId();
     const timestamp = this.now().toISOString();
 
-    await runInImmediateTransaction(this.database, async () => {
-      const row = await this.database.get<{ count: number }>('SELECT COUNT(*) count FROM users');
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const row = await transaction.get<{ count: number }>('SELECT COUNT(*) count FROM users');
       if ((row?.count ?? 0) !== 0) {
         throw new AuthError('BOOTSTRAP_DENIED', '최초 관리자 설정이 이미 완료되었습니다.');
       }
-      await this.database.run(`
+      await transaction.run(`
         INSERT INTO users (id, email, display_name, role, created_at, updated_at)
         VALUES (?, ?, ?, 'ADMIN', ?, ?)
       `, userId, email, displayName, timestamp, timestamp);
-      await this.database.run(`
+      await transaction.run(`
         INSERT INTO password_credentials (user_id, password_digest, updated_at)
         VALUES (?, ?, ?)
       `, userId, passwordDigest, timestamp);
-      await this.writeAudit(userId, 'ADMIN_BOOTSTRAPPED', userId, { email }, timestamp);
+      await this.writeAudit(transaction, userId, 'ADMIN_BOOTSTRAPPED', userId, { email }, timestamp);
     });
     this.bootstrapToken = undefined;
     return this.createSession(userId);
@@ -183,20 +182,20 @@ export class AuthService {
     const passwordDigest = await hashPassword(input.password);
     const userId = this.createId();
     const timestamp = this.now().toISOString();
-    await runInImmediateTransaction(this.database, async () => {
-      const existing = await this.database.get<{ id: string }>('SELECT id FROM users WHERE email = ?', email);
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const existing = await transaction.get<{ id: string }>('SELECT id FROM users WHERE email = ?', email);
       if (existing !== undefined) {
         throw new UserAdministrationError('EMAIL_EXISTS', '이미 등록된 이메일입니다.');
       }
-      await this.database.run(`
+      await transaction.run(`
         INSERT INTO users (id, email, display_name, role, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
       `, userId, email, displayName, input.role, timestamp, timestamp);
-      await this.database.run(`
+      await transaction.run(`
         INSERT INTO password_credentials (user_id, password_digest, updated_at)
         VALUES (?, ?, ?)
       `, userId, passwordDigest, timestamp);
-      await this.writeUserAudit(input.actorUserId, 'USER_CREATED', userId, {
+      await this.writeUserAudit(transaction, input.actorUserId, 'USER_CREATED', userId, {
         email,
         displayName,
         role: input.role,
@@ -211,8 +210,8 @@ export class AuthService {
       throw new UserAdministrationError('NO_CHANGES', '변경할 사용자 설정이 없습니다.');
     }
     const timestamp = this.now().toISOString();
-    await runInImmediateTransaction(this.database, async () => {
-      const current = await this.database.get<{
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const current = await transaction.get<{
         id: string;
         role: UserRole;
         disabled_at: string | null;
@@ -233,7 +232,7 @@ export class AuthService {
         && current.disabled_at === null
         && (nextRole !== 'ADMIN' || nextDisabled)
       ) {
-        const others = await this.database.get<{ count: number }>(`
+        const others = await transaction.get<{ count: number }>(`
           SELECT COUNT(*) count FROM users
           WHERE id <> ? AND role = 'ADMIN' AND disabled_at IS NULL
         `, input.userId);
@@ -242,22 +241,23 @@ export class AuthService {
         }
       }
       const disabledAt = nextDisabled ? current.disabled_at ?? timestamp : null;
-      await this.database.run(`
+      await transaction.run(`
         UPDATE users SET role = ?, disabled_at = ?, updated_at = ? WHERE id = ?
       `, nextRole, disabledAt, timestamp, input.userId);
       if (nextDisabled && current.disabled_at === null) {
-        await this.database.run(`
+        await transaction.run(`
           UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL
         `, timestamp, input.userId);
       }
       if (nextRole !== current.role) {
-        await this.writeUserAudit(input.actorUserId, 'USER_ROLE_CHANGED', input.userId, {
+        await this.writeUserAudit(transaction, input.actorUserId, 'USER_ROLE_CHANGED', input.userId, {
           previousRole: current.role,
           role: nextRole,
         }, timestamp);
       }
       if (nextDisabled !== (current.disabled_at !== null)) {
         await this.writeUserAudit(
+          transaction,
           input.actorUserId,
           nextDisabled ? 'USER_DISABLED' : 'USER_ENABLED',
           input.userId,
@@ -275,16 +275,16 @@ export class AuthService {
     const createdAt = this.now();
     const expiresAt = new Date(createdAt.getTime() + SESSION_LIFETIME_MS).toISOString();
     const sessionId = this.createId();
-    await runInImmediateTransaction(this.database, async () => {
-      await this.database.run(`
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      await transaction.run(`
         INSERT INTO sessions (
           id, user_id, token_hash, csrf_token_hash, expires_at, created_at
         ) VALUES (?, ?, ?, ?, ?, ?)
       `, sessionId, userId, hashSecret(sessionToken), hashSecret(csrfToken), expiresAt, createdAt.toISOString());
-      await this.database.run(`
+      await transaction.run(`
         DELETE FROM sessions WHERE expires_at <= ? OR revoked_at IS NOT NULL
       `, createdAt.toISOString());
-      await this.writeAudit(userId, 'SESSION_CREATED', sessionId, {}, createdAt.toISOString());
+      await this.writeAudit(transaction, userId, 'SESSION_CREATED', sessionId, {}, createdAt.toISOString());
     });
     const user = await this.getUserRequired(userId);
     return { user, csrfToken, expiresAt, sessionToken };
@@ -311,26 +311,28 @@ export class AuthService {
   }
 
   private async writeAudit(
+    database: DatabaseHandle,
     actorUserId: string,
     eventType: string,
     entityId: string,
     detail: Record<string, unknown>,
     timestamp: string,
   ): Promise<void> {
-    await this.database.run(`
+    await database.run(`
       INSERT INTO audit_events (actor_user_id, event_type, entity_type, entity_id, detail_json, created_at)
       VALUES (?, ?, 'AUTH', ?, ?, ?)
     `, actorUserId, eventType, entityId, JSON.stringify(detail), timestamp);
   }
 
   private async writeUserAudit(
+    database: DatabaseHandle,
     actorUserId: string,
     eventType: string,
     entityId: string,
     detail: Record<string, unknown>,
     timestamp: string,
   ): Promise<void> {
-    await this.database.run(`
+    await database.run(`
       INSERT INTO audit_events (actor_user_id, event_type, entity_type, entity_id, detail_json, created_at)
       VALUES (?, ?, 'USER', ?, ?, ?)
     `, actorUserId, eventType, entityId, JSON.stringify(detail), timestamp);

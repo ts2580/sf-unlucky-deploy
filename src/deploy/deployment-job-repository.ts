@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Database } from 'sqlite';
-
 import { SfudError } from '../core/errors.js';
+import type { DatabaseExecutor, DatabaseHandle } from '../storage/database-executor.js';
 import { runInImmediateTransaction } from '../storage/transaction.js';
 import type { ComparisonResult } from '../metadata/comparator.js';
 import type { ApexTestPlan, RequestedTestLevel } from './test-plan.js';
@@ -124,7 +123,7 @@ const ALLOWED_TRANSITIONS: Record<DeploymentJobStatus, ReadonlySet<DeploymentJob
 
 export class DeploymentJobRepository {
   public constructor(
-    private readonly database: Database,
+    private readonly database: DatabaseExecutor,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly createId: () => string = randomUUID,
     private readonly onChanged?: (job: DeploymentJob) => void,
@@ -134,8 +133,8 @@ export class DeploymentJobRepository {
     assertChecksum(input.payloadChecksum);
     const id = this.createId();
     const timestamp = this.now();
-    await runInImmediateTransaction(this.database, async () => {
-      await this.database.run(`
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      await transaction.run(`
         INSERT INTO deployment_jobs (
           id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
           run_directory, selected_components_json, created_by, created_at, updated_at
@@ -154,7 +153,7 @@ export class DeploymentJobRepository {
         timestamp,
         timestamp,
       );
-      await this.writeAudit(input.createdBy, 'DRY_RUN_QUEUED', id, {
+      await this.writeAudit(transaction, input.createdBy, 'DRY_RUN_QUEUED', id, {
         targetAlias: input.targetAlias,
         payloadChecksum: input.payloadChecksum,
       }, timestamp);
@@ -172,8 +171,8 @@ export class DeploymentJobRepository {
     assertChecksum(input.payloadChecksum);
     const id = this.createId();
     const timestamp = this.now();
-    await runInImmediateTransaction(this.database, async () => {
-      const deployer = await this.database.get<{ role: string; disabled_at: string | null }>(
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const deployer = await transaction.get<{ role: string; disabled_at: string | null }>(
         'SELECT role, disabled_at FROM users WHERE id = ?',
         input.createdBy,
       );
@@ -184,7 +183,7 @@ export class DeploymentJobRepository {
       ) {
         throw new SfudError('APPROVAL_DENIED', '실제 배포 권한이 없습니다.');
       }
-      await this.database.run(`
+      await transaction.run(`
         INSERT INTO deployment_jobs (
           id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
           run_directory, selected_components_json, created_by, created_at, updated_at
@@ -203,7 +202,7 @@ export class DeploymentJobRepository {
         timestamp,
         timestamp,
       );
-      await this.writeAudit(input.createdBy, 'DIRECT_DEPLOYMENT_QUEUED', id, {
+      await this.writeAudit(transaction, input.createdBy, 'DIRECT_DEPLOYMENT_QUEUED', id, {
         targetAlias: input.targetAlias,
         payloadChecksum: input.payloadChecksum,
         testLevel: input.requestedTestLevel,
@@ -234,8 +233,8 @@ export class DeploymentJobRepository {
     nextStatus: DeploymentJobStatus,
     details: TransitionDetails = {},
   ): Promise<DeploymentJob> {
-    await runInImmediateTransaction(this.database, async () => {
-      const current = await this.getRequired(id);
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const current = await getRequired(transaction, id);
       assertTransition(current, nextStatus);
       const timestamp = this.now();
       const startedAt = nextStatus === 'DRY_RUN_RUNNING' || nextStatus === 'DEPLOYING'
@@ -244,7 +243,7 @@ export class DeploymentJobRepository {
       const completedAt = nextStatus === 'APPROVAL_PENDING' || nextStatus === 'SUCCEEDED' || nextStatus === 'FAILED'
         ? timestamp
         : null;
-      const result = await this.database.run(`
+      const result = await transaction.run(`
         UPDATE deployment_jobs
         SET status = ?, updated_at = ?, started_at = ?, completed_at = ?,
             salesforce_deployment_id = COALESCE(?, salesforce_deployment_id),
@@ -264,7 +263,7 @@ export class DeploymentJobRepository {
       if (result.changes !== 1) {
         throw new SfudError('INVALID_JOB_STATE', `배포 작업 상태가 동시에 변경되었습니다: ${id}`);
       }
-      await this.writeAudit(current.createdBy, 'DEPLOYMENT_STATUS_CHANGED', id, {
+      await this.writeAudit(transaction, current.createdBy, 'DEPLOYMENT_STATUS_CHANGED', id, {
         from: current.status,
         to: nextStatus,
         ...(details.salesforceDeploymentId === undefined
@@ -286,8 +285,8 @@ export class DeploymentJobRepository {
   }): Promise<void> {
     assertChecksum(input.payloadChecksum);
     const timestamp = this.now();
-    await runInImmediateTransaction(this.database, async () => {
-      const result = await this.database.run(`
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const result = await transaction.run(`
         UPDATE deployment_jobs
         SET payload_checksum = ?, run_directory = ?, is_prepared = 1,
             comparison_result_json = ?, test_plan_json = ?, dry_run_result_json = ?, updated_at = ?
@@ -303,8 +302,8 @@ export class DeploymentJobRepository {
       if (result.changes !== 1) {
         throw new SfudError('INVALID_JOB_STATE', 'dry-run 결과를 기록할 수 없는 작업 상태입니다.');
       }
-      const job = await this.getRequired(input.id);
-      await this.writeAudit(job.createdBy, 'DRY_RUN_ARTIFACTS_RECORDED', input.id, {
+      const job = await getRequired(transaction, input.id);
+      await this.writeAudit(transaction, job.createdBy, 'DRY_RUN_ARTIFACTS_RECORDED', input.id, {
         payloadChecksum: input.payloadChecksum,
         testLevel: input.testPlan.level,
         different: input.comparisonResult.summary.different,
@@ -321,8 +320,8 @@ export class DeploymentJobRepository {
 
     let deployJobId = '';
     try {
-      await runInImmediateTransaction(this.database, async () => {
-        const dryRun = await this.getRequired(input.dryRunJobId);
+      await runInImmediateTransaction(this.database, async (transaction) => {
+        const dryRun = await getRequired(transaction, input.dryRunJobId);
         if (dryRun.kind !== 'DRY_RUN' || dryRun.status !== 'APPROVAL_PENDING') {
           throw new SfudError('APPROVAL_DENIED', '승인 가능한 성공한 dry-run 작업이 아닙니다.');
         }
@@ -343,7 +342,7 @@ export class DeploymentJobRepository {
           throw new SfudError('APPROVAL_DENIED', 'dry-run 배포 아티팩트가 완전하지 않습니다.');
         }
 
-        const approver = await this.database.get<{ role: string; disabled_at: string | null }>(
+        const approver = await transaction.get<{ role: string; disabled_at: string | null }>(
           'SELECT role, disabled_at FROM users WHERE id = ?',
           input.approvedBy,
         );
@@ -354,7 +353,7 @@ export class DeploymentJobRepository {
         ) {
           throw new SfudError('APPROVAL_DENIED', '실제 배포 승인 권한이 없습니다.');
         }
-        const existingApproval = await this.database.get<{ existing: number }>(
+        const existingApproval = await transaction.get<{ existing: number }>(
           'SELECT 1 existing FROM deployment_approvals WHERE dry_run_job_id = ?',
           dryRun.id,
         );
@@ -364,7 +363,7 @@ export class DeploymentJobRepository {
 
         const timestamp = this.now();
         deployJobId = this.createId();
-        await this.database.run(`
+        await transaction.run(`
         INSERT INTO deployment_jobs (
           id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
           run_directory, selected_components_json, dry_run_job_id, is_prepared,
@@ -389,7 +388,7 @@ export class DeploymentJobRepository {
         timestamp,
         timestamp,
       );
-        await this.database.run(`
+        await transaction.run(`
         INSERT INTO deployment_approvals (
           id, dry_run_job_id, deploy_job_id, approved_by,
           payload_checksum, target_alias, approved_at
@@ -403,7 +402,7 @@ export class DeploymentJobRepository {
         dryRun.targetAlias,
         timestamp,
       );
-        await this.writeAudit(input.approvedBy, 'DEPLOYMENT_APPROVED', deployJobId, {
+        await this.writeAudit(transaction, input.approvedBy, 'DEPLOYMENT_APPROVED', deployJobId, {
           dryRunJobId: dryRun.id,
           targetAlias: dryRun.targetAlias,
           payloadChecksum: dryRun.payloadChecksum,
@@ -458,31 +457,33 @@ export class DeploymentJobRepository {
   }): Promise<void> {
     assertChecksum(input.payloadChecksum);
     const timestamp = this.now();
-    const result = await this.database.run(`
-      UPDATE deployment_jobs
-      SET payload_checksum = ?, run_directory = ?, is_prepared = 1,
-          comparison_result_json = ?, test_plan_json = ?, dry_run_result_json = ?,
-          deployment_result_json = ?, updated_at = ?
-      WHERE id = ? AND kind = 'DEPLOY' AND dry_run_job_id IS NULL AND status = 'DEPLOYING'
-    `,
-    input.payloadChecksum,
-    input.runDirectory,
-    JSON.stringify(input.comparisonResult),
-    JSON.stringify(input.testPlan),
-    input.dryRunResult === undefined ? null : JSON.stringify(input.dryRunResult),
-    JSON.stringify(input.deploymentResult),
-    timestamp,
-    input.id);
-    if (result.changes !== 1) {
-      throw new SfudError('INVALID_JOB_STATE', '직접 배포 결과를 기록할 수 없는 작업 상태입니다.');
-    }
-    const job = await this.getRequired(input.id);
-    await this.writeAudit(job.createdBy, 'DIRECT_DEPLOYMENT_ARTIFACTS_RECORDED', input.id, {
-      payloadChecksum: input.payloadChecksum,
-      testLevel: input.testPlan.level,
-      tests: input.testPlan.tests,
-      different: input.comparisonResult.summary.different,
-    }, timestamp);
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const result = await transaction.run(`
+        UPDATE deployment_jobs
+        SET payload_checksum = ?, run_directory = ?, is_prepared = 1,
+            comparison_result_json = ?, test_plan_json = ?, dry_run_result_json = ?,
+            deployment_result_json = ?, updated_at = ?
+        WHERE id = ? AND kind = 'DEPLOY' AND dry_run_job_id IS NULL AND status = 'DEPLOYING'
+      `,
+      input.payloadChecksum,
+      input.runDirectory,
+      JSON.stringify(input.comparisonResult),
+      JSON.stringify(input.testPlan),
+      input.dryRunResult === undefined ? null : JSON.stringify(input.dryRunResult),
+      JSON.stringify(input.deploymentResult),
+      timestamp,
+      input.id);
+      if (result.changes !== 1) {
+        throw new SfudError('INVALID_JOB_STATE', '직접 배포 결과를 기록할 수 없는 작업 상태입니다.');
+      }
+      const job = await getRequired(transaction, input.id);
+      await this.writeAudit(transaction, job.createdBy, 'DIRECT_DEPLOYMENT_ARTIFACTS_RECORDED', input.id, {
+        payloadChecksum: input.payloadChecksum,
+        testLevel: input.testPlan.level,
+        tests: input.testPlan.tests,
+        different: input.comparisonResult.summary.different,
+      }, timestamp);
+    });
     this.notify(await this.getRequired(input.id));
   }
 
@@ -529,17 +530,26 @@ export class DeploymentJobRepository {
   }
 
   private async writeAudit(
+    database: DatabaseHandle,
     actorUserId: string | undefined,
     eventType: string,
     entityId: string,
     detail: Record<string, unknown>,
     timestamp: string,
   ): Promise<void> {
-    await this.database.run(`
+    await database.run(`
       INSERT INTO audit_events (actor_user_id, event_type, entity_type, entity_id, detail_json, created_at)
       VALUES (?, ?, 'DEPLOYMENT_JOB', ?, ?, ?)
     `, actorUserId ?? null, eventType, entityId, JSON.stringify(detail), timestamp);
   }
+}
+
+async function getRequired(database: DatabaseHandle, id: string): Promise<DeploymentJob> {
+  const row = await database.get<DeploymentJobRow>('SELECT * FROM deployment_jobs WHERE id = ?', id);
+  if (row === undefined) {
+    throw new SfudError('INVALID_ARGUMENT', `배포 작업을 찾을 수 없습니다: ${id}`);
+  }
+  return mapDeploymentJob(row);
 }
 
 function assertTransition(job: DeploymentJob, nextStatus: DeploymentJobStatus): void {
