@@ -14,6 +14,7 @@ interface CreateComparisonBody {
   strict?: boolean;
   showIdentical?: boolean;
   metadataType?: string;
+  sourceOnly?: boolean;
 }
 
 interface MetadataTypesQuery {
@@ -111,6 +112,8 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     if (session === undefined) return;
     try {
       const scope = comparisonScope(request.body?.scope);
+      const sourceOnly = request.body?.sourceOnly === true;
+      const rightSourceId = requiredString(request.body?.rightSourceId, 'SOURCE 소스');
       const job = await app.sfudRuntime.comparisons.create({
         ...(scope === 'manifest'
           ? { projectId: requiredString(request.body?.projectId, 'manifest 프로젝트') }
@@ -120,8 +123,11 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
         ...(request.body?.metadataType === undefined
           ? {}
           : { metadataType: requiredMetadataType(request.body.metadataType) }),
-        leftSourceId: requiredString(request.body?.leftSourceId, 'LEFT 소스'),
-        rightSourceId: requiredString(request.body?.rightSourceId, 'RIGHT 소스'),
+        leftSourceId: sourceOnly
+          ? rightSourceId
+          : requiredString(request.body?.leftSourceId, 'LEFT 소스'),
+        rightSourceId,
+        sourceOnly,
         strict: request.body?.strict === true,
         showIdentical: request.body?.showIdentical === true,
         createdBy: session.user.id,
@@ -166,6 +172,7 @@ function publicJob(app: FastifyInstance, job: ComparisonJob, includeResult: bool
   } : undefined;
   return {
     id: job.id,
+    mode: job.leftSource === job.rightSource ? 'source' : 'compare',
     status: job.status,
     projectId: app.sfudRuntime.workspace.publicSource(`local:${job.projectPath}`).id.replace(/^project:/u, ''),
     scope: job.scope === 'ALL' ? 'all' : 'manifest',

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
 
 import { ComparisonFileDiff, type ComparisonFileDifference } from './ComparisonFileDiff';
+import { formatDuration } from './duration';
 
 const METADATA_RESULTS_PER_PAGE = 20;
 
@@ -105,6 +106,7 @@ function defaultMetadataType(metadataTypes: MetadataTypeOption[]): string {
 
 interface ComparisonJobResponse {
   id: string;
+  mode?: 'compare' | 'source';
   status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
   scope?: 'all' | 'manifest';
   metadataType?: string;
@@ -392,7 +394,6 @@ export function App() {
             <div className="hero-copy">
               <p className="eyebrow text-blue-700">SAFE BY DEFAULT</p>
               <h2 id="hero-title">변경을 먼저 확인하고,<br />확신이 들 때 배포하세요.</h2>
-              <p>두 Salesforce 환경의 메타데이터를 한눈에 비교하고<br className="desktop-only" /> 동일한 payload로 안전하게 검증합니다.</p>
               <div className="hero-actions">
                 <a className="button button-primary" href="/deploy">
                   <Icon name="compare" />비교 및 배포 시작<Icon name="arrow" />
@@ -607,13 +608,12 @@ function ComparePage({ user }: { user: ApiUser }) {
       <PageIntro
         kicker="NEW COMPARISON"
         title="어떤 환경의 차이를 확인할까요?"
-        description="Source와 Target의 배포 가능한 메타데이터를 같은 범위로 비교합니다. 아직 어떤 메타데이터도 변경하지 않습니다."
       />
 
       <section className="workflow-panel" aria-labelledby="source-heading">
         <div className="panel-heading">
           <span className="step-number">01</span>
-          <div><h2 id="source-heading">비교 소스 선택</h2><p>연결된 org 또는 허용된 로컬 DX 프로젝트를 선택하세요.</p></div>
+          <div><h2 id="source-heading">비교 소스 선택</h2></div>
           <span className="panel-state">{workspace === null ? '조회 중' : `${workspace.sources.length}개`}</span>
         </div>
         <div className="source-grid">
@@ -626,7 +626,7 @@ function ComparePage({ user }: { user: ApiUser }) {
       <section className="workflow-panel" aria-labelledby="scope-heading">
         <div className="panel-heading">
           <span className="step-number">02</span>
-          <div><h2 id="scope-heading">비교 범위</h2><p>한 번에 하나의 Salesforce metadata type만 검색합니다.</p></div>
+          <div><h2 id="scope-heading">비교 범위</h2></div>
           <span className="panel-state">필수</span>
         </div>
         <div className="compare-scope-grid metadata-scope-grid">
@@ -658,7 +658,7 @@ function ComparePage({ user }: { user: ApiUser }) {
       <section className="workflow-panel compact-panel" aria-labelledby="options-heading">
         <div className="panel-heading">
           <span className="step-number">03</span>
-          <div><h2 id="options-heading">표시 옵션</h2><p>리포트에 동일 항목을 포함할지 선택합니다.</p></div>
+          <div><h2 id="options-heading">표시 옵션</h2></div>
         </div>
         <div className="option-grid">
           <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} />
@@ -686,6 +686,7 @@ function DeployPage({ user }: { user: ApiUser }) {
   const [testLevel, setTestLevel] = useState('auto');
   const [tests, setTests] = useState('');
   const [showIdentical, setShowIdentical] = useState(false);
+  const [compareCurrentType, setCompareCurrentType] = useState(true);
   const [comparisonSubmitting, setComparisonSubmitting] = useState(false);
   const [dryRunSubmitting, setDryRunSubmitting] = useState(false);
   const [deploymentSubmitting, setDeploymentSubmitting] = useState(false);
@@ -705,7 +706,14 @@ function DeployPage({ user }: { user: ApiUser }) {
   const deploymentRequestControllerRef = useRef<AbortController | null>(null);
   const comparisonJobSelectionKeyRef = useRef<string | null>(null);
   const dryRunJobSelectionKeyRef = useRef<string | null>(null);
-  const workflowSelectionKey = [sourceId, targetOrgId, scopeQuery, showIdentical].join('\u0000');
+  const metadataTypeSourceIds = compareCurrentType ? `${sourceId},${targetOrgId}` : sourceId;
+  const workflowSelectionKey = [
+    sourceId,
+    compareCurrentType ? targetOrgId : '',
+    scopeQuery,
+    compareCurrentType ? showIdentical : false,
+    compareCurrentType,
+  ].join('\u0000');
   const cartSelectionKey = deploymentCart.map((item) => item.key).sort().join('\u0001');
   const dryRunSelectionKey = [sourceId, targetOrgId, cartSelectionKey, testLevel, tests].join('\u0000');
   const workflowSelectionKeyRef = useRef(workflowSelectionKey);
@@ -743,10 +751,10 @@ function DeployPage({ user }: { user: ApiUser }) {
   }, []);
 
   useEffect(() => {
-    if (sourceId.length === 0 || targetOrgId.length === 0) return;
+    if (sourceId.length === 0 || (compareCurrentType && targetOrgId.length === 0)) return;
     const controller = new AbortController();
     setMetadataTypesLoading(true);
-    fetch(`/api/v1/metadata-types?sourceIds=${encodeURIComponent(`${sourceId},${targetOrgId}`)}`, {
+    fetch(`/api/v1/metadata-types?sourceIds=${encodeURIComponent(metadataTypeSourceIds)}`, {
       credentials: 'same-origin', signal: controller.signal,
     })
       .then(async (response) => {
@@ -763,7 +771,7 @@ function DeployPage({ user }: { user: ApiUser }) {
       })
       .finally(() => { if (!controller.signal.aborted) setMetadataTypesLoading(false); });
     return () => controller.abort();
-  }, [sourceId, targetOrgId]);
+  }, [compareCurrentType, metadataTypeSourceIds, sourceId, targetOrgId]);
 
   useEffect(() => {
     comparisonRequestControllerRef.current?.abort();
@@ -771,7 +779,7 @@ function DeployPage({ user }: { user: ApiUser }) {
     comparisonJobSelectionKeyRef.current = null;
     setComparisonSubmitting(false);
     setComparisonJob(null);
-  }, [sourceId, targetOrgId, scopeQuery, showIdentical]);
+  }, [workflowSelectionKey]);
 
   useEffect(() => {
     dryRunRequestControllerRef.current?.abort();
@@ -1057,10 +1065,10 @@ function DeployPage({ user }: { user: ApiUser }) {
         body: JSON.stringify({
           scope: 'all',
           metadataType: selectedMetadataType.name,
-          leftSourceId: targetOrgId,
+          ...(compareCurrentType ? { leftSourceId: targetOrgId } : { sourceOnly: true }),
           rightSourceId: sourceId,
           strict: false,
-          showIdentical,
+          showIdentical: compareCurrentType && showIdentical,
         }),
       });
       const data = await response.json() as { job?: ComparisonJobResponse; error?: { message: string } };
@@ -1180,14 +1188,14 @@ function DeployPage({ user }: { user: ApiUser }) {
 
   return (
     <div className="page-stack">
-      <PageIntro kicker="COMPARE, SELECT, DEPLOY" title="검색한 메타데이터를 배포 대상으로 선택합니다." description="metadata type을 바꿔가며 필요한 컴포넌트를 선택하고, 필요하면 dry-run하거나 선택한 target에 바로 배포합니다.">
+      <PageIntro kicker="COMPARE, SELECT, DEPLOY" title="검색한 메타데이터를 배포 대상으로 선택합니다.">
         <div className="stepper" aria-label="배포 단계"><span className="step-active"><i>1</i>검색</span><b /><span className={deploymentCart.length > 0 ? 'step-active' : ''}><i>2</i>배포 대상</span><b /><span className={dryRunJob !== null ? 'step-active' : ''}><i>3</i>Dry-run</span><b /><span className={deploymentJob !== null ? 'step-active' : ''}><i>4</i>배포</span></div>
       </PageIntro>
 
       <div className="deploy-layout">
         <div className="page-stack">
           <section className="workflow-panel" aria-labelledby="deploy-source-heading">
-            <div className="panel-heading"><span className="step-number">01</span><div><h2 id="deploy-source-heading">소스와 대상</h2><p>desired source를 기준으로 target org에 적용할 차이를 계산합니다.</p></div><span className="panel-state">{workspace === null ? '조회 중' : 'DEPLOY VIEW'}</span></div>
+            <div className="panel-heading"><span className="step-number">01</span><div><h2 id="deploy-source-heading">소스와 대상</h2></div><span className="panel-state">{workspace === null ? '조회 중' : 'DEPLOY VIEW'}</span></div>
             <div className="deploy-source-grid">
               <WorkspaceSourceSelect side="DESIRED SOURCE" value={sourceId} sources={workspace?.sources ?? []} onChange={setSourceId} tone="violet" />
               <div className="direction-marker"><span>배포 대상</span><Icon name="arrow" /></div>
@@ -1196,7 +1204,7 @@ function DeployPage({ user }: { user: ApiUser }) {
           </section>
 
           <section className="workflow-panel" aria-labelledby="deploy-scope-heading">
-            <div className="panel-heading"><span className="step-number">02</span><div><h2 id="deploy-scope-heading">메타데이터 검색</h2><p>type별 비교 결과에서 체크한 컴포넌트가 배포 대상 목록에 누적됩니다.</p></div><span className="panel-state">검색</span></div>
+            <div className="panel-heading"><span className="step-number">02</span><div><h2 id="deploy-scope-heading">메타데이터 검색</h2></div><span className="panel-state">검색</span></div>
             <div className="compare-scope-grid metadata-scope-grid">
               <label><span className="field-label">Salesforce metadata type</span>
                 <input id="deploy-scope" list="salesforce-deploy-metadata-types" value={scopeQuery} onChange={(event) => setScopeQuery(event.target.value)} placeholder="metadata type 검색" autoComplete="off" disabled={workspace === null || metadataTypesLoading} aria-invalid={!scopeValid} />
@@ -1205,14 +1213,20 @@ function DeployPage({ user }: { user: ApiUser }) {
                 </datalist>
               </label>
             </div>
-            <p className={`field-hint${scopeValid ? '' : ' field-hint-error'}`}><Icon name="check" />{metadataTypesLoading ? 'Salesforce metadata type을 불러오는 중입니다.' : scopeValid ? `${metadataTypes.length}개 metadata type 검색 가능 · source와 target의 합집합` : '목록에 있는 Salesforce metadata type을 선택하세요.'}</p>
-            <div className="option-grid">
-              <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} />
+            <p className={`field-hint${scopeValid ? '' : ' field-hint-error'}`}><Icon name="check" />{metadataTypesLoading ? 'Salesforce metadata type을 불러오는 중입니다.' : scopeValid ? `${metadataTypes.length}개 metadata type 검색 가능 · ${compareCurrentType ? 'source와 target의 합집합' : 'source 기준'}` : '목록에 있는 Salesforce metadata type을 선택하세요.'}</p>
+            <div className="comparison-controls-row">
+              <div className="option-grid">
+                <OptionToggle title="현재 타입 비교 실행" description="끄면 Source 메타데이터만 받아옵니다." checked={compareCurrentType} onChange={(checked) => {
+                  setCompareCurrentType(checked);
+                  if (!checked) setShowIdentical(false);
+                }} />
+                <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} disabled={!compareCurrentType} />
+              </div>
+              <button className={`button button-secondary comparison-run-button${comparing ? ' comparison-run-loading' : ''}`} type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesLoading || !scopeValid || !sourceId || (compareCurrentType && (!targetOrgId || sourceId === targetOrgId))}><Icon name={comparing ? 'refresh' : 'compare'} />{comparing ? '메타데이터 받는 중……' : '메타데이터 받아오기'}</button>
             </div>
-            <button className="button button-secondary comparison-run-button" type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesLoading || !scopeValid || !sourceId || !targetOrgId || sourceId === targetOrgId}><Icon name={comparing ? 'refresh' : 'compare'} />{comparing ? '비교 실행 중……' : '현재 type 비교 실행'}</button>
           </section>
 
-          {comparisonJob !== null && <ComparisonResultPanel
+          {comparisonJob !== null && !['QUEUED', 'RUNNING'].includes(comparisonJob.status) && <ComparisonResultPanel
             job={comparisonJob}
             deploymentView
             selectedKeys={new Set(deploymentCart.map((item) => item.key))}
@@ -1221,7 +1235,7 @@ function DeployPage({ user }: { user: ApiUser }) {
           />}
 
           <section className="workflow-panel" aria-labelledby="test-heading">
-            <div className="panel-heading"><span className="step-number">03</span><div><h2 id="test-heading">Apex 테스트 설정</h2><p>비교 결과에서 Apex Class를 선택한 뒤 Dry-run 테스트 조건을 지정합니다.</p></div><span className="auto-badge">{testLevel.toUpperCase()}</span></div>
+            <div className="panel-heading"><span className="step-number">03</span><div><h2 id="test-heading">Apex 테스트 설정</h2></div><span className="auto-badge">{testLevel.toUpperCase()}</span></div>
             <div className="select-row">
               <label><span>테스트 수준</span><select value={testLevel} onChange={(event) => changeTestLevel(event.target.value)}><option value="auto">Auto · 권장</option><option value="RunSpecifiedTests">RunSpecifiedTests</option><option value="RunLocalTests">RunLocalTests</option><option value="RunAllTestsInOrg">RunAllTestsInOrg</option><option value="RunRelevantTests">RunRelevantTests</option><option value="NoTestRun">NoTestRun</option></select></label>
               <div
@@ -1353,7 +1367,7 @@ function WorkflowStatusPanel({
   return (
     <section className="workflow-status-panel" aria-labelledby="workflow-status-heading" aria-live="polite">
       <div className="workflow-status-head">
-        <div><span className="card-icon icon-blue"><Icon name="activity" /></span><span><h2 id="workflow-status-heading">실행 현황</h2><p>비교와 실제 배포의 서버 작업 상태를 실시간으로 표시합니다.</p></span></div>
+        <div><span className="card-icon icon-blue"><Icon name="activity" /></span><span><h2 id="workflow-status-heading">실행 현황</h2></span></div>
         <span className={`live-status live-status-${liveStatus}`}><i />{connectionLabel}</span>
       </div>
       <div className="workflow-status-grid">
@@ -1363,7 +1377,6 @@ function WorkflowStatusPanel({
           <small>{item.detail}</small>
         </article>)}
       </div>
-      <p className="workflow-status-note">SSE 연결이 끊기면 자동 재연결하며, polling으로 상태 확인을 계속합니다.</p>
     </section>
   );
 }
@@ -1403,7 +1416,6 @@ function DryRunLiveProgress({ liveStatus, job }: { liveStatus: LiveStatus; job: 
       <strong>{status.label}</strong>
       <small>{status.detail}</small>
       <DryRunLiveDiagnostics diagnostics={job.progress?.diagnostics} />
-      <p>SSE 연결이 끊기면 polling으로 상태 확인을 계속합니다.</p>
     </section>
   );
 }
@@ -1440,7 +1452,7 @@ function workflowStatusItem(
   if (job === null) return { title, label: '대기', detail: '아직 실행되지 않음', tone: 'idle' };
   const status = job.status;
   const seconds = elapsedSeconds(job.startedAt ?? job.createdAt, job.completedAt, now);
-  const elapsed = seconds === undefined ? '' : ` · ${seconds}초`;
+  const elapsed = seconds === undefined ? '' : ` · 소요시간 ${formatDuration(seconds)}`;
   const progress = 'progress' in job ? job.progress : undefined;
   const detail = progress === undefined
     ? `Job ${job.id.slice(0, 12)}`
@@ -1489,7 +1501,6 @@ function RunsPage({ runs, comparisons, deployments }: { runs: DashboardRun[]; co
       <PageIntro
         kicker="LOCAL RUNS"
         title="비교와 배포 이력을 다시 확인하세요."
-        description="로컬 .sfud/runs에 저장된 리포트와 실패 원인을 한곳에서 확인합니다."
       />
       <section className="run-stats" aria-label="실행 요약">
         <div><span className="card-icon icon-blue"><Icon name="activity" /></span><p>전체 실행<strong>{comparisons.length + deployments.length}</strong></p></div>
@@ -1499,7 +1510,7 @@ function RunsPage({ runs, comparisons, deployments }: { runs: DashboardRun[]; co
       </section>
       <section className="history-panel" aria-labelledby="history-heading">
         <div className="history-toolbar">
-          <div><h2 id="history-heading">모든 실행</h2><p>최근 실행 순서로 표시합니다.</p></div>
+          <div><h2 id="history-heading">모든 실행</h2></div>
           <div className="filter-row"><button className="filter-active" type="button">전체</button><button type="button">비교</button><button type="button">Dry-run</button><button type="button">실제 배포</button></div>
         </div>
         <div className="runs-list runs-list-flat">{runs.length === 0 ? <p className="empty-runs">아직 저장된 실행이 없습니다.</p> : runs.map((run) => <RunRow key={run.id} {...run} />)}</div>
@@ -1630,11 +1641,10 @@ function SettingsPage({
       <PageIntro
         kicker="SERVER CONFIGURATION"
         title="연결과 프로젝트 소스를 관리합니다."
-        description="Salesforce 인증은 sf CLI에서 관리하고, 내 단말기의 DX 프로젝트는 사용자별 임시 소스로 업로드합니다."
       />
       <div className="settings-grid">
         <section className="workflow-panel" aria-labelledby="server-heading">
-          <div className="panel-heading"><span className="card-icon icon-green"><Icon name="activity" /></span><div><h2 id="server-heading">UI 서버</h2><p>현재 Fastify 로컬 서버 상태</p></div><StatusPill label="실행 중" state="online" /></div>
+          <div className="panel-heading"><span className="card-icon icon-green"><Icon name="activity" /></span><div><h2 id="server-heading">UI 서버</h2></div><StatusPill label="실행 중" state="online" /></div>
           <dl className="settings-list">
             <div><dt>주소</dt><dd>{health?.host ?? '확인 중'}</dd></div>
             <div><dt>포트</dt><dd>{health?.port ?? '—'}</dd></div>
@@ -1646,11 +1656,11 @@ function SettingsPage({
           </dl>
         </section>
         <section className="workflow-panel" aria-labelledby="cli-heading">
-          <div className="panel-heading"><span className="card-icon icon-blue"><Icon name="cloud" /></span><div><h2 id="cli-heading">Salesforce CLI</h2><p>CLI 인증 저장소 연결</p></div><StatusPill label="연결됨" state="online" /></div>
+          <div className="panel-heading"><span className="card-icon icon-blue"><Icon name="cloud" /></span><div><h2 id="cli-heading">Salesforce CLI</h2></div><StatusPill label="연결됨" state="online" /></div>
           <div className="connection-card"><div className="avatar-stack large"><span>SF</span><i /></div><div><strong>{orgs.length}개 org 사용 가능</strong><p>{orgs.map((org) => org.label).join(' · ') || '연결 확인 중'}</p></div><button type="button" onClick={() => window.location.reload()}><Icon name="refresh" />새로고침</button></div>
         </section>
         <section className="workflow-panel settings-wide" aria-labelledby="deployment-settings-heading">
-          <div className="panel-heading"><span className="card-icon icon-violet"><Icon name="deploy" /></span><div><h2 id="deployment-settings-heading">배포 테스트 규칙</h2><p>Auto 테스트 수준에서 자동으로 찾을 Apex 테스트 클래스 이름 규칙</p></div></div>
+          <div className="panel-heading"><span className="card-icon icon-violet"><Icon name="deploy" /></span><div><h2 id="deployment-settings-heading">배포 테스트 규칙</h2></div></div>
           <form className="settings-form" onSubmit={(event) => void saveSettings(event)}>
             <label><span>테스트 클래스 접미사</span><input value={testClassSuffix} onChange={(event) => setTestClassSuffix(event.target.value)} placeholder="_Test" disabled={!canEditSettings || settingsLoading || settingsSaving} maxLength={40} aria-describedby="test-class-suffix-help" /></label>
             <button className={`button button-primary${settingsSaving ? ' button-busy' : ''}`} type="submit" disabled={!canEditSettings || settingsLoading || settingsSaving || testClassSuffix.trim().length === 0}><Icon name={settingsSaving ? 'refresh' : 'check'} />{settingsSaving ? '저장 중……' : '접미사 저장'}</button>
@@ -1661,7 +1671,7 @@ function SettingsPage({
           {!canEditSettings && <p className="upload-message">VIEWER 역할은 배포 테스트 규칙을 변경할 수 없습니다.</p>}
         </section>
         <section className="workflow-panel settings-wide" aria-labelledby="project-heading">
-          <div className="panel-heading"><span className="card-icon icon-violet"><Icon name="folder" /></span><div><h2 id="project-heading">명시적으로 등록된 서버 프로젝트</h2><p><code>sfud ui --project &lt;DX 경로&gt;</code>로 등록한 서버의 allowlist</p></div></div>
+          <div className="panel-heading"><span className="card-icon icon-violet"><Icon name="folder" /></span><div><h2 id="project-heading">명시적으로 등록된 서버 프로젝트</h2></div></div>
           {workspace === null
             ? <p className="empty-runs">프로젝트 확인 중입니다.</p>
             : workspace.projects.length === 0
@@ -1671,7 +1681,7 @@ function SettingsPage({
         <section className="workflow-panel settings-wide" aria-labelledby="upload-project-heading">
           <div className="panel-heading">
             <span className="card-icon icon-blue"><Icon name="plus" /></span>
-            <div><h2 id="upload-project-heading">내 단말기 프로젝트</h2><p>Salesforce DX 폴더를 현재 사용자만 쓸 수 있는 임시 소스로 업로드합니다.</p></div>
+            <div><h2 id="upload-project-heading">내 단말기 프로젝트</h2></div>
             <label className={`small-button upload-button${uploading ? ' upload-button-busy' : ''}`}>
               <Icon name={uploading ? 'refresh' : 'plus'} />{uploading ? '업로드 중……' : 'DX 프로젝트 업로드'}
               <input
@@ -1791,7 +1801,6 @@ function AdminPage({ currentUser }: { currentUser: ApiUser }) {
       <PageIntro
         kicker="ADMIN ONLY"
         title="사용자와 배포 권한을 관리합니다."
-        description="계정을 만들고 역할을 지정하거나 접근을 비활성화합니다. 모든 변경은 감사 로그에 기록됩니다."
       />
       <section className="admin-stats" aria-label="사용자 요약">
         <div><span>전체 사용자</span><strong>{users.length}</strong></div>
@@ -1800,7 +1809,7 @@ function AdminPage({ currentUser }: { currentUser: ApiUser }) {
       </section>
       <div className="admin-layout">
         <section className="workflow-panel admin-create-panel" aria-labelledby="admin-create-heading">
-          <div className="panel-heading"><span className="card-icon icon-violet"><Icon name="plus" /></span><div><h2 id="admin-create-heading">사용자 생성</h2><p>초기 로그인 계정과 최소 권한을 지정합니다.</p></div></div>
+          <div className="panel-heading"><span className="card-icon icon-violet"><Icon name="plus" /></span><div><h2 id="admin-create-heading">사용자 생성</h2></div></div>
           <form className="admin-user-form" onSubmit={(event) => void createUser(event)}>
             <label><span>표시 이름</span><input name="displayName" maxLength={80} required placeholder="배포 운영자" /></label>
             <label><span>이메일</span><input name="email" type="email" autoComplete="off" required placeholder="operator@example.com" /></label>
@@ -1811,7 +1820,7 @@ function AdminPage({ currentUser }: { currentUser: ApiUser }) {
           </form>
         </section>
         <section className="workflow-panel admin-role-guide" aria-labelledby="role-guide-heading">
-          <div className="panel-heading"><span className="card-icon icon-blue"><Icon name="shield" /></span><div><h2 id="role-guide-heading">역할 기준</h2><p>필요한 작업까지만 허용합니다.</p></div></div>
+          <div className="panel-heading"><span className="card-icon icon-blue"><Icon name="shield" /></span><div><h2 id="role-guide-heading">역할 기준</h2></div></div>
           <dl><div><dt>VIEWER</dt><dd>결과와 실행 이력 조회</dd></div><div><dt>OPERATOR</dt><dd>비교, 업로드, Dry-run</dd></div><div><dt>DEPLOYER</dt><dd>OPERATOR 권한과 실제 배포</dd></div><div><dt>ADMIN</dt><dd>DEPLOYER 권한과 사용자 관리</dd></div></dl>
           <p><Icon name="key" />자기 역할·활성 상태 변경과 마지막 활성 ADMIN 제거는 차단됩니다.</p>
         </section>
@@ -1849,10 +1858,10 @@ function compareAdminUsers(left: AdminUser, right: AdminUser): number {
     || left.email.localeCompare(right.email);
 }
 
-function PageIntro({ kicker, title, description, children }: { kicker: string; title: string; description: string; children?: ReactNode }) {
+function PageIntro({ kicker, title, description, children }: { kicker: string; title: string; description?: string; children?: ReactNode }) {
   return (
     <header className="page-intro">
-      <div><p className="eyebrow text-blue-700">{kicker}</p><h2>{title}</h2><p>{description}</p></div>
+      <div><p className="eyebrow text-blue-700">{kicker}</p><h2>{title}</h2>{description !== undefined && <p>{description}</p>}</div>
       {children}
     </header>
   );
@@ -1900,13 +1909,14 @@ function ComparisonResultPanel({
 }) {
   const [resultPage, setResultPage] = useState(1);
   useEffect(() => setResultPage(1), [job.id]);
+  const sourceOnly = deploymentView && job.mode === 'source';
   const displaySource = deploymentView ? job.right : job.left;
   const displayTarget = deploymentView ? job.left : job.right;
   if (job.status === 'QUEUED' || job.status === 'RUNNING') {
-    return <section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? '비교 대기 중' : '메타데이터 비교 중'}</strong><p>{displaySource.label} → {displayTarget.label} · {job.manifest}</p></div></section>;
+    return <section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{sourceOnly ? (job.status === 'QUEUED' ? '메타데이터 수집 대기 중' : 'Source 메타데이터 받는 중') : (job.status === 'QUEUED' ? '비교 대기 중' : '메타데이터 비교 중')}</strong><p>{sourceOnly ? `${displaySource.label} · ${job.manifest}` : `${displaySource.label} → ${displayTarget.label} · ${job.manifest}`}</p></div></section>;
   }
   if (job.status === 'FAILED') {
-    return <section className="compare-error" role="alert"><strong>비교 작업이 실패했습니다.</strong><p>{job.errorMessage ?? '상세 오류가 기록되지 않았습니다.'}</p></section>;
+    return <section className="compare-error" role="alert"><strong>{sourceOnly ? '메타데이터를 받아오지 못했습니다.' : '비교 작업이 실패했습니다.'}</strong><p>{job.errorMessage ?? '상세 오류가 기록되지 않았습니다.'}</p></section>;
   }
   if (job.result === undefined) return null;
   const summary = job.result.summary;
@@ -1917,20 +1927,22 @@ function ComparisonResultPanel({
   return (
     <section className="comparison-result" aria-labelledby="comparison-result-title">
       <div className="comparison-result-head">
-        <div><p className="eyebrow">COMPARISON COMPLETE</p><h2 id="comparison-result-title">{displaySource.label} → {displayTarget.label}</h2><small>{job.manifest}</small></div>
-        <span className="result-success"><Icon name="check" />비교 완료</span>
+        <div><p className="eyebrow">{sourceOnly ? 'SOURCE METADATA' : 'COMPARISON COMPLETE'}</p><h2 id="comparison-result-title">{sourceOnly ? displaySource.label : `${displaySource.label} → ${displayTarget.label}`}</h2><small>{job.manifest}</small></div>
+        <span className="result-success"><Icon name="check" />{sourceOnly ? '받아오기 완료' : '비교 완료'}</span>
       </div>
-      <div className="comparison-summary">
-        <div className="summary-added"><span>{deploymentView ? 'NEW' : 'ADDED'}</span><strong>{summary.added}</strong></div>
-        <div className="summary-removed"><span>{deploymentView ? 'TARGET ONLY' : 'REMOVED'}</span><strong>{summary.removed}</strong></div>
-        <div className="summary-modified"><span>MODIFIED</span><strong>{summary.modified}</strong></div>
-        <div><span>IDENTICAL</span><strong>{summary.identical}</strong></div>
-      </div>
+      {sourceOnly
+        ? <div className="comparison-summary source-metadata-summary"><div className="summary-added"><span>SOURCE</span><strong>{summary.total}</strong></div></div>
+        : <div className="comparison-summary">
+            <div className="summary-added"><span>{deploymentView ? 'NEW' : 'ADDED'}</span><strong>{summary.added}</strong></div>
+            <div className="summary-removed"><span>{deploymentView ? 'TARGET ONLY' : 'REMOVED'}</span><strong>{summary.removed}</strong></div>
+            <div className="summary-modified"><span>MODIFIED</span><strong>{summary.modified}</strong></div>
+            <div><span>IDENTICAL</span><strong>{summary.identical}</strong></div>
+          </div>}
       {job.result.warnings.map((warning) => <p className="comparison-warning" key={warning}><Icon name="shield" />{warning}</p>)}
-      {deploymentView && summary.removed > 0 && <p className="comparison-warning"><Icon name="shield" />TARGET ONLY 항목은 destructive manifest 없이는 target org에서 삭제되지 않습니다.</p>}
+      {deploymentView && !sourceOnly && summary.removed > 0 && <p className="comparison-warning"><Icon name="shield" />TARGET ONLY 항목은 destructive manifest 없이는 target org에서 삭제되지 않습니다.</p>}
       <div className="component-results">
         {job.result.components.length === 0
-          ? <p className="empty-result">표시할 차이가 없습니다. 두 소스가 동일합니다.</p>
+          ? <p className="empty-result">{sourceOnly ? 'Source에서 받아온 메타데이터가 없습니다.' : '표시할 차이가 없습니다. 두 소스가 동일합니다.'}</p>
           : visibleComponents.map((component) => <details key={component.key} className={`component-result${deploymentView ? ' component-selectable' : ''}${selectedKeys.has(component.key) ? ' component-selected' : ''}`}>
               <summary>{deploymentView && <label className={`component-cart-check${component.status === 'REMOVED' || selectionDisabled ? ' component-cart-disabled' : ''}`} onClick={(event) => event.stopPropagation()}>
                 <input
@@ -1941,8 +1953,8 @@ function ComparisonResultPanel({
                   onChange={(event) => onSelectionChange?.(component, event.target.checked)}
                 />
                 <span aria-hidden="true"><Icon name="check" /></span>
-              </label>}<span className={`component-status status-${component.status.toLowerCase()}`}>{deploymentView ? deploymentDiffStatusLabel(component.status) : component.status}</span><div><strong>{component.fullName}</strong><small>{component.type} · 파일 {component.files.length}개{deploymentView && component.status === 'REMOVED' ? ' · 소스에 없어 선택 불가' : ''}</small></div><Icon name="chevron" /></summary>
-              <div className="component-files">{component.files.map((file) => <article key={file.path}><div><code>{file.path}</code><span>{file.status}</span></div><ComparisonFileDiff file={file} sourceLabel={displaySource.label} targetLabel={displayTarget.label} sourceSide={deploymentView ? 'after' : 'before'} /></article>)}</div>
+              </label>}<span className={`component-status status-${component.status.toLowerCase()}`}>{sourceOnly ? 'SOURCE' : deploymentView ? deploymentDiffStatusLabel(component.status) : component.status}</span><div><strong>{component.fullName}</strong><small>{component.type} · 파일 {component.files.length}개{deploymentView && component.status === 'REMOVED' ? ' · 소스에 없어 선택 불가' : ''}</small></div><Icon name="chevron" /></summary>
+              <div className="component-files">{component.files.map((file) => <article key={file.path}><div><code>{file.path}</code><span>{sourceOnly ? 'SOURCE' : file.status}</span></div>{!sourceOnly && <ComparisonFileDiff file={file} sourceLabel={displaySource.label} targetLabel={displayTarget.label} sourceSide={deploymentView ? 'after' : 'before'} />}</article>)}</div>
             </details>)}
         {job.result.components.length > METADATA_RESULTS_PER_PAGE && <nav className="component-pagination" aria-label="메타데이터 검색 결과 페이지">
           <button type="button" onClick={() => setResultPage((page) => Math.max(1, page - 1))} disabled={currentResultPage === 1} aria-label="이전 페이지"><Icon name="chevron" />이전</button>
@@ -2031,11 +2043,11 @@ function deploymentDiffStatusLabel(status: 'ADDED' | 'REMOVED' | 'MODIFIED' | 'I
   return status;
 }
 
-function OptionToggle({ title, description, checked, onChange }: { title: string; description: string; checked: boolean; onChange: (checked: boolean) => void }) {
+function OptionToggle({ title, description, checked, onChange, disabled = false }: { title: string; description: string; checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean }) {
   return (
-    <label className="option-toggle">
+    <label className={`option-toggle${disabled ? ' option-toggle-disabled' : ''}`}>
       <span><strong>{title}</strong><small>{description}</small></span>
-      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><i aria-hidden="true" />
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} /><i aria-hidden="true" />
     </label>
   );
 }

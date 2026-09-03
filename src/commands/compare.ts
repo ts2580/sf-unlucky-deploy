@@ -14,6 +14,7 @@ import { createRunContext, writeRunMetadata } from './run-context.js';
 export interface CompareCommandOptions {
   left: string;
   right: string;
+  sourceOnly?: boolean;
   manifest?: string;
   allMetadata?: boolean;
   metadataType?: string;
@@ -52,7 +53,7 @@ export async function runCompareCommand(
     const context = await createRunContext(cwd, options.reportDir, 'compare');
     const generatedManifest = options.allMetadata === true || options.metadataType !== undefined
       ? await generateDeployableManifest({
-        sources: [leftSource, rightSource],
+        sources: options.sourceOnly === true ? [rightSource] : [leftSource, rightSource],
         ...(options.metadataType === undefined ? {} : { metadataTypes: [options.metadataType] }),
         outputDirectory: path.join(context.rootDirectory, 'generated-manifest'),
         commandProjectPath,
@@ -71,9 +72,11 @@ export async function runCompareCommand(
 
     const [leftSnapshot, rightSnapshot] = await Promise.all([
       createSnapshot({
-        source: leftSource,
+        source: options.sourceOnly === true ? rightSource : leftSource,
         manifestPath,
-        ...(sourceManifests === undefined ? {} : {
+        ...(options.sourceOnly === true
+          ? {}
+          : sourceManifests === undefined ? {} : {
           retrievalManifestPath: sourceManifests[0]!.manifestPath,
         }),
         outputDir: context.leftSnapshotDirectory,
@@ -81,21 +84,21 @@ export async function runCompareCommand(
         sfClient,
         waitMinutes: snapshotWaitMinutes,
         commandTimeoutMs: snapshotCommandTimeoutMs,
-        ...(sourceManifests?.[0]?.empty === true ? { empty: true } : {}),
+        ...(options.sourceOnly === true || sourceManifests?.[0]?.empty === true ? { empty: true } : {}),
         ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
       }),
       createSnapshot({
         source: rightSource,
         manifestPath,
         ...(sourceManifests === undefined ? {} : {
-          retrievalManifestPath: sourceManifests[1]!.manifestPath,
+          retrievalManifestPath: sourceManifests[options.sourceOnly === true ? 0 : 1]!.manifestPath,
         }),
         outputDir: context.rightSnapshotDirectory,
         commandProjectPath,
         sfClient,
         waitMinutes: snapshotWaitMinutes,
         commandTimeoutMs: snapshotCommandTimeoutMs,
-        ...(sourceManifests?.[1]?.empty === true ? { empty: true } : {}),
+        ...(sourceManifests?.[options.sourceOnly === true ? 0 : 1]?.empty === true ? { empty: true } : {}),
         ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
       }),
     ]);

@@ -111,9 +111,33 @@ describe('compare command', () => {
     await expect(readFile(rightRetrieval.manifestPath, 'utf8')).resolves.not.toContain('leftOnly');
     expect(result.comparison.left.manifestSha256).toBe(result.comparison.right.manifestSha256);
   });
+
+  it('source-only 수집은 target manifest와 metadata를 조회하지 않는다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-source-only-'));
+    temporaryDirectories.push(root);
+    await writeFile(path.join(root, 'sfdx-project.json'), JSON.stringify({
+      packageDirectories: [{ path: 'force-app' }], sourceApiVersion: '67.0',
+    }));
+    const client = new SourceScopedDynamicCompareSfClient();
+
+    const result = await runCompareCommand({
+      left: 'org:target-must-not-be-read',
+      right: 'org:source',
+      metadataType: 'ApexClass',
+      sourceOnly: true,
+      reportDir: path.join(root, 'run'),
+      color: false,
+    }, { cwd: root, sfClient: client, stdout: () => undefined });
+
+    expect(client.retrievals).toHaveLength(1);
+    expect(client.retrievals[0]!.alias).toBe('source');
+    expect(client.manifestAliases).toEqual(['source']);
+    expect(result.comparison.summary).toMatchObject({ added: 1, total: 1, different: 1 });
+  });
 });
 
 class SourceScopedDynamicCompareSfClient implements SfClient {
+  public readonly manifestAliases: string[] = [];
   public readonly retrievals: Array<{
     alias: string;
     manifestPath: string;
@@ -129,6 +153,7 @@ class SourceScopedDynamicCompareSfClient implements SfClient {
     }
     if (args[0] === 'project' && args[1] === 'generate' && args[2] === 'manifest') {
       const alias = flagValue(args, '--from-org');
+      this.manifestAliases.push(alias);
       const outputDirectory = flagValue(args, '--output-dir');
       await mkdir(outputDirectory, { recursive: true });
       await writeFile(path.join(outputDirectory, flagValue(args, '--name')), [
