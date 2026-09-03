@@ -15,6 +15,8 @@ export interface StartWebUiOptions {
   open: boolean;
   dataDirectory?: string;
   projectPaths?: string[];
+  trustedProxies?: string[];
+  publicOrigin?: string;
   logger?: boolean;
 }
 

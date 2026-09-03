@@ -31,8 +31,8 @@ interface HealthResponse {
   status: 'ok';
   service: 'sfud-ui';
   version: string;
-  host: string;
-  port: number;
+  host?: string;
+  port?: number;
   storage?: {
     engine: 'sqlite';
     status: 'ok';
@@ -253,7 +253,8 @@ export function App() {
   const [recentDeployments, setRecentDeployments] = useState<DryRunJobResponse[]>([]);
   const currentPage = getCurrentPage();
   const currentMeta = pageMeta[currentPage];
-  const remoteAccess = health !== null && !['127.0.0.1', 'localhost', '::1'].includes(health.host);
+  const remoteAccess = health?.host !== undefined
+    && !['127.0.0.1', 'localhost', '::1'].includes(health.host);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -268,6 +269,21 @@ export function App() {
       });
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    if (auth?.authenticated !== true) return;
+    const controller = new AbortController();
+    fetch('/api/v1/diagnostics', { signal: controller.signal, credentials: 'same-origin' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('diagnostics failed');
+        const diagnostics = await response.json() as HealthResponse;
+        setHealth((current) => ({ ...current, ...diagnostics }));
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+      });
+    return () => controller.abort();
+  }, [auth?.authenticated]);
 
   useEffect(() => {
     const controller = new AbortController();

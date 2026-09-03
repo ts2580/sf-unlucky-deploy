@@ -94,10 +94,20 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
     .option('--data-dir <path>', 'SQLite와 실행 상태를 저장할 디렉터리')
     .option('--no-open', '시작 후 브라우저를 열지 않음')
     .option('--allow-remote', 'loopback 외 주소 bind 허용')
+    .option('--trusted-proxy <ip-or-cidr>', '신뢰할 reverse proxy IP 또는 CIDR (반복 가능)', collectOption, [])
+    .option('--public-origin <origin>', '브라우저 요청에 허용할 공개 http(s) origin')
     .action(async (options) => {
       const dataDirectory = options.dataDir as string | undefined;
       const projectPaths = options.project as string[];
       const port = options.port as number | undefined;
+      const configuredProxies = options.trustedProxy as string[];
+      const environmentProxies = (process.env.SFUD_TRUSTED_PROXIES ?? '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0);
+      const trustedProxies = configuredProxies.length > 0 ? configuredProxies : environmentProxies;
+      const publicOrigin = options.publicOrigin as string | undefined
+        ?? process.env.SFUD_PUBLIC_ORIGIN;
       await startWebUi({
         host: options.host as string,
         port: port ?? parsePort(process.env.SFUD_UI_PORT ?? String(DEFAULT_UI_PORT)),
@@ -106,6 +116,8 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
         logger: false,
         ...(dataDirectory === undefined ? {} : { dataDirectory }),
         ...(projectPaths.length === 0 ? {} : { projectPaths }),
+        ...(trustedProxies.length === 0 ? {} : { trustedProxies }),
+        ...(publicOrigin === undefined ? {} : { publicOrigin }),
       });
     });
 

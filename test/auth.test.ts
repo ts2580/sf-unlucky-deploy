@@ -13,6 +13,8 @@ describe('로컬 관리자 인증', () => {
       assetsDirectory: '/definitely/missing/sfud-ui',
       databasePath: ':memory:',
       bootstrapToken,
+      trustedProxies: ['127.0.0.1'],
+      publicOrigin: 'https://deploy.example.test',
     });
 
     try {
@@ -160,7 +162,95 @@ describe('로컬 관리자 인증', () => {
       await server.close();
     }
   });
+
+  it('신뢰한 proxy의 client IP를 분리하고 정상 로그인으로 IP 실패 기록을 지우지 않는다', async () => {
+    const server = await createWebServer({
+      host: '127.0.0.1', port: 27_546,
+      assetsDirectory: '/definitely/missing/sfud-ui', databasePath: ':memory:',
+      bootstrapToken, trustedProxies: ['127.0.0.1'],
+    });
+    try {
+      expect((await server.inject({
+        method: 'POST', url: '/api/v1/auth/bootstrap', payload: adminPayload(bootstrapToken),
+      })).statusCode).toBe(201);
+      for (let index = 0; index < 4; index += 1) {
+        expect((await loginFrom(server, '198.51.100.10', `unknown-${index}@example.com`, 'wrong')).statusCode)
+          .toBe(401);
+      }
+      expect((await loginFrom(server, '198.51.100.10', 'admin@example.com', password)).statusCode)
+        .toBe(200);
+      expect((await loginFrom(server, '198.51.100.10', 'fifth@example.com', 'wrong')).statusCode)
+        .toBe(401);
+      expect((await loginFrom(server, '198.51.100.10', 'sixth@example.com', 'wrong')).statusCode)
+        .toBe(429);
+      expect((await loginFrom(server, '198.51.100.11', 'other-client@example.com', 'wrong')).statusCode)
+        .toBe(401);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('bootstrap 실패를 제한하고 잘못 인코딩된 cookie를 비인증으로 처리한다', async () => {
+    const server = await createWebServer({
+      host: '127.0.0.1', port: 27_546,
+      assetsDirectory: '/definitely/missing/sfud-ui', databasePath: ':memory:', bootstrapToken,
+    });
+    try {
+      for (let index = 0; index < 5; index += 1) {
+        expect((await server.inject({
+          method: 'POST', url: '/api/v1/auth/bootstrap', payload: adminPayload(`wrong-${index}`),
+        })).statusCode).toBe(403);
+      }
+      expect((await server.inject({
+        method: 'POST', url: '/api/v1/auth/bootstrap', payload: adminPayload(bootstrapToken),
+      })).statusCode).toBe(429);
+      expect((await server.inject({
+        url: '/api/v1/auth/status', headers: { cookie: 'sfud_session=%E0%A4%A' },
+      })).json()).toEqual({ setupRequired: true, authenticated: false });
+      expect((await server.inject({
+        url: '/api/v1/deployment-jobs', headers: { cookie: 'sfud_session=%E0%A4%A' },
+      })).statusCode).toBe(401);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('신뢰하지 않은 forwarded proto로 Secure cookie와 Origin 판정을 위조하지 못한다', async () => {
+    const server = await createWebServer({
+      host: '127.0.0.1', port: 27_546,
+      assetsDirectory: '/definitely/missing/sfud-ui', databasePath: ':memory:', bootstrapToken,
+    });
+    try {
+      const response = await server.inject({
+        method: 'POST', url: '/api/v1/auth/bootstrap',
+        headers: {
+          host: 'deploy.example.test', origin: 'http://deploy.example.test',
+          'x-forwarded-proto': 'https',
+        },
+        payload: adminPayload(bootstrapToken),
+      });
+      expect(response.statusCode).toBe(201);
+      expect(response.headers['set-cookie']).toEqual(expect.arrayContaining([
+        expect.not.stringContaining('; Secure'),
+      ]));
+    } finally {
+      await server.close();
+    }
+  });
 });
+
+async function loginFrom(
+  server: Awaited<ReturnType<typeof createWebServer>>,
+  address: string,
+  email: string,
+  loginPassword: string,
+) {
+  return await server.inject({
+    method: 'POST', url: '/api/v1/auth/login',
+    headers: { 'x-forwarded-for': address },
+    payload: { email, password: loginPassword },
+  });
+}
 
 function adminPayload(token: string) {
   return {
