@@ -369,6 +369,16 @@ const MIGRATIONS: Migration[] = [
       WHERE comparison_result_json IS NOT NULL AND json_valid(comparison_result_json);
     `,
   },
+  {
+    version: 16,
+    name: 'compressed_job_artifacts',
+    sql: `
+      ALTER TABLE comparison_jobs ADD COLUMN result_artifact_path TEXT;
+      ALTER TABLE deployment_jobs ADD COLUMN comparison_artifact_path TEXT;
+      ALTER TABLE deployment_jobs ADD COLUMN dry_run_artifact_path TEXT;
+      ALTER TABLE deployment_jobs ADD COLUMN deployment_artifact_path TEXT;
+    `,
+  },
 ];
 
 export async function applyMigrations(

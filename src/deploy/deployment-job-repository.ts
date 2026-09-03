@@ -2,6 +2,10 @@ import { randomUUID } from 'node:crypto';
 
 import { SfudError } from '../core/errors.js';
 import type { DatabaseExecutor, DatabaseHandle } from '../storage/database-executor.js';
+import {
+  readCompressedJsonArtifact,
+  writeCompressedJsonArtifact,
+} from '../storage/json-artifact.js';
 import { runInImmediateTransaction } from '../storage/transaction.js';
 import type { ComparisonResult, ComparisonSummary } from '../metadata/comparator.js';
 import type { ApexTestPlan, RequestedTestLevel } from './test-plan.js';
@@ -48,6 +52,9 @@ export interface DeploymentJob {
   startedAt?: string;
   completedAt?: string;
   prepared: boolean;
+  comparisonArtifactPath?: string;
+  dryRunArtifactPath?: string;
+  deploymentArtifactPath?: string;
   comparisonSummary?: ComparisonSummary;
   comparisonResult?: ComparisonResult;
   testPlan?: ApexTestPlan;
@@ -128,10 +135,13 @@ interface DeploymentJobRow {
   completed_at: string | null;
   is_prepared: number;
   comparison_result_json?: string | null;
+  comparison_artifact_path?: string | null;
   test_plan_json?: string | null;
   dry_run_result_json?: string | null;
+  dry_run_artifact_path?: string | null;
   selected_components_json?: string | null;
   deployment_result_json?: string | null;
+  deployment_artifact_path?: string | null;
   progress_json?: string | null;
   remote_status: RemoteDeploymentStatus;
   persistence_warning: string | null;
@@ -281,7 +291,7 @@ export class DeploymentJobRepository {
       'SELECT * FROM deployment_jobs WHERE id = ?',
       id,
     );
-    return row === undefined ? undefined : mapDeploymentJob(row);
+    return row === undefined ? undefined : await hydrateArtifacts(mapDeploymentJob(row));
   }
 
   public async getRequired(id: string): Promise<DeploymentJob> {
@@ -355,20 +365,25 @@ export class DeploymentJobRepository {
   }): Promise<void> {
     assertChecksum(input.payloadChecksum);
     const timestamp = this.now();
+    const [comparisonArtifactPath, dryRunArtifactPath] = await Promise.all([
+      writeCompressedJsonArtifact(input.runDirectory, 'comparison.json.gz', input.comparisonResult),
+      writeCompressedJsonArtifact(input.runDirectory, 'dry-run.json.gz', input.dryRunResult),
+    ]);
     await runInImmediateTransaction(this.database, async (transaction) => {
       const result = await transaction.run(`
         UPDATE deployment_jobs
         SET payload_checksum = ?, run_directory = ?, is_prepared = 1,
-            comparison_result_json = ?, test_plan_json = ?, dry_run_result_json = ?,
+            comparison_result_json = NULL, comparison_artifact_path = ?,
+            test_plan_json = ?, dry_run_result_json = NULL, dry_run_artifact_path = ?,
             summary_added = ?, summary_removed = ?, summary_modified = ?,
             summary_identical = ?, summary_total = ?, summary_different = ?, updated_at = ?
         WHERE id = ? AND kind = 'DRY_RUN' AND status = 'DRY_RUN_RUNNING' AND is_prepared = 0
       `,
       input.payloadChecksum,
       input.runDirectory,
-      JSON.stringify(input.comparisonResult),
+      comparisonArtifactPath,
       JSON.stringify(input.testPlan),
-      JSON.stringify(input.dryRunResult),
+      dryRunArtifactPath,
       input.comparisonResult.summary.added,
       input.comparisonResult.summary.removed,
       input.comparisonResult.summary.modified,
@@ -395,6 +410,7 @@ export class DeploymentJobRepository {
       throw new SfudError('APPROVAL_DENIED', '실제 배포 확인 문구가 일치하지 않습니다.');
     }
     assertChecksum(input.payloadChecksum);
+    const dryRunArtifacts = await this.getRequired(input.dryRunJobId);
 
     let deployJobId = '';
     try {
@@ -420,9 +436,9 @@ export class DeploymentJobRepository {
           throw new SfudError('APPROVAL_DENIED', 'dry-run 승인 유효시간 30분이 지났습니다. dry-run을 다시 실행하세요.');
         }
         if (
-          dryRun.comparisonResult === undefined
-          || dryRun.testPlan === undefined
-          || dryRun.dryRunResult === undefined
+          dryRunArtifacts.comparisonResult === undefined
+          || dryRunArtifacts.testPlan === undefined
+          || dryRunArtifacts.dryRunResult === undefined
         ) {
           throw new SfudError('APPROVAL_DENIED', 'dry-run 배포 아티팩트가 완전하지 않습니다.');
         }
@@ -452,10 +468,17 @@ export class DeploymentJobRepository {
         INSERT INTO deployment_jobs (
           id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
           run_directory, selected_components_json, dry_run_job_id, is_prepared,
-          comparison_result_json, test_plan_json, dry_run_result_json,
+          comparison_result_json, comparison_artifact_path, test_plan_json,
+          dry_run_result_json, dry_run_artifact_path,
           summary_added, summary_removed, summary_modified, summary_identical, summary_total, summary_different,
           source_org_identity_json, target_org_identity_json, created_by, created_at, updated_at
-        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (
+          ?, 'DEPLOY', 'QUEUED',
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,
+          ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?
+        )
       `,
         deployJobId,
         dryRun.source,
@@ -467,9 +490,15 @@ export class DeploymentJobRepository {
         dryRun.runDirectory ?? null,
         dryRun.selectedComponents === undefined ? null : JSON.stringify(dryRun.selectedComponents),
         dryRun.id,
-        JSON.stringify(dryRun.comparisonResult),
-        JSON.stringify(dryRun.testPlan),
-        JSON.stringify(dryRun.dryRunResult),
+        dryRunArtifacts.comparisonArtifactPath === undefined
+          ? JSON.stringify(dryRunArtifacts.comparisonResult)
+          : null,
+        dryRunArtifacts.comparisonArtifactPath ?? null,
+        JSON.stringify(dryRunArtifacts.testPlan),
+        dryRunArtifacts.dryRunArtifactPath === undefined
+          ? JSON.stringify(dryRunArtifacts.dryRunResult)
+          : null,
+        dryRunArtifacts.dryRunArtifactPath ?? null,
         dryRun.comparisonSummary?.added ?? null,
         dryRun.comparisonSummary?.removed ?? null,
         dryRun.comparisonSummary?.modified ?? null,
@@ -513,11 +542,23 @@ export class DeploymentJobRepository {
 
   public async recordDeploymentResult(id: string, deploymentResult: unknown): Promise<void> {
     const timestamp = this.now();
+    const current = await this.getRequired(id);
+    const deploymentArtifactPath = current.runDirectory === undefined
+      ? undefined
+      : await writeCompressedJsonArtifact(
+        current.runDirectory,
+        'deployment.json.gz',
+        deploymentResult,
+      );
     const result = await this.database.run(`
       UPDATE deployment_jobs
-      SET deployment_result_json = ?, updated_at = ?
+      SET deployment_result_json = ?, deployment_artifact_path = ?, updated_at = ?
       WHERE id = ? AND kind = 'DEPLOY' AND status = 'DEPLOYING'
-    `, JSON.stringify(deploymentResult), timestamp, id);
+    `,
+    deploymentArtifactPath === undefined ? JSON.stringify(deploymentResult) : null,
+    deploymentArtifactPath ?? null,
+    timestamp,
+    id);
     if (result.changes !== 1) {
       throw new SfudError('INVALID_JOB_STATE', '실제 배포 결과를 기록할 수 없는 작업 상태입니다.');
     }
@@ -609,22 +650,30 @@ export class DeploymentJobRepository {
   }): Promise<void> {
     assertChecksum(input.payloadChecksum);
     const timestamp = this.now();
+    const [comparisonArtifactPath, dryRunArtifactPath, deploymentArtifactPath] = await Promise.all([
+      writeCompressedJsonArtifact(input.runDirectory, 'comparison.json.gz', input.comparisonResult),
+      input.dryRunResult === undefined
+        ? Promise.resolve(undefined)
+        : writeCompressedJsonArtifact(input.runDirectory, 'dry-run.json.gz', input.dryRunResult),
+      writeCompressedJsonArtifact(input.runDirectory, 'deployment.json.gz', input.deploymentResult),
+    ]);
     await runInImmediateTransaction(this.database, async (transaction) => {
       const result = await transaction.run(`
         UPDATE deployment_jobs
         SET payload_checksum = ?, run_directory = ?, is_prepared = 1,
-            comparison_result_json = ?, test_plan_json = ?, dry_run_result_json = ?,
-            deployment_result_json = ?,
+            comparison_result_json = NULL, comparison_artifact_path = ?, test_plan_json = ?,
+            dry_run_result_json = NULL, dry_run_artifact_path = ?,
+            deployment_result_json = NULL, deployment_artifact_path = ?,
             summary_added = ?, summary_removed = ?, summary_modified = ?,
             summary_identical = ?, summary_total = ?, summary_different = ?, updated_at = ?
         WHERE id = ? AND kind = 'DEPLOY' AND dry_run_job_id IS NULL AND status = 'DEPLOYING'
       `,
       input.payloadChecksum,
       input.runDirectory,
-      JSON.stringify(input.comparisonResult),
+      comparisonArtifactPath,
       JSON.stringify(input.testPlan),
-      input.dryRunResult === undefined ? null : JSON.stringify(input.dryRunResult),
-      JSON.stringify(input.deploymentResult),
+      dryRunArtifactPath ?? null,
+      deploymentArtifactPath,
       input.comparisonResult.summary.added,
       input.comparisonResult.summary.removed,
       input.comparisonResult.summary.modified,
@@ -679,9 +728,10 @@ export class DeploymentJobRepository {
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
       throw new SfudError('INVALID_ARGUMENT', '조회 개수는 1부터 200 사이여야 합니다.');
     }
-    return (await this.database.all<DeploymentJobRow[]>(`
+    const jobs = (await this.database.all<DeploymentJobRow[]>(`
       SELECT * FROM deployment_jobs ORDER BY created_at DESC, id DESC LIMIT ?
     `, limit)).map(mapDeploymentJob);
+    return await Promise.all(jobs.map(hydrateArtifacts));
   }
 
   public async listRecentSummary(limit = 50): Promise<DeploymentJob[]> {
@@ -785,6 +835,15 @@ function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
     ...(row.started_at === null ? {} : { startedAt: row.started_at }),
     ...(row.completed_at === null ? {} : { completedAt: row.completed_at }),
     prepared: row.is_prepared === 1,
+    ...(row.comparison_artifact_path == null
+      ? {}
+      : { comparisonArtifactPath: row.comparison_artifact_path }),
+    ...(row.dry_run_artifact_path == null
+      ? {}
+      : { dryRunArtifactPath: row.dry_run_artifact_path }),
+    ...(row.deployment_artifact_path == null
+      ? {}
+      : { deploymentArtifactPath: row.deployment_artifact_path }),
     ...(comparisonSummary === undefined ? {} : { comparisonSummary }),
     ...(comparisonResult === undefined ? {} : { comparisonResult }),
     ...(row.test_plan_json == null ? {} : { testPlan: JSON.parse(row.test_plan_json) as ApexTestPlan }),
@@ -806,6 +865,30 @@ function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
     ...(row.target_org_identity_json == null
       ? {}
       : { targetOrgIdentity: JSON.parse(row.target_org_identity_json) as OrgIdentitySnapshot }),
+  };
+}
+
+async function hydrateArtifacts(job: DeploymentJob): Promise<DeploymentJob> {
+  if (job.runDirectory === undefined) return job;
+  const [comparisonResult, dryRunResult, deploymentResult] = await Promise.all([
+    job.comparisonResult !== undefined || job.comparisonArtifactPath === undefined
+      ? Promise.resolve(job.comparisonResult)
+      : readCompressedJsonArtifact<ComparisonResult>(job.runDirectory, job.comparisonArtifactPath),
+    job.dryRunResult !== undefined || job.dryRunArtifactPath === undefined
+      ? Promise.resolve(job.dryRunResult)
+      : readCompressedJsonArtifact<unknown>(job.runDirectory, job.dryRunArtifactPath),
+    job.deploymentResult !== undefined || job.deploymentArtifactPath === undefined
+      ? Promise.resolve(job.deploymentResult)
+      : readCompressedJsonArtifact<unknown>(job.runDirectory, job.deploymentArtifactPath),
+  ]);
+  return {
+    ...job,
+    ...(comparisonResult === undefined ? {} : { comparisonResult }),
+    ...(dryRunResult === undefined ? {} : { dryRunResult }),
+    ...(deploymentResult === undefined ? {} : { deploymentResult }),
+    ...(job.comparisonSummary === undefined && comparisonResult?.summary === undefined
+      ? {}
+      : { comparisonSummary: job.comparisonSummary ?? comparisonResult!.summary }),
   };
 }
 

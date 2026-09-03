@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { compareSnapshots } from '../src/metadata/comparator.js';
+import { compareSnapshots, MAX_DIFF_INPUT_BYTES } from '../src/metadata/comparator.js';
 import type { SourceSpec } from '../src/sources/source-spec.js';
 import type { MetadataSnapshot } from '../src/sources/snapshot.js';
 import { removeDirectoriesAfterTest, writeFixtureFiles } from './support/files.js';
@@ -136,6 +136,34 @@ describe('metadata comparator', () => {
         expect.objectContaining({ status: 'IDENTICAL', xmlChanges: [] }),
       ]),
     );
+  });
+
+  it('대형 텍스트 파일은 전체 diff를 만들지 않고 checksum과 생략 경고를 남긴다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-large-diff-'));
+    temporaryDirectories.push(root);
+    const leftRoot = path.join(root, 'left');
+    const rightRoot = path.join(root, 'right');
+    await Promise.all([mkdir(leftRoot), mkdir(rightRoot)]);
+    const metadata = '<?xml version="1.0"?><ApexClass><status>Active</status></ApexClass>';
+    await Promise.all([
+      writeFixtureFiles(leftRoot, {
+        'package.xml': '<Package/>',
+        'classes/Large.cls': `// left\n${'a'.repeat(MAX_DIFF_INPUT_BYTES)}`,
+        'classes/Large.cls-meta.xml': metadata,
+      }),
+      writeFixtureFiles(rightRoot, {
+        'package.xml': '<Package/>',
+        'classes/Large.cls': `// right\n${'b'.repeat(MAX_DIFF_INPUT_BYTES)}`,
+        'classes/Large.cls-meta.xml': metadata,
+      }),
+    ]);
+
+    const result = await compareSnapshots(snapshot(leftRoot, 'left'), snapshot(rightRoot, 'right'));
+    const file = result.components[0]?.files.find((entry) => entry.path.endsWith('Large.cls'));
+
+    expect(file).toMatchObject({ status: 'MODIFIED', kind: 'text', diffTruncated: true });
+    expect(file?.unifiedDiff).toBeUndefined();
+    expect(result.warnings).toContainEqual(expect.stringContaining('상세 diff 일부를 생략'));
   });
 });
 

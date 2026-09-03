@@ -2,6 +2,10 @@ import { randomUUID } from 'node:crypto';
 
 import type { ComparisonResult, ComparisonSummary } from '../metadata/comparator.js';
 import type { DatabaseExecutor, DatabaseHandle } from '../storage/database-executor.js';
+import {
+  readCompressedJsonArtifact,
+  writeCompressedJsonArtifact,
+} from '../storage/json-artifact.js';
 import { runInImmediateTransaction } from '../storage/transaction.js';
 
 export type ComparisonJobStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
@@ -20,6 +24,7 @@ export interface ComparisonJob {
   showIdentical: boolean;
   createdBy: string;
   runDirectory?: string;
+  resultArtifactPath?: string;
   summary?: ComparisonSummary;
   result?: ComparisonResult;
   errorCode?: string;
@@ -56,6 +61,7 @@ interface ComparisonJobRow {
   created_by: string;
   run_directory: string | null;
   result_json?: string | null;
+  result_artifact_path?: string | null;
   summary_added: number | null;
   summary_removed: number | null;
   summary_modified: number | null;
@@ -100,7 +106,7 @@ export class ComparisonJobRepository {
 
   public async get(id: string): Promise<ComparisonJob | undefined> {
     const row = await this.database.get<ComparisonJobRow>('SELECT * FROM comparison_jobs WHERE id = ?', id);
-    return row === undefined ? undefined : mapRow(row);
+    return row === undefined ? undefined : await hydrateResult(mapRow(row));
   }
 
   public async getRequired(id: string): Promise<ComparisonJob> {
@@ -121,16 +127,21 @@ export class ComparisonJobRepository {
 
   public async markSucceeded(id: string, resultValue: ComparisonResult, runDirectory: string): Promise<void> {
     const timestamp = this.now();
+    const resultArtifactPath = await writeCompressedJsonArtifact(
+      runDirectory,
+      'comparison.json.gz',
+      resultValue,
+    );
     await runInImmediateTransaction(this.database, async (transaction) => {
       const result = await transaction.run(`
         UPDATE comparison_jobs
-        SET status = 'SUCCEEDED', result_json = ?, run_directory = ?,
+        SET status = 'SUCCEEDED', result_json = NULL, result_artifact_path = ?, run_directory = ?,
             summary_added = ?, summary_removed = ?, summary_modified = ?,
             summary_identical = ?, summary_total = ?, summary_different = ?,
             updated_at = ?, completed_at = ?
         WHERE id = ? AND status = 'RUNNING'
       `,
-      JSON.stringify(resultValue), runDirectory,
+      resultArtifactPath, runDirectory,
       resultValue.summary.added, resultValue.summary.removed, resultValue.summary.modified,
       resultValue.summary.identical, resultValue.summary.total, resultValue.summary.different,
       timestamp, timestamp, id);
@@ -171,9 +182,10 @@ export class ComparisonJobRepository {
   }
 
   public async listRecent(limit = 30): Promise<ComparisonJob[]> {
-    return (await this.database.all<ComparisonJobRow[]>(`
+    const jobs = (await this.database.all<ComparisonJobRow[]>(`
       SELECT * FROM comparison_jobs ORDER BY created_at DESC, id DESC LIMIT ?
     `, Math.min(Math.max(limit, 1), 100))).map(mapRow);
+    return await Promise.all(jobs.map(hydrateResult));
   }
 
   public async listRecentSummary(limit = 30): Promise<ComparisonJob[]> {
@@ -230,6 +242,7 @@ function mapRow(row: ComparisonJobRow): ComparisonJob {
     showIdentical: row.show_identical === 1,
     createdBy: row.created_by,
     ...(row.run_directory === null ? {} : { runDirectory: row.run_directory }),
+    ...(row.result_artifact_path == null ? {} : { resultArtifactPath: row.result_artifact_path }),
     ...(summary === undefined ? {} : { summary }),
     ...(result === undefined ? {} : { result }),
     ...(row.error_code === null ? {} : { errorCode: row.error_code }),
@@ -239,6 +252,19 @@ function mapRow(row: ComparisonJobRow): ComparisonJob {
     ...(row.started_at === null ? {} : { startedAt: row.started_at }),
     ...(row.completed_at === null ? {} : { completedAt: row.completed_at }),
   };
+}
+
+async function hydrateResult(job: ComparisonJob): Promise<ComparisonJob> {
+  if (
+    job.result !== undefined
+    || job.resultArtifactPath === undefined
+    || job.runDirectory === undefined
+  ) return job;
+  const result = await readCompressedJsonArtifact<ComparisonResult>(
+    job.runDirectory,
+    job.resultArtifactPath,
+  );
+  return { ...job, result, summary: job.summary ?? result.summary };
 }
 
 function summaryFromRow(row: ComparisonJobRow): ComparisonSummary | undefined {

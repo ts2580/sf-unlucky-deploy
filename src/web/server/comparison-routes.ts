@@ -26,6 +26,11 @@ interface ApexTestClassesQuery {
   sourceId?: string;
 }
 
+interface ComponentPageQuery {
+  page?: string;
+  pageSize?: string;
+}
+
 export async function registerComparisonRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/v1/workspace', async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
@@ -168,6 +173,41 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     }
     return reply.send({ job: publicJob(app, job, true) });
   });
+
+  app.get<{ Params: { id: string }; Querystring: ComponentPageQuery }>(
+    '/api/v1/comparisons/:id/components',
+    async (request, reply) => {
+      const session = await requireAuthenticatedSession(app, request, reply);
+      if (session === undefined) return;
+      try {
+        const page = positiveInteger(request.query.page, 1, 1_000_000, '페이지');
+        const pageSize = positiveInteger(request.query.pageSize, 50, 100, '페이지 크기');
+        const job = await app.sfudRuntime.comparisonJobs.get(request.params.id);
+        if (job === undefined) {
+          return reply.code(404).send({ error: {
+            code: 'COMPARISON_NOT_FOUND', message: '비교 작업을 찾을 수 없습니다.',
+          } });
+        }
+        const components = (job.result?.components ?? [])
+          .filter((component) => job.showIdentical || component.status !== 'IDENTICAL');
+        const total = components.length;
+        const totalPages = Math.max(1, Math.ceil(total / pageSize));
+        const start = (page - 1) * pageSize;
+        return reply.send({
+          components: components.slice(start, start + pageSize),
+          page,
+          pageSize,
+          total,
+          totalPages,
+        });
+      } catch (error) {
+        return reply.code(400).send({ error: {
+          code: 'INVALID_COMPONENT_PAGE',
+          message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
+        } });
+      }
+    },
+  );
 }
 
 function publicJob(app: FastifyInstance, job: ComparisonJob, includeResult: boolean) {
@@ -222,4 +262,19 @@ function requiredMetadataType(value: unknown): string {
     throw new Error('Salesforce metadata type이 올바르지 않습니다.');
   }
   return value;
+}
+
+function positiveInteger(
+  value: string | undefined,
+  fallback: number,
+  maximum: number,
+  label: string,
+): number {
+  if (value === undefined) return fallback;
+  if (!/^\d+$/u.test(value)) throw new Error(`${label}가 올바르지 않습니다.`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
+    throw new Error(`${label}는 1부터 ${maximum} 사이여야 합니다.`);
+  }
+  return parsed;
 }

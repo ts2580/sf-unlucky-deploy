@@ -144,6 +144,19 @@ describe('비교 API', () => {
         },
       });
       expect(completed.body).not.toContain(projectPath);
+      const componentPage = await server.inject({
+        url: `/api/v1/comparisons/${jobId}/components?page=1&pageSize=1`,
+        headers: { cookie },
+      });
+      expect(componentPage.statusCode).toBe(200);
+      expect(componentPage.json()).toMatchObject({
+        page: 1, pageSize: 1, total: 1, totalPages: 1,
+        components: [{ type: 'ApexClass', status: 'MODIFIED' }],
+      });
+      expect((await server.inject({
+        url: `/api/v1/comparisons/${jobId}/components?pageSize=101`,
+        headers: { cookie },
+      })).statusCode).toBe(400);
       expect(await server.sfudRuntime.store.database.get(
         "SELECT COUNT(*) count FROM audit_events WHERE event_type = 'COMPARISON_SUCCEEDED'",
       )).toEqual({ count: 1 });

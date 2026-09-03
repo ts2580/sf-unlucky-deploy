@@ -46,7 +46,7 @@ describe('SQLite 저장소', () => {
     expect(await store.database.get('PRAGMA journal_mode')).toEqual({ journal_mode: 'wal' });
     expect(await store.database.get('PRAGMA busy_timeout')).toEqual({ timeout: 5_000 });
     expect(await store.database.get('SELECT COUNT(*) count FROM schema_migrations'))
-      .toEqual({ count: 15 });
+      .toEqual({ count: 16 });
     expect((await stat(path.dirname(databasePath))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
     await expect(readFile(databasePath)).resolves.toBeInstanceOf(Buffer);
@@ -112,6 +112,19 @@ describe('SQLite 저장소', () => {
     });
     await deploymentJobs.transition(dryRun.id, 'DRY_RUN_RUNNING');
     await recordPreparedArtifacts(deploymentJobs, dryRun.id);
+    const deploymentStorage = await store.database.get<{
+      comparisonJson: string | null;
+      dryRunJson: string | null;
+      comparisonPath: string;
+      dryRunPath: string;
+    }>(`
+      SELECT comparison_result_json comparisonJson, dry_run_result_json dryRunJson,
+        comparison_artifact_path comparisonPath, dry_run_artifact_path dryRunPath
+      FROM deployment_jobs WHERE id = ?
+    `, dryRun.id);
+    expect(deploymentStorage).toMatchObject({ comparisonJson: null, dryRunJson: null });
+    expect(deploymentStorage?.comparisonPath).toMatch(/comparison\.json\.gz$/u);
+    expect(deploymentStorage?.dryRunPath).toMatch(/dry-run\.json\.gz$/u);
 
     const comparisonJobs = new ComparisonJobRepository(
       store.database,
@@ -124,7 +137,16 @@ describe('SQLite 저장소', () => {
       showIdentical: false, createdBy: user.id,
     });
     await comparisonJobs.markRunning(comparison.id);
-    await comparisonJobs.markSucceeded(comparison.id, comparisonResult, '/runs/comparison');
+    const comparisonRunDirectory = await mkdtemp(path.join(os.tmpdir(), 'sfud-summary-comparison-'));
+    directories.push(comparisonRunDirectory);
+    await comparisonJobs.markSucceeded(comparison.id, comparisonResult, comparisonRunDirectory);
+    expect(await store.database.get(`
+      SELECT result_json resultJson, result_artifact_path resultPath
+      FROM comparison_jobs WHERE id = ?
+    `, comparison.id)).toMatchObject({
+      resultJson: null,
+      resultPath: expect.stringMatching(/comparison\.json\.gz$/u),
+    });
 
     await store.database.run(`
       UPDATE deployment_jobs
@@ -443,10 +465,12 @@ function orgIdentity(alias: string) {
 }
 
 async function recordPreparedArtifacts(jobs: DeploymentJobRepository, id: string): Promise<void> {
+  const runDirectory = await mkdtemp(path.join(os.tmpdir(), `sfud-artifacts-${id}-`));
+  directories.push(runDirectory);
   await jobs.recordDryRunArtifacts({
     id,
     payloadChecksum: checksum,
-    runDirectory: `.sfud/runs/${id}`,
+    runDirectory,
     comparisonResult,
     testPlan: { level: 'RunLocalTests', tests: [], selection: 'fallback' },
     dryRunResult: { status: 0, result: { id: '0Af-dry-run' } },

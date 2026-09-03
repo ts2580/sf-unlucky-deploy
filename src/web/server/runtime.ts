@@ -14,6 +14,7 @@ import { DryRunService } from '../../deploy/dry-run-service.js';
 import { DeploymentService } from '../../deploy/deployment-service.js';
 import { WorkflowEventHub } from './workflow-events.js';
 import { UserSettingsRepository } from '../../storage/user-settings-repository.js';
+import { prepareRunStorage } from '../../storage/run-storage.js';
 
 export interface WebRuntime {
   store: SqliteStore;
@@ -84,6 +85,7 @@ export async function createWebRuntime(
     path.dirname(databasePath === ':memory:' ? path.join(cwd, '.sfud', 'sfud.db') : databasePath),
     'runs',
   );
+  await prepareRunStorage(runsDirectory);
   const deploymentCoordinator = new DeploymentCoordinator(deploymentJobs, deploymentQueue);
   let shutdownRequest: Promise<void> | undefined;
   const runtime: WebRuntime = {
