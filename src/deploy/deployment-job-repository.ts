@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { SfudError } from '../core/errors.js';
 import type { DatabaseExecutor, DatabaseHandle } from '../storage/database-executor.js';
 import { runInImmediateTransaction } from '../storage/transaction.js';
-import type { ComparisonResult } from '../metadata/comparator.js';
+import type { ComparisonResult, ComparisonSummary } from '../metadata/comparator.js';
 import type { ApexTestPlan, RequestedTestLevel } from './test-plan.js';
 import type { SelectedMetadataComponent } from './selected-manifest.js';
 import type { SalesforceDeploymentProgress } from './salesforce-deployment.js';
@@ -48,6 +48,7 @@ export interface DeploymentJob {
   startedAt?: string;
   completedAt?: string;
   prepared: boolean;
+  comparisonSummary?: ComparisonSummary;
   comparisonResult?: ComparisonResult;
   testPlan?: ApexTestPlan;
   dryRunResult?: unknown;
@@ -126,16 +127,22 @@ interface DeploymentJobRow {
   started_at: string | null;
   completed_at: string | null;
   is_prepared: number;
-  comparison_result_json: string | null;
-  test_plan_json: string | null;
-  dry_run_result_json: string | null;
-  selected_components_json: string | null;
-  deployment_result_json: string | null;
-  progress_json: string | null;
+  comparison_result_json?: string | null;
+  test_plan_json?: string | null;
+  dry_run_result_json?: string | null;
+  selected_components_json?: string | null;
+  deployment_result_json?: string | null;
+  progress_json?: string | null;
   remote_status: RemoteDeploymentStatus;
   persistence_warning: string | null;
-  source_org_identity_json: string | null;
-  target_org_identity_json: string | null;
+  source_org_identity_json?: string | null;
+  target_org_identity_json?: string | null;
+  summary_added: number | null;
+  summary_removed: number | null;
+  summary_modified: number | null;
+  summary_identical: number | null;
+  summary_total: number | null;
+  summary_different: number | null;
 }
 
 const DRY_RUN_APPROVAL_TTL_MS = 30 * 60 * 1_000;
@@ -352,7 +359,9 @@ export class DeploymentJobRepository {
       const result = await transaction.run(`
         UPDATE deployment_jobs
         SET payload_checksum = ?, run_directory = ?, is_prepared = 1,
-            comparison_result_json = ?, test_plan_json = ?, dry_run_result_json = ?, updated_at = ?
+            comparison_result_json = ?, test_plan_json = ?, dry_run_result_json = ?,
+            summary_added = ?, summary_removed = ?, summary_modified = ?,
+            summary_identical = ?, summary_total = ?, summary_different = ?, updated_at = ?
         WHERE id = ? AND kind = 'DRY_RUN' AND status = 'DRY_RUN_RUNNING' AND is_prepared = 0
       `,
       input.payloadChecksum,
@@ -360,6 +369,12 @@ export class DeploymentJobRepository {
       JSON.stringify(input.comparisonResult),
       JSON.stringify(input.testPlan),
       JSON.stringify(input.dryRunResult),
+      input.comparisonResult.summary.added,
+      input.comparisonResult.summary.removed,
+      input.comparisonResult.summary.modified,
+      input.comparisonResult.summary.identical,
+      input.comparisonResult.summary.total,
+      input.comparisonResult.summary.different,
       timestamp,
       input.id);
       if (result.changes !== 1) {
@@ -438,8 +453,9 @@ export class DeploymentJobRepository {
           id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
           run_directory, selected_components_json, dry_run_job_id, is_prepared,
           comparison_result_json, test_plan_json, dry_run_result_json,
+          summary_added, summary_removed, summary_modified, summary_identical, summary_total, summary_different,
           source_org_identity_json, target_org_identity_json, created_by, created_at, updated_at
-        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         deployJobId,
         dryRun.source,
@@ -454,6 +470,12 @@ export class DeploymentJobRepository {
         JSON.stringify(dryRun.comparisonResult),
         JSON.stringify(dryRun.testPlan),
         JSON.stringify(dryRun.dryRunResult),
+        dryRun.comparisonSummary?.added ?? null,
+        dryRun.comparisonSummary?.removed ?? null,
+        dryRun.comparisonSummary?.modified ?? null,
+        dryRun.comparisonSummary?.identical ?? null,
+        dryRun.comparisonSummary?.total ?? null,
+        dryRun.comparisonSummary?.different ?? null,
         dryRun.sourceOrgIdentity === undefined ? null : JSON.stringify(dryRun.sourceOrgIdentity),
         JSON.stringify(dryRun.targetOrgIdentity),
         input.approvedBy,
@@ -592,7 +614,9 @@ export class DeploymentJobRepository {
         UPDATE deployment_jobs
         SET payload_checksum = ?, run_directory = ?, is_prepared = 1,
             comparison_result_json = ?, test_plan_json = ?, dry_run_result_json = ?,
-            deployment_result_json = ?, updated_at = ?
+            deployment_result_json = ?,
+            summary_added = ?, summary_removed = ?, summary_modified = ?,
+            summary_identical = ?, summary_total = ?, summary_different = ?, updated_at = ?
         WHERE id = ? AND kind = 'DEPLOY' AND dry_run_job_id IS NULL AND status = 'DEPLOYING'
       `,
       input.payloadChecksum,
@@ -601,6 +625,12 @@ export class DeploymentJobRepository {
       JSON.stringify(input.testPlan),
       input.dryRunResult === undefined ? null : JSON.stringify(input.dryRunResult),
       JSON.stringify(input.deploymentResult),
+      input.comparisonResult.summary.added,
+      input.comparisonResult.summary.removed,
+      input.comparisonResult.summary.modified,
+      input.comparisonResult.summary.identical,
+      input.comparisonResult.summary.total,
+      input.comparisonResult.summary.different,
       timestamp,
       input.id);
       if (result.changes !== 1) {
@@ -651,6 +681,20 @@ export class DeploymentJobRepository {
     }
     return (await this.database.all<DeploymentJobRow[]>(`
       SELECT * FROM deployment_jobs ORDER BY created_at DESC, id DESC LIMIT ?
+    `, limit)).map(mapDeploymentJob);
+  }
+
+  public async listRecentSummary(limit = 50): Promise<DeploymentJob[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      throw new SfudError('INVALID_ARGUMENT', '조회 개수는 1부터 200 사이여야 합니다.');
+    }
+    return (await this.database.all<DeploymentJobRow[]>(`
+      SELECT id, kind, status, source, target_alias, manifest_path, scope, metadata_type,
+        payload_checksum, run_directory, salesforce_deployment_id, dry_run_job_id, created_by,
+        error_code, error_message, created_at, updated_at, started_at, completed_at, is_prepared,
+        remote_status, persistence_warning,
+        summary_added, summary_removed, summary_modified, summary_identical, summary_total, summary_different
+      FROM deployment_jobs ORDER BY created_at DESC, id DESC LIMIT ?
     `, limit)).map(mapDeploymentJob);
   }
 
@@ -714,6 +758,10 @@ function isUniqueConstraintError(error: unknown): boolean {
 }
 
 function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
+  const comparisonResult = row.comparison_result_json == null
+    ? undefined
+    : JSON.parse(row.comparison_result_json) as ComparisonResult;
+  const comparisonSummary = summaryFromRow(row) ?? comparisonResult?.summary;
   return {
     id: row.id,
     kind: row.kind,
@@ -737,28 +785,47 @@ function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
     ...(row.started_at === null ? {} : { startedAt: row.started_at }),
     ...(row.completed_at === null ? {} : { completedAt: row.completed_at }),
     prepared: row.is_prepared === 1,
-    ...(row.comparison_result_json === null
-      ? {}
-      : { comparisonResult: JSON.parse(row.comparison_result_json) as ComparisonResult }),
-    ...(row.test_plan_json === null ? {} : { testPlan: JSON.parse(row.test_plan_json) as ApexTestPlan }),
-    ...(row.dry_run_result_json === null ? {} : { dryRunResult: JSON.parse(row.dry_run_result_json) as unknown }),
-    ...(row.selected_components_json === null
+    ...(comparisonSummary === undefined ? {} : { comparisonSummary }),
+    ...(comparisonResult === undefined ? {} : { comparisonResult }),
+    ...(row.test_plan_json == null ? {} : { testPlan: JSON.parse(row.test_plan_json) as ApexTestPlan }),
+    ...(row.dry_run_result_json == null ? {} : { dryRunResult: JSON.parse(row.dry_run_result_json) as unknown }),
+    ...(row.selected_components_json == null
       ? {}
       : { selectedComponents: JSON.parse(row.selected_components_json) as SelectedMetadataComponent[] }),
-    ...(row.deployment_result_json === null
+    ...(row.deployment_result_json == null
       ? {}
       : { deploymentResult: JSON.parse(row.deployment_result_json) as unknown }),
-    ...(row.progress_json === null
+    ...(row.progress_json == null
       ? {}
       : { progress: JSON.parse(row.progress_json) as SalesforceDeploymentProgress }),
     remoteStatus: row.remote_status,
     ...(row.persistence_warning === null ? {} : { persistenceWarning: row.persistence_warning }),
-    ...(row.source_org_identity_json === null
+    ...(row.source_org_identity_json == null
       ? {}
       : { sourceOrgIdentity: JSON.parse(row.source_org_identity_json) as OrgIdentitySnapshot }),
-    ...(row.target_org_identity_json === null
+    ...(row.target_org_identity_json == null
       ? {}
       : { targetOrgIdentity: JSON.parse(row.target_org_identity_json) as OrgIdentitySnapshot }),
+  };
+}
+
+function summaryFromRow(row: DeploymentJobRow): ComparisonSummary | undefined {
+  const values = [
+    row.summary_added,
+    row.summary_removed,
+    row.summary_modified,
+    row.summary_identical,
+    row.summary_total,
+    row.summary_different,
+  ];
+  if (values.some((value) => typeof value !== 'number')) return undefined;
+  return {
+    added: row.summary_added!,
+    removed: row.summary_removed!,
+    modified: row.summary_modified!,
+    identical: row.summary_identical!,
+    total: row.summary_total!,
+    different: row.summary_different!,
   };
 }
 

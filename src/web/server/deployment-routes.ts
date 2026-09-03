@@ -137,7 +137,7 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
   app.get('/api/v1/deployment-jobs', async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
-    const jobs = await app.sfudRuntime.deploymentJobs.listRecent();
+    const jobs = await app.sfudRuntime.deploymentJobs.listRecentSummary();
     return reply.send({ jobs: jobs.map((job) => publicJob(app, job, false)) });
   });
 
@@ -206,7 +206,7 @@ function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: b
     ...(job.progress === undefined ? {} : { progress: job.progress }),
     ...(job.testPlan === undefined ? {} : { testPlan: job.testPlan }),
     ...(testCoverage === undefined ? {} : { testCoverage }),
-    ...(job.comparisonResult === undefined ? {} : { comparisonSummary: job.comparisonResult.summary }),
+    ...(job.comparisonSummary === undefined ? {} : { comparisonSummary: job.comparisonSummary }),
     ...(comparison === undefined ? {} : { comparison }),
     ...(includeArtifacts && job.dryRunResult !== undefined ? { dryRunResult: job.dryRunResult } : {}),
     ...(includeArtifacts && job.deploymentResult !== undefined ? { deploymentResult: job.deploymentResult } : {}),

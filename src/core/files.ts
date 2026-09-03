@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { chmod, mkdir, readdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { SfudError } from './errors.js';
@@ -27,7 +28,8 @@ export async function ensureEmptyDirectory(targetPath: string): Promise<void> {
     }
   }
 
-  await mkdir(targetPath, { recursive: true });
+  await mkdir(targetPath, { recursive: true, mode: 0o700 });
+  await chmod(targetPath, 0o700);
 }
 
 export async function listFiles(rootPath: string): Promise<string[]> {
@@ -67,7 +69,9 @@ export async function findPackageRoot(searchRoot: string): Promise<string> {
 }
 
 export async function sha256File(filePath: string): Promise<string> {
-  return createHash('sha256').update(await readFile(filePath)).digest('hex');
+  const hash = createHash('sha256');
+  await updateHashFromFile(hash, filePath);
+  return hash.digest('hex');
 }
 
 export async function sha256Directory(rootPath: string): Promise<string> {
@@ -76,7 +80,7 @@ export async function sha256Directory(rootPath: string): Promise<string> {
   for (const relativePath of await listFiles(rootPath)) {
     hash.update(relativePath);
     hash.update('\0');
-    hash.update(await readFile(path.join(rootPath, relativePath)));
+    await updateHashFromFile(hash, path.join(rootPath, relativePath));
     hash.update('\0');
   }
 
@@ -84,8 +88,18 @@ export async function sha256Directory(rootPath: string): Promise<string> {
 }
 
 export async function writeJson(filePath: string, value: unknown): Promise<void> {
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  const directory = path.dirname(filePath);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await chmod(directory, 0o700);
+  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
+  await chmod(filePath, 0o600);
+}
+
+async function updateHashFromFile(hash: ReturnType<typeof createHash>, filePath: string): Promise<void> {
+  for await (const chunk of createReadStream(filePath)) hash.update(chunk as Buffer);
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

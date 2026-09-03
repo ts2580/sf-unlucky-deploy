@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -54,6 +54,17 @@ describe('compare command', () => {
       access(result.reports.html),
       access(result.reports.checksums),
     ]);
+    expect((await stat(result.runDirectory)).mode & 0o777).toBe(0o700);
+    expect((await stat(result.reports.directory)).mode & 0o777).toBe(0o700);
+    for (const reportPath of [
+      result.reports.markdown,
+      result.reports.json,
+      result.reports.diff,
+      result.reports.html,
+      result.reports.checksums,
+    ]) {
+      expect((await stat(reportPath)).mode & 0o777).toBe(0o600);
+    }
   });
 
   it('선택 타입 멤버가 양쪽 모두 없으면 retrieve 없이 0개 차이로 완료한다', async () => {

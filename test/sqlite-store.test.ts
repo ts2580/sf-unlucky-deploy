@@ -10,6 +10,7 @@ import {
   DeploymentCoordinator,
   ReconciliationRequiredError,
 } from '../src/deploy/deployment-coordinator.js';
+import { ComparisonJobRepository } from '../src/compare/comparison-job-repository.js';
 import { DeploymentJobRepository } from '../src/deploy/deployment-job-repository.js';
 import { SingleJobQueue } from '../src/deploy/single-job-queue.js';
 import { openSqliteStore, type SqliteStore } from '../src/storage/sqlite-store.js';
@@ -45,7 +46,7 @@ describe('SQLite 저장소', () => {
     expect(await store.database.get('PRAGMA journal_mode')).toEqual({ journal_mode: 'wal' });
     expect(await store.database.get('PRAGMA busy_timeout')).toEqual({ timeout: 5_000 });
     expect(await store.database.get('SELECT COUNT(*) count FROM schema_migrations'))
-      .toEqual({ count: 14 });
+      .toEqual({ count: 15 });
     expect((await stat(path.dirname(databasePath))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
     await expect(readFile(databasePath)).resolves.toBeInstanceOf(Buffer);
@@ -92,6 +93,64 @@ describe('SQLite 저장소', () => {
       { id: 'inside', value: 'initial' },
       { id: 'outside', value: 'committed' },
     ]);
+  });
+
+  it('최근 작업 summary 조회에서 대형 상세 JSON을 읽거나 파싱하지 않는다', async () => {
+    const store = await openMemoryStore();
+    const users = new UserRepository(store.database, fixedNow, () => 'summary-user');
+    const user = await users.create({
+      email: 'summary@example.com', displayName: '요약 조회자', role: 'DEPLOYER',
+    });
+    const deploymentJobs = new DeploymentJobRepository(
+      store.database,
+      fixedNow,
+      () => 'summary-deployment',
+    );
+    const dryRun = await deploymentJobs.createDryRun({
+      source: 'local:source', targetAlias: 'target', targetOrgIdentity: orgIdentity('target'),
+      manifestPath: 'manifest/package.xml', payloadChecksum: checksum, createdBy: user.id,
+    });
+    await deploymentJobs.transition(dryRun.id, 'DRY_RUN_RUNNING');
+    await recordPreparedArtifacts(deploymentJobs, dryRun.id);
+
+    const comparisonJobs = new ComparisonJobRepository(
+      store.database,
+      fixedNow,
+      () => 'summary-comparison',
+    );
+    const comparison = await comparisonJobs.create({
+      projectPath: '/project', manifestPath: '/project/manifest/package.xml',
+      leftSource: 'org:target', rightSource: 'local:source', strict: false,
+      showIdentical: false, createdBy: user.id,
+    });
+    await comparisonJobs.markRunning(comparison.id);
+    await comparisonJobs.markSucceeded(comparison.id, comparisonResult, '/runs/comparison');
+
+    await store.database.run(`
+      UPDATE deployment_jobs
+      SET comparison_result_json = '{invalid', dry_run_result_json = '{invalid'
+      WHERE id = ?
+    `, dryRun.id);
+    await store.database.run(`
+      UPDATE comparison_jobs SET result_json = '{invalid' WHERE id = ?
+    `, comparison.id);
+
+    expect(await deploymentJobs.listRecentSummary()).toEqual([
+      expect.objectContaining({
+        id: dryRun.id,
+        comparisonSummary: comparisonResult.summary,
+      }),
+    ]);
+    expect((await deploymentJobs.listRecentSummary())[0]?.comparisonResult).toBeUndefined();
+    expect(await comparisonJobs.listRecentSummary()).toEqual([
+      expect.objectContaining({
+        id: comparison.id,
+        summary: comparisonResult.summary,
+      }),
+    ]);
+    expect((await comparisonJobs.listRecentSummary())[0]?.result).toBeUndefined();
+    await expect(deploymentJobs.getRequired(dryRun.id)).rejects.toThrow();
+    await expect(comparisonJobs.getRequired(comparison.id)).rejects.toThrow();
   });
 
   it('v8 승인 이력을 보존하면서 직접 배포를 허용하는 v9로 마이그레이션한다', async () => {

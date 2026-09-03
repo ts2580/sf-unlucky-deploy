@@ -155,7 +155,7 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
   app.get('/api/v1/comparisons', async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
-    const jobs = await app.sfudRuntime.comparisonJobs.listRecent();
+    const jobs = await app.sfudRuntime.comparisonJobs.listRecentSummary();
     return reply.send({ jobs: jobs.map((job) => publicJob(app, job, false)) });
   });
 
@@ -195,7 +195,7 @@ function publicJob(app: FastifyInstance, job: ComparisonJob, includeResult: bool
     right,
     strict: job.strict,
     showIdentical: job.showIdentical,
-    ...(job.result === undefined ? {} : { summary: job.result.summary }),
+    ...(job.summary === undefined ? {} : { summary: job.summary }),
     ...(result === undefined ? {} : { result }),
     ...(job.errorCode === undefined ? {} : { errorCode: job.errorCode }),
     ...(job.errorMessage === undefined ? {} : { errorMessage: job.errorMessage }),

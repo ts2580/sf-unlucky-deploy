@@ -46,7 +46,7 @@ export async function generateDeployableManifest(
   }
 
   const sourceDirectory = path.join(options.outputDirectory, 'sources');
-  await mkdir(sourceDirectory, { recursive: true });
+  await mkdir(sourceDirectory, { recursive: true, mode: 0o700 });
   const apiVersion = await readProjectApiVersion(options.commandProjectPath);
   const generated = await Promise.all(options.sources.map(async (source, index) => {
     const name = `${String(index + 1).padStart(2, '0')}-${source.kind}.xml`;

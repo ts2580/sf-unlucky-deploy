@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { ComparisonResult } from '../metadata/comparator.js';
+import type { ComparisonResult, ComparisonSummary } from '../metadata/comparator.js';
 import type { DatabaseExecutor, DatabaseHandle } from '../storage/database-executor.js';
 import { runInImmediateTransaction } from '../storage/transaction.js';
 
@@ -20,6 +20,7 @@ export interface ComparisonJob {
   showIdentical: boolean;
   createdBy: string;
   runDirectory?: string;
+  summary?: ComparisonSummary;
   result?: ComparisonResult;
   errorCode?: string;
   errorMessage?: string;
@@ -54,7 +55,13 @@ interface ComparisonJobRow {
   show_identical: number;
   created_by: string;
   run_directory: string | null;
-  result_json: string | null;
+  result_json?: string | null;
+  summary_added: number | null;
+  summary_removed: number | null;
+  summary_modified: number | null;
+  summary_identical: number | null;
+  summary_total: number | null;
+  summary_different: number | null;
   error_code: string | null;
   error_message: string | null;
   created_at: string;
@@ -117,9 +124,16 @@ export class ComparisonJobRepository {
     await runInImmediateTransaction(this.database, async (transaction) => {
       const result = await transaction.run(`
         UPDATE comparison_jobs
-        SET status = 'SUCCEEDED', result_json = ?, run_directory = ?, updated_at = ?, completed_at = ?
+        SET status = 'SUCCEEDED', result_json = ?, run_directory = ?,
+            summary_added = ?, summary_removed = ?, summary_modified = ?,
+            summary_identical = ?, summary_total = ?, summary_different = ?,
+            updated_at = ?, completed_at = ?
         WHERE id = ? AND status = 'RUNNING'
-      `, JSON.stringify(resultValue), runDirectory, timestamp, timestamp, id);
+      `,
+      JSON.stringify(resultValue), runDirectory,
+      resultValue.summary.added, resultValue.summary.removed, resultValue.summary.modified,
+      resultValue.summary.identical, resultValue.summary.total, resultValue.summary.different,
+      timestamp, timestamp, id);
       if (result.changes !== 1) throw new Error(`완료할 수 없는 비교 작업입니다: ${id}`);
       const job = await getRequired(transaction, id);
       await this.writeAudit(transaction, job.createdBy, 'COMPARISON_SUCCEEDED', id, { ...resultValue.summary }, timestamp);
@@ -162,6 +176,16 @@ export class ComparisonJobRepository {
     `, Math.min(Math.max(limit, 1), 100))).map(mapRow);
   }
 
+  public async listRecentSummary(limit = 30): Promise<ComparisonJob[]> {
+    return (await this.database.all<ComparisonJobRow[]>(`
+      SELECT id, status, scope, metadata_type, project_path, manifest_path, left_source, right_source,
+        strict, show_identical, created_by, run_directory,
+        summary_added, summary_removed, summary_modified, summary_identical, summary_total, summary_different,
+        error_code, error_message, created_at, updated_at, started_at, completed_at
+      FROM comparison_jobs ORDER BY created_at DESC, id DESC LIMIT ?
+    `, Math.min(Math.max(limit, 1), 100))).map(mapRow);
+  }
+
   private notify(job: ComparisonJob): ComparisonJob {
     this.onChanged?.(job);
     return job;
@@ -189,6 +213,10 @@ async function getRequired(database: DatabaseHandle, id: string): Promise<Compar
 }
 
 function mapRow(row: ComparisonJobRow): ComparisonJob {
+  const result = row.result_json == null
+    ? undefined
+    : JSON.parse(row.result_json) as ComparisonResult;
+  const summary = summaryFromRow(row) ?? result?.summary;
   return {
     id: row.id,
     status: row.status,
@@ -202,12 +230,33 @@ function mapRow(row: ComparisonJobRow): ComparisonJob {
     showIdentical: row.show_identical === 1,
     createdBy: row.created_by,
     ...(row.run_directory === null ? {} : { runDirectory: row.run_directory }),
-    ...(row.result_json === null ? {} : { result: JSON.parse(row.result_json) as ComparisonResult }),
+    ...(summary === undefined ? {} : { summary }),
+    ...(result === undefined ? {} : { result }),
     ...(row.error_code === null ? {} : { errorCode: row.error_code }),
     ...(row.error_message === null ? {} : { errorMessage: row.error_message }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.started_at === null ? {} : { startedAt: row.started_at }),
     ...(row.completed_at === null ? {} : { completedAt: row.completed_at }),
+  };
+}
+
+function summaryFromRow(row: ComparisonJobRow): ComparisonSummary | undefined {
+  const values = [
+    row.summary_added,
+    row.summary_removed,
+    row.summary_modified,
+    row.summary_identical,
+    row.summary_total,
+    row.summary_different,
+  ];
+  if (values.some((value) => typeof value !== 'number')) return undefined;
+  return {
+    added: row.summary_added!,
+    removed: row.summary_removed!,
+    modified: row.summary_modified!,
+    identical: row.summary_identical!,
+    total: row.summary_total!,
+    different: row.summary_different!,
   };
 }

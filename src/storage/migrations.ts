@@ -332,6 +332,43 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE deployment_jobs ADD COLUMN target_org_identity_json TEXT;
     `,
   },
+  {
+    version: 15,
+    name: 'job_summary_columns',
+    sql: `
+      ALTER TABLE comparison_jobs ADD COLUMN summary_added INTEGER;
+      ALTER TABLE comparison_jobs ADD COLUMN summary_removed INTEGER;
+      ALTER TABLE comparison_jobs ADD COLUMN summary_modified INTEGER;
+      ALTER TABLE comparison_jobs ADD COLUMN summary_identical INTEGER;
+      ALTER TABLE comparison_jobs ADD COLUMN summary_total INTEGER;
+      ALTER TABLE comparison_jobs ADD COLUMN summary_different INTEGER;
+
+      UPDATE comparison_jobs SET
+        summary_added = CAST(json_extract(result_json, '$.summary.added') AS INTEGER),
+        summary_removed = CAST(json_extract(result_json, '$.summary.removed') AS INTEGER),
+        summary_modified = CAST(json_extract(result_json, '$.summary.modified') AS INTEGER),
+        summary_identical = CAST(json_extract(result_json, '$.summary.identical') AS INTEGER),
+        summary_total = CAST(json_extract(result_json, '$.summary.total') AS INTEGER),
+        summary_different = CAST(json_extract(result_json, '$.summary.different') AS INTEGER)
+      WHERE result_json IS NOT NULL AND json_valid(result_json);
+
+      ALTER TABLE deployment_jobs ADD COLUMN summary_added INTEGER;
+      ALTER TABLE deployment_jobs ADD COLUMN summary_removed INTEGER;
+      ALTER TABLE deployment_jobs ADD COLUMN summary_modified INTEGER;
+      ALTER TABLE deployment_jobs ADD COLUMN summary_identical INTEGER;
+      ALTER TABLE deployment_jobs ADD COLUMN summary_total INTEGER;
+      ALTER TABLE deployment_jobs ADD COLUMN summary_different INTEGER;
+
+      UPDATE deployment_jobs SET
+        summary_added = CAST(json_extract(comparison_result_json, '$.summary.added') AS INTEGER),
+        summary_removed = CAST(json_extract(comparison_result_json, '$.summary.removed') AS INTEGER),
+        summary_modified = CAST(json_extract(comparison_result_json, '$.summary.modified') AS INTEGER),
+        summary_identical = CAST(json_extract(comparison_result_json, '$.summary.identical') AS INTEGER),
+        summary_total = CAST(json_extract(comparison_result_json, '$.summary.total') AS INTEGER),
+        summary_different = CAST(json_extract(comparison_result_json, '$.summary.different') AS INTEGER)
+      WHERE comparison_result_json IS NOT NULL AND json_valid(comparison_result_json);
+    `,
+  },
 ];
 
 export async function applyMigrations(
