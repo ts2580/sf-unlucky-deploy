@@ -440,7 +440,8 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
     expect(route.request().postDataJSON()).toMatchObject({
       scope: 'selected',
       components: [{ type: 'ApexClass', fullName: 'NewClass' }],
-      sourceId: 'project:project-1', targetOrgId: 'org:target', tests: ['Hello_Test'],
+      sourceId: 'project:project-1', targetOrgId: 'org:target',
+      testLevel: 'RunSpecifiedTests', tests: ['Hello_Test'],
       targetConfirmation: 'target', confirmation: '실제 배포',
     });
     await new Promise((resolve) => setTimeout(resolve, 750));

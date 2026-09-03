@@ -214,7 +214,7 @@ describe('dry-run API', () => {
         headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
         payload: {
           scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
-          sourceId, targetOrgId: 'org:target', tests: [], targetConfirmation: 'target',
+          sourceId, targetOrgId: 'org:target', testLevel: 'NoTestRun', tests: [], targetConfirmation: 'target',
           confirmation: '실제 배포',
         },
       });
@@ -239,6 +239,45 @@ describe('dry-run API', () => {
     }
   });
 
+  it.each(['RunLocalTests', 'RunAllTestsInOrg', 'RunRelevantTests'] as const)(
+    '직접 배포에서 선택한 %s를 check-only와 실제 배포에 유지한다', async (testLevel) => {
+    const fixture = await createFixture(new DryRunSfClient());
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ sources: Array<{ id: string; kind: string }> }>();
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      const created = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/direct',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: {
+          scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+          sourceId, targetOrgId: 'org:target', testLevel, tests: [],
+          targetConfirmation: 'target', confirmation: '실제 배포',
+        },
+      });
+      expect(created.statusCode).toBe(202);
+      const jobId = created.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+
+      expect(await fixture.server.sfudRuntime.deploymentJobs.getRequired(jobId)).toMatchObject({
+        kind: 'DEPLOY', status: 'SUCCEEDED',
+        testPlan: { level: testLevel, tests: [], selection: 'configured' },
+      });
+      const deployCalls = deploymentStartCalls(fixture.client.calls);
+      expect(deployCalls).toHaveLength(2);
+      expect(deployCalls[0]!.args).toContain('--dry-run');
+      expect(deployCalls[1]!.args).not.toContain('--dry-run');
+      for (const call of deployCalls) {
+        expect(call.args).toEqual(expect.arrayContaining(['--test-level', testLevel]));
+        expect(call.args).not.toContain('--tests');
+      }
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it('테스트 선택 직접 배포는 75% 커버리지를 확인한 뒤 실행한다', async () => {
     const fixture = await createFixture(new DryRunSfClient('none', 80));
     try {
@@ -252,7 +291,7 @@ describe('dry-run API', () => {
         headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
         payload: {
           scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
-          sourceId, targetOrgId: 'org:target', tests: ['CoverageSpec'],
+          sourceId, targetOrgId: 'org:target', testLevel: 'RunSpecifiedTests', tests: ['CoverageSpec'],
           targetConfirmation: 'target', confirmation: '실제 배포',
         },
       });
@@ -294,7 +333,7 @@ describe('dry-run API', () => {
         headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
         payload: {
           scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
-          sourceId, targetOrgId: 'org:target', tests: ['CoverageSpec'],
+          sourceId, targetOrgId: 'org:target', testLevel: 'RunSpecifiedTests', tests: ['CoverageSpec'],
           targetConfirmation: 'target', confirmation: '실제 배포',
         },
       });

@@ -210,19 +210,20 @@ describe('SQLite 저장소', () => {
     const deploy = await jobs.createDirectDeployment({
       source: 'local:sf-project', targetAlias: 'sandbox', targetConfirmation: 'sandbox',
       confirmation: '실제 배포', manifestPath: 'manifest/package.xml', payloadChecksum: checksum,
-      createdBy: deployer.id, testPlan: { level: 'NoTestRun', tests: [], selection: 'configured' },
+      createdBy: deployer.id, requestedTestLevel: 'NoTestRun', requestedTests: [],
       selectedComponents: [{ type: 'CustomObject', fullName: 'Book__c' }],
     });
 
     expect(deploy).toMatchObject({
       id: 'direct-deploy-1', kind: 'DEPLOY', status: 'QUEUED', targetAlias: 'sandbox',
-      testPlan: { level: 'NoTestRun', tests: [] },
+      selectedComponents: [{ type: 'CustomObject', fullName: 'Book__c' }],
     });
+    expect(deploy.testPlan).toBeUndefined();
     expect(deploy.dryRunJobId).toBeUndefined();
     await expect(jobs.createDirectDeployment({
       source: 'local:sf-project', targetAlias: 'sandbox', targetConfirmation: 'production',
       confirmation: '실제 배포', manifestPath: 'manifest/package.xml', payloadChecksum: checksum,
-      createdBy: deployer.id, testPlan: { level: 'NoTestRun', tests: [], selection: 'configured' },
+      createdBy: deployer.id, requestedTestLevel: 'NoTestRun', requestedTests: [],
     })).rejects.toThrow(/대상 org 별칭/u);
   });
 

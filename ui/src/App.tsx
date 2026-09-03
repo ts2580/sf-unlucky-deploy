@@ -1163,6 +1163,7 @@ function DeployPage({ user }: { user: ApiUser }) {
             components: deploymentCart.map(({ type, fullName }) => ({ type, fullName })),
             sourceId,
             targetOrgId,
+            testLevel,
             tests: testNames,
             waitMinutes: 60,
             strict: false,

@@ -39,7 +39,7 @@ export interface CreateDryRunInput {
   createdBy: string;
 }
 
-export interface CreateDirectDeploymentInput extends Omit<CreateDryRunInput, 'testLevel'> {
+export interface CreateDirectDeploymentInput extends CreateDryRunInput {
   targetConfirmation: string;
   confirmation: string;
 }
@@ -134,8 +134,7 @@ export class DryRunService {
 
   public async createDirect(input: CreateDirectDeploymentInput): Promise<DeploymentJob> {
     const tests = [...new Set(input.tests)].sort((left, right) => left.localeCompare(right));
-    const testLevel: RequestedTestLevel = tests.length > 0 ? 'RunSpecifiedTests' : 'NoTestRun';
-    const request: CreateDryRunInput = { ...input, tests, testLevel };
+    const request: CreateDryRunInput = { ...input, tests };
     const prepared = await this.prepare(request);
     let job: DeploymentJob;
     try {
@@ -150,11 +149,8 @@ export class DryRunService {
         scope: prepared.scope === 'all' ? 'ALL' : 'MANIFEST',
         ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
         ...(prepared.selectedComponents === undefined ? {} : { selectedComponents: prepared.selectedComponents }),
-        testPlan: {
-          level: testLevel,
-          tests,
-          selection: tests.length > 0 ? 'explicit' : 'configured',
-        },
+        requestedTestLevel: input.testLevel,
+        requestedTests: tests,
       });
     } catch (error) {
       prepared.releaseSources();
@@ -174,9 +170,9 @@ export class DryRunService {
             : { manifest: prepared.manifestPath }),
           reportDir: path.join(this.runsDirectory, job.id),
           execute: true,
-          skipDryRun: tests.length === 0,
+          skipDryRun: input.testLevel === 'NoTestRun',
           ...(tests.length === 0 ? {} : { minimumCoverage: 75 }),
-          testLevel,
+          testLevel: input.testLevel,
           tests,
           testClassSuffix: input.testClassSuffix,
           wait: input.waitMinutes,

@@ -5,7 +5,7 @@ import type { Database } from 'sqlite';
 import { SfudError } from '../core/errors.js';
 import { runInImmediateTransaction } from '../storage/transaction.js';
 import type { ComparisonResult } from '../metadata/comparator.js';
-import type { ApexTestPlan } from './test-plan.js';
+import type { ApexTestPlan, RequestedTestLevel } from './test-plan.js';
 import type { SelectedMetadataComponent } from './selected-manifest.js';
 import type { SalesforceDeploymentProgress } from './salesforce-deployment.js';
 
@@ -63,7 +63,8 @@ export interface CreateDryRunJobInput {
 
 export interface CreateDirectDeploymentJobInput extends CreateDryRunJobInput {
   createdBy: string;
-  testPlan: ApexTestPlan;
+  requestedTestLevel: RequestedTestLevel;
+  requestedTests: string[];
   targetConfirmation: string;
   confirmation: string;
 }
@@ -186,8 +187,8 @@ export class DeploymentJobRepository {
       await this.database.run(`
         INSERT INTO deployment_jobs (
           id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
-          run_directory, selected_components_json, test_plan_json, created_by, created_at, updated_at
-        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          run_directory, selected_components_json, created_by, created_at, updated_at
+        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         id,
         input.source,
@@ -198,7 +199,6 @@ export class DeploymentJobRepository {
         input.payloadChecksum,
         input.runDirectory ?? null,
         input.selectedComponents === undefined ? null : JSON.stringify(input.selectedComponents),
-        JSON.stringify(input.testPlan),
         input.createdBy,
         timestamp,
         timestamp,
@@ -206,8 +206,8 @@ export class DeploymentJobRepository {
       await this.writeAudit(input.createdBy, 'DIRECT_DEPLOYMENT_QUEUED', id, {
         targetAlias: input.targetAlias,
         payloadChecksum: input.payloadChecksum,
-        testLevel: input.testPlan.level,
-        tests: input.testPlan.tests,
+        testLevel: input.requestedTestLevel,
+        tests: input.requestedTests,
       }, timestamp);
     });
     return this.notify(await this.getRequired(id));

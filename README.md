@@ -423,11 +423,12 @@ desired source는 `--project`로 등록한 서버 프로젝트, 브라우저에�
 payload와 SHA-256을 고정한다. 성공한 Dry-run 뒤 실제 배포하면 서버가 동일 payload SHA-256을
 다시 확인한다.
 
-Dry-run 없이 바로 실제 배포할 수도 있다. 테스트 클래스를 선택했다면 서버가
-`RunSpecifiedTests` check-only를 먼저 실행하고 응답에 보고된 각 Apex 클래스·트리거의 라인
-커버리지가 모두 75% 이상일 때만 실제 배포한다. 테스트를 선택하지 않았다면 `NoTestRun`으로
-check-only 없이 배포한다. 프로덕션
-org처럼 `NoTestRun`을 허용하지 않는 대상은 Salesforce가 거부하며 실패 상태로 기록된다.
+Dry-run 없이 바로 실제 배포할 수도 있다. 이 경우에도 화면에서 선택한 테스트 수준을 check-only와
+실제 배포에 동일하게 적용한다. `auto`는 명시 테스트, staging의 접미사 테스트, `RunLocalTests`
+fallback 순서로 결정한다. 테스트 클래스를 명시했다면 `RunSpecifiedTests` check-only 응답에 보고된
+각 Apex 클래스·트리거의 라인 커버리지가 모두 75% 이상일 때만 실제 배포한다. `NoTestRun`을
+명시적으로 선택한 경우에만 check-only를 생략한다. 프로덕션 org처럼 `NoTestRun`을 허용하지 않는
+대상은 Salesforce가 거부하며 실패 상태로 기록된다.
 `DEPLOYER` 또는 `ADMIN` 사용자가 대상 org 별칭과 `실제 배포` 확인 문구를 정확히 입력해야 실제
 배포 버튼이 활성화된다.
 서버는 `sf org list --json` 결과에서 별칭, 표시 이름, edition, 연결 상태만 추출하며
