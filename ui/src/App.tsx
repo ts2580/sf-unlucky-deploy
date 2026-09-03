@@ -153,6 +153,8 @@ interface DryRunJobResponse {
   prepared: boolean;
   payloadChecksum?: string;
   salesforceDeploymentId?: string;
+  remoteStatus: 'NOT_SUBMITTED' | 'SUBMITTED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN';
+  persistenceWarning?: string;
   progress?: {
     phase: 'DRY_RUN' | 'DEPLOY';
     deploymentId: string;
@@ -1975,14 +1977,17 @@ function DryRunResultPanel({ job }: { job: DryRunJobResponse }) {
     return <><section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? 'dry-run 대기 중' : `Salesforce check-only 실행 중${job.progress === undefined ? '' : ` · ${job.progress.status}`}`}</strong><p>{job.progress === undefined ? `${job.source.label} → ${job.target.label} · snapshot, 차이, 테스트를 검증합니다.` : progressSummary(job.progress)}</p></div></section><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></>;
   }
   if (job.status === 'FAILED' || job.status === 'RECONCILE_REQUIRED') {
-    return <section className="compare-error" role="alert"><strong>{job.status === 'FAILED' ? `${job.kind === 'DEPLOY' ? '실제 배포' : 'dry-run'}이 실패했습니다.` : 'Salesforce 상태 재확인이 필요합니다.'}</strong><p>{job.errorMessage ?? '상세 오류가 기록되지 않았습니다.'}</p><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></section>;
+    return <section className="compare-error" role="alert"><strong>{job.status === 'FAILED' ? `${job.kind === 'DEPLOY' ? '실제 배포' : 'dry-run'}이 실패했습니다.` : 'Salesforce 상태 재확인이 필요합니다.'}</strong><p>{job.errorMessage ?? '상세 오류가 기록되지 않았습니다.'}</p>{job.persistenceWarning !== undefined && <p>로컬 저장 경고: {job.persistenceWarning}</p>}<SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></section>;
   }
   if (job.kind === 'DEPLOY' && job.status === 'SUCCEEDED') {
-    return <section className="dry-run-result" aria-label="Salesforce 실제 배포 성공"><div className="comparison-result-head"><div><p className="eyebrow">DEPLOYMENT COMPLETE</p><h2>Salesforce 실제 배포 성공</h2><small>{job.salesforceDeploymentId ?? 'deployment ID 없음'}</small></div><span className="result-success"><Icon name="check" />배포 성공</span></div><div className="approval-preview"><Icon name="shield" /><div><strong>선택한 payload 배포를 완료했습니다.</strong><p>{job.testPlan?.tests.length
+    return <section className="dry-run-result" aria-label="Salesforce 실제 배포 성공"><div className="comparison-result-head"><div><p className="eyebrow">DEPLOYMENT COMPLETE</p><h2>Salesforce 실제 배포 성공</h2><small>{job.salesforceDeploymentId ?? 'deployment ID 없음'}</small></div><span className="result-success"><Icon name="check" />배포 성공</span></div>{job.persistenceWarning !== undefined && <div className="warning-note" role="alert"><Icon name="shield" /><p><strong>Salesforce 배포는 성공했지만 로컬 저장을 확인해야 합니다.</strong>{job.persistenceWarning}</p></div>}<div className="approval-preview"><Icon name="shield" /><div><strong>선택한 payload 배포를 완료했습니다.</strong><p>{job.testPlan?.tests.length
       ? `${job.testPlan.tests.join(', ')} · 코드 커버리지 ${job.testCoverage?.toFixed(2) ?? '확인 완료'}%`
       : 'NoTestRun · 테스트 없이 target org에 반영했습니다.'}</p></div></div><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></section>;
   }
   if (job.status !== 'APPROVAL_PENDING') return null;
+  if (job.persistenceWarning !== undefined || !job.prepared) {
+    return <section className="compare-error" role="alert"><strong>Salesforce dry-run은 성공했지만 로컬 결과 저장을 확인해야 합니다.</strong><p>{job.persistenceWarning ?? '고정된 payload를 준비하지 못했습니다.'}</p><p>이 결과로 실제 배포를 승인하지 말고 dry-run을 다시 실행하세요.</p><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></section>;
+  }
   const summary = job.comparisonSummary;
   return (
     <section className="dry-run-result" aria-labelledby="dry-run-result-title">

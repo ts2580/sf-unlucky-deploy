@@ -66,7 +66,9 @@ export interface AsyncSalesforceDeploymentOptions {
   pollIntervalMs?: number;
   now?: () => Date;
   sleep?: (milliseconds: number) => Promise<void>;
+  onSubmitted?: (deploymentId: string) => Promise<void> | void;
   onProgress?: (progress: SalesforceDeploymentProgress) => Promise<void> | void;
+  onPersistenceError?: (stage: 'submission' | 'progress', error: unknown) => Promise<void> | void;
 }
 
 export async function runAsyncSalesforceDeployment(
@@ -89,7 +91,13 @@ export async function runAsyncSalesforceDeployment(
     if (deploymentId === undefined) {
       throw new SfudError('SF_RESPONSE_INVALID', 'Salesforce 비동기 배포 ID를 확인할 수 없습니다.');
     }
-    await options.onProgress?.(toProgress(submitted, options.phase, deploymentId, now));
+    await notifyWithoutInterruptingPolling(options.onSubmitted, [deploymentId], 'submission', options.onPersistenceError);
+    await notifyWithoutInterruptingPolling(
+      options.onProgress,
+      [toProgress(submitted, options.phase, deploymentId, now)],
+      'progress',
+      options.onPersistenceError,
+    );
 
     while (true) {
       const report = sanitizeSfOutput(await options.sfClient.runJson([
@@ -101,7 +109,7 @@ export async function runAsyncSalesforceDeployment(
         timeoutMs: Math.min(timeoutMs, 5 * 60 * 1_000),
       }));
       const progress = toProgress(report, options.phase, deploymentId, now);
-      await options.onProgress?.(progress);
+      await notifyWithoutInterruptingPolling(options.onProgress, [progress], 'progress', options.onPersistenceError);
       if (progress.done) {
         if (progress.success === false || !['Succeeded', 'SucceededPartial'].includes(progress.status)) {
           const summary = firstDiagnosticSummary(progress.diagnostics);
@@ -130,6 +138,24 @@ export async function runAsyncSalesforceDeployment(
       );
     }
     throw error;
+  }
+}
+
+async function notifyWithoutInterruptingPolling<T extends readonly unknown[]>(
+  callback: ((...args: T) => Promise<void> | void) | undefined,
+  args: T,
+  stage: 'submission' | 'progress',
+  onError: AsyncSalesforceDeploymentOptions['onPersistenceError'],
+): Promise<void> {
+  if (callback === undefined) return;
+  try {
+    await callback(...args);
+  } catch (error) {
+    try {
+      await onError?.(stage, error);
+    } catch {
+      // 상태 관찰자 실패는 이미 제출된 Salesforce 작업의 polling을 중단할 수 없다.
+    }
   }
 }
 

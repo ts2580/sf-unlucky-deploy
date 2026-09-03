@@ -303,6 +303,16 @@ const MIGRATIONS: Migration[] = [
       ) STRICT;
     `,
   },
+  {
+    version: 12,
+    name: 'deployment_remote_state',
+    sql: `
+      ALTER TABLE deployment_jobs
+      ADD COLUMN remote_status TEXT NOT NULL DEFAULT 'NOT_SUBMITTED'
+      CHECK (remote_status IN ('NOT_SUBMITTED', 'SUBMITTED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'UNKNOWN'));
+      ALTER TABLE deployment_jobs ADD COLUMN persistence_warning TEXT;
+    `,
+  },
 ];
 
 export async function applyMigrations(

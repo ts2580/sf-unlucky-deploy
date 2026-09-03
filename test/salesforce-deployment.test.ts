@@ -72,6 +72,38 @@ describe('Salesforce 비동기 배포', () => {
       },
     });
   });
+
+  it('진행 상태 저장 실패와 무관하게 deployment ID를 전달하고 polling을 완료한다', async () => {
+    const client = new ProgressSfClient();
+    const submitted: string[] = [];
+    const persistenceErrors: Array<{ stage: string; message: string }> = [];
+
+    const result = await runAsyncSalesforceDeployment({
+      sfClient: client,
+      startArgs: ['project', 'deploy', 'start', '--target-org', 'target', '--metadata-dir', '/payload'],
+      targetAlias: 'target',
+      cwd: '/project',
+      phase: 'DEPLOY',
+      sleep: async () => undefined,
+      onSubmitted: (deploymentId) => { submitted.push(deploymentId); },
+      onProgress: () => { throw new Error('database locked'); },
+      onPersistenceError: (stage, error) => {
+        persistenceErrors.push({
+          stage,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      },
+    });
+
+    expect(result).toMatchObject({ result: { id: '0Af-progress', status: 'Succeeded' } });
+    expect(submitted).toEqual(['0Af-progress']);
+    expect(client.calls.filter((call) => call.args[2] === 'report')).toHaveLength(2);
+    expect(persistenceErrors).toEqual([
+      { stage: 'progress', message: 'database locked' },
+      { stage: 'progress', message: 'database locked' },
+      { stage: 'progress', message: 'database locked' },
+    ]);
+  });
 });
 
 class ProgressSfClient implements SfClient {

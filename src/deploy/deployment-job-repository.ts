@@ -10,6 +10,13 @@ import type { SalesforceDeploymentProgress } from './salesforce-deployment.js';
 
 export type DeploymentJobKind = 'DRY_RUN' | 'DEPLOY';
 export type DeploymentScope = 'MANIFEST' | 'ALL';
+export type RemoteDeploymentStatus =
+  | 'NOT_SUBMITTED'
+  | 'SUBMITTED'
+  | 'RUNNING'
+  | 'SUCCEEDED'
+  | 'FAILED'
+  | 'UNKNOWN';
 export type DeploymentJobStatus =
   | 'QUEUED'
   | 'DRY_RUN_RUNNING'
@@ -46,6 +53,8 @@ export interface DeploymentJob {
   selectedComponents?: SelectedMetadataComponent[];
   deploymentResult?: unknown;
   progress?: SalesforceDeploymentProgress;
+  remoteStatus: RemoteDeploymentStatus;
+  persistenceWarning?: string;
 }
 
 export interface CreateDryRunJobInput {
@@ -72,6 +81,8 @@ export interface TransitionDetails {
   salesforceDeploymentId?: string;
   errorCode?: string;
   errorMessage?: string;
+  remoteStatus?: RemoteDeploymentStatus;
+  persistenceWarning?: string;
 }
 
 export interface ApproveDeploymentInput {
@@ -109,6 +120,8 @@ interface DeploymentJobRow {
   selected_components_json: string | null;
   deployment_result_json: string | null;
   progress_json: string | null;
+  remote_status: RemoteDeploymentStatus;
+  persistence_warning: string | null;
 }
 
 const ALLOWED_TRANSITIONS: Record<DeploymentJobStatus, ReadonlySet<DeploymentJobStatus>> = {
@@ -247,7 +260,9 @@ export class DeploymentJobRepository {
         UPDATE deployment_jobs
         SET status = ?, updated_at = ?, started_at = ?, completed_at = ?,
             salesforce_deployment_id = COALESCE(?, salesforce_deployment_id),
-            error_code = ?, error_message = ?
+            error_code = ?, error_message = ?,
+            remote_status = COALESCE(?, remote_status),
+            persistence_warning = COALESCE(?, persistence_warning)
         WHERE id = ? AND status = ?
       `,
         nextStatus,
@@ -257,6 +272,8 @@ export class DeploymentJobRepository {
         details.salesforceDeploymentId ?? null,
         details.errorCode ?? null,
         details.errorMessage ?? null,
+        details.remoteStatus ?? null,
+        details.persistenceWarning ?? null,
         id,
         current.status,
       );
@@ -270,6 +287,8 @@ export class DeploymentJobRepository {
           ? {}
           : { salesforceDeploymentId: details.salesforceDeploymentId }),
         ...(details.errorCode === undefined ? {} : { errorCode: details.errorCode }),
+        ...(details.remoteStatus === undefined ? {} : { remoteStatus: details.remoteStatus }),
+        ...(details.persistenceWarning === undefined ? {} : { persistenceWarning: details.persistenceWarning }),
       }, timestamp);
     });
     return this.notify(await this.getRequired(id));
@@ -437,13 +456,24 @@ export class DeploymentJobRepository {
     const timestamp = this.now();
     const result = await this.database.run(`
       UPDATE deployment_jobs
-      SET progress_json = ?, salesforce_deployment_id = ?, updated_at = ?
+      SET progress_json = ?, salesforce_deployment_id = ?, remote_status = ?, updated_at = ?
       WHERE id = ? AND status IN ('DRY_RUN_RUNNING', 'DEPLOYING')
-    `, JSON.stringify(progress), progress.deploymentId, timestamp, id);
+    `, JSON.stringify(progress), progress.deploymentId, remoteStatusFromProgress(progress), timestamp, id);
     if (result.changes !== 1) {
       throw new SfudError('INVALID_JOB_STATE', 'Salesforce 배포 진행 상태를 기록할 수 없는 작업 상태입니다.');
     }
     this.notify(await this.getRequired(id));
+  }
+
+  public async recordSalesforceSubmission(id: string, deploymentId: string): Promise<void> {
+    const result = await this.database.run(`
+      UPDATE deployment_jobs
+      SET salesforce_deployment_id = ?, remote_status = 'SUBMITTED', updated_at = ?
+      WHERE id = ? AND status IN ('DRY_RUN_RUNNING', 'DEPLOYING')
+    `, deploymentId, this.now(), id);
+    if (result.changes !== 1) {
+      throw new SfudError('INVALID_JOB_STATE', 'Salesforce 배포 ID를 기록할 수 없는 작업 상태입니다.');
+    }
   }
 
   public async recordDirectDeploymentArtifacts(input: {
@@ -615,5 +645,12 @@ function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
     ...(row.progress_json === null
       ? {}
       : { progress: JSON.parse(row.progress_json) as SalesforceDeploymentProgress }),
+    remoteStatus: row.remote_status,
+    ...(row.persistence_warning === null ? {} : { persistenceWarning: row.persistence_warning }),
   };
+}
+
+function remoteStatusFromProgress(progress: SalesforceDeploymentProgress): RemoteDeploymentStatus {
+  if (progress.done) return progress.success === false ? 'FAILED' : 'SUCCEEDED';
+  return ['Queued', 'Pending'].includes(progress.status) ? 'SUBMITTED' : 'RUNNING';
 }

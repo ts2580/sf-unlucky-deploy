@@ -51,7 +51,13 @@ export interface DeployCommandDependencies {
   sfClient?: SfClient;
   stdout?: (value: string) => void;
   requestWorkspacePath?: string;
+  onDeploymentSubmitted?: (deploymentId: string, phase: 'DRY_RUN' | 'DEPLOY') => Promise<void> | void;
   onDeploymentProgress?: (progress: SalesforceDeploymentProgress) => Promise<void> | void;
+  onDeploymentPersistenceError?: (
+    stage: 'submission' | 'progress',
+    error: unknown,
+    phase: 'DRY_RUN' | 'DEPLOY',
+  ) => Promise<void> | void;
 }
 
 export interface DeployCommandResult {
@@ -63,6 +69,7 @@ export interface DeployCommandResult {
   deployResult?: unknown;
   executed: boolean;
   testPlan: ApexTestPlan;
+  persistenceWarnings?: string[];
 }
 
 export async function runDeployCommand(
@@ -169,6 +176,7 @@ export async function runDeployCommand(
   await assertPayloadUnchanged(deploymentSnapshot.packageRoot, deploymentSnapshot.payloadSha256);
   const deployArgs = buildDeployArgs(options, deploymentSnapshot.packageRoot, targetAlias, testPlan);
   const payloadEmpty = generatedManifest?.sourceManifests[1]?.empty === true;
+  const persistenceWarnings: string[] = [];
   const dryRunResult = options.skipDryRun === true
     ? undefined
     : payloadEmpty
@@ -180,10 +188,16 @@ export async function runDeployCommand(
         commandProjectPath,
         options.wait,
         'DRY_RUN',
+        dependencies.onDeploymentSubmitted,
         dependencies.onDeploymentProgress,
+        dependencies.onDeploymentPersistenceError,
       ));
   if (dryRunResult !== undefined) {
-    await writeJson(path.join(context.logsDirectory, 'dry-run.json'), dryRunResult);
+    try {
+      await writeJson(path.join(context.logsDirectory, 'dry-run.json'), dryRunResult);
+    } catch (error) {
+      persistenceWarnings.push(artifactWarning('dry-run', error));
+    }
   }
   if (options.minimumCoverage !== undefined) {
     requireMinimumApexCoverage(dryRunResult, options.minimumCoverage);
@@ -201,9 +215,15 @@ export async function runDeployCommand(
         commandProjectPath,
         options.wait,
         'DEPLOY',
+        dependencies.onDeploymentSubmitted,
         dependencies.onDeploymentProgress,
+        dependencies.onDeploymentPersistenceError,
       ));
-    await writeJson(path.join(context.logsDirectory, 'deploy.json'), deployResult);
+    try {
+      await writeJson(path.join(context.logsDirectory, 'deploy.json'), deployResult);
+    } catch (error) {
+      persistenceWarnings.push(artifactWarning('deploy', error));
+    }
   }
 
   const result: DeployCommandResult = {
@@ -215,6 +235,7 @@ export async function runDeployCommand(
     ...(deployResult === undefined ? {} : { deployResult }),
     executed: options.execute ?? false,
     testPlan,
+    ...(persistenceWarnings.length === 0 ? {} : { persistenceWarnings }),
   };
   if (!options.json) {
     stdout(options.execute
@@ -223,6 +244,11 @@ export async function runDeployCommand(
   }
   emitJsonIfRequested(options.json, stdout, result);
   return result;
+}
+
+function artifactWarning(phase: 'dry-run' | 'deploy', error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return `${phase} Salesforce 결과 파일 저장 실패: ${message}`;
 }
 
 function emptyDeploymentResult(checkOnly: boolean): unknown {
@@ -244,7 +270,13 @@ async function runDeploymentRequest(
   cwd: string,
   waitMinutes = 60,
   phase: 'DRY_RUN' | 'DEPLOY',
+  onSubmitted?: (deploymentId: string, phase: 'DRY_RUN' | 'DEPLOY') => Promise<void> | void,
   onProgress?: (progress: SalesforceDeploymentProgress) => Promise<void> | void,
+  onPersistenceError?: (
+    stage: 'submission' | 'progress',
+    error: unknown,
+    phase: 'DRY_RUN' | 'DEPLOY',
+  ) => Promise<void> | void,
 ): Promise<unknown> {
   return await runAsyncSalesforceDeployment({
     sfClient,
@@ -253,7 +285,15 @@ async function runDeploymentRequest(
     cwd,
     waitMinutes,
     phase,
+    ...(onSubmitted === undefined ? {} : {
+      onSubmitted: async (deploymentId: string) => { await onSubmitted(deploymentId, phase); },
+    }),
     ...(onProgress === undefined ? {} : { onProgress }),
+    ...(onPersistenceError === undefined ? {} : {
+      onPersistenceError: async (stage: 'submission' | 'progress', error: unknown) => {
+        await onPersistenceError(stage, error, phase);
+      },
+    }),
   });
 }
 

@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { SfudError } from '../src/core/errors.js';
 import type { SfClient, SfRunOptions } from '../src/salesforce/sf-client.js';
@@ -68,6 +68,7 @@ describe('dry-run API', () => {
       expect(response.json()).toMatchObject({
         job: {
           status: 'APPROVAL_PENDING',
+          remoteStatus: 'SUCCEEDED',
           prepared: true,
           source: { kind: 'local', label: 'project' },
           target: { id: 'org:target', label: 'target' },
@@ -352,6 +353,82 @@ describe('dry-run API', () => {
     }
   });
 
+  it('진행 상태 저장이 실패해도 polling을 계속하고 원격 성공과 경고를 보존한다', async () => {
+    const fixture = await createFixture(new DryRunSfClient());
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ sources: Array<{ id: string; kind: string }> }>();
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      vi.spyOn(fixture.server.sfudRuntime.deploymentJobs, 'recordSalesforceProgress')
+        .mockRejectedValue(new Error('database locked'));
+
+      const created = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/direct',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: {
+          scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+          sourceId, targetOrgId: 'org:target', testLevel: 'NoTestRun', tests: [],
+          targetConfirmation: 'target', confirmation: '실제 배포',
+        },
+      });
+      const jobId = created.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+
+      expect(await fixture.server.sfudRuntime.deploymentJobs.getRequired(jobId)).toMatchObject({
+        status: 'SUCCEEDED',
+        remoteStatus: 'SUCCEEDED',
+        salesforceDeploymentId: '0Af-deploy',
+        persistenceWarning: expect.stringContaining('Salesforce 진행 상태 저장 실패: database locked'),
+      });
+      expect(fixture.client.calls.filter((call) => call.args[2] === 'report')).toHaveLength(1);
+    } finally {
+      vi.restoreAllMocks();
+      await fixture.close();
+    }
+  });
+
+  it('원격 성공 뒤 상세 artifact 저장이 실패해도 작업을 FAILED로 바꾸지 않는다', async () => {
+    const fixture = await createFixture(new DryRunSfClient());
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ sources: Array<{ id: string; kind: string }> }>();
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      vi.spyOn(fixture.server.sfudRuntime.deploymentJobs, 'recordDirectDeploymentArtifacts')
+        .mockRejectedValueOnce(new Error('artifact write failed'));
+
+      const created = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/direct',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: {
+          scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+          sourceId, targetOrgId: 'org:target', testLevel: 'NoTestRun', tests: [],
+          targetConfirmation: 'target', confirmation: '실제 배포',
+        },
+      });
+      const jobId = created.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+
+      const response = await fixture.server.inject({
+        url: `/api/v1/deployment-jobs/${jobId}`, headers: { cookie: auth.cookie },
+      });
+      expect(response.json()).toMatchObject({ job: {
+        status: 'SUCCEEDED',
+        remoteStatus: 'SUCCEEDED',
+        salesforceDeploymentId: '0Af-deploy',
+        prepared: false,
+        persistenceWarning: expect.stringContaining('배포 상세 결과 저장 실패: artifact write failed'),
+      } });
+      expect(response.body).not.toContain('"errorCode"');
+    } finally {
+      vi.restoreAllMocks();
+      await fixture.close();
+    }
+  });
+
   it('Salesforce 실패를 민감 정보 없이 FAILED로 기록한다', async () => {
     const fixture = await createFixture(new DryRunSfClient('definitive'));
     try {
@@ -407,6 +484,7 @@ describe('dry-run API', () => {
       });
       expect(response.json()).toMatchObject({ job: {
         status: 'FAILED',
+        remoteStatus: 'FAILED',
         errorMessage: expect.stringMatching(/CryptoUtil_Test\.encryptsAndDecryptsWithConfiguredKey.*List has no rows/u),
         progress: { status: 'Failed', diagnostics: {
           componentFailures: [],
@@ -444,6 +522,7 @@ describe('dry-run API', () => {
 
       expect(await fixture.server.sfudRuntime.deploymentJobs.getRequired(jobId)).toMatchObject({
         status: 'RECONCILE_REQUIRED',
+        remoteStatus: 'UNKNOWN',
         errorCode: 'EXTERNAL_STATE_UNKNOWN',
         salesforceDeploymentId: '0Af000000000001AAA',
       });

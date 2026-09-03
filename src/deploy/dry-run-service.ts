@@ -84,6 +84,7 @@ export class DryRunService {
     }
 
     void this.coordinator.runDryRun(job.id, async () => {
+      const persistenceWarnings: string[] = [];
       try {
         const result = await runDeployCommand({
           from: prepared.source,
@@ -107,19 +108,35 @@ export class DryRunService {
           cwd: prepared.project.realPath,
           sfClient: this.sfClient,
           stdout: () => undefined,
+          onDeploymentSubmitted: async (deploymentId) => {
+            await this.jobs.recordSalesforceSubmission(job.id, deploymentId);
+          },
           onDeploymentProgress: async (progress) => { await this.jobs.recordSalesforceProgress(job.id, progress); },
+          onDeploymentPersistenceError: (stage, error) => {
+            persistenceWarnings.push(persistenceWarning(stage, error));
+          },
         });
+        persistenceWarnings.push(...(result.persistenceWarnings ?? []).map((warning) => redactSensitiveText(warning)));
         const payloadChecksum = result.payloadSha256;
-        await this.jobs.recordDryRunArtifacts({
-          id: job.id,
-          payloadChecksum,
-          runDirectory: result.runDirectory,
-          comparisonResult: result.comparison,
-          testPlan: result.testPlan,
-          dryRunResult: result.dryRunResult,
-        });
         const deploymentId = extractDeploymentId(result.dryRunResult);
-        return deploymentId === undefined ? {} : { deploymentId };
+        try {
+          await this.jobs.recordDryRunArtifacts({
+            id: job.id,
+            payloadChecksum,
+            runDirectory: result.runDirectory,
+            comparisonResult: result.comparison,
+            testPlan: result.testPlan,
+            dryRunResult: result.dryRunResult,
+          });
+        } catch (error) {
+          persistenceWarnings.push(persistenceWarning('artifacts', error));
+        }
+        return {
+          ...(deploymentId === undefined ? {} : { deploymentId }),
+          ...(persistenceWarnings.length === 0
+            ? {}
+            : { persistenceWarning: persistenceWarnings.join(' ') }),
+        };
       } catch (error) {
         if (error instanceof SfudError && error.code === 'SF_EXTERNAL_STATE_UNKNOWN') {
           const message = redactSensitiveText(error.message);
@@ -158,6 +175,7 @@ export class DryRunService {
     }
 
     void this.coordinator.runDeployment(job.id, async () => {
+      const persistenceWarnings: string[] = [];
       try {
         const result = await runDeployCommand({
           from: prepared.source,
@@ -182,22 +200,38 @@ export class DryRunService {
           cwd: prepared.project.realPath,
           sfClient: this.sfClient,
           stdout: () => undefined,
+          onDeploymentSubmitted: async (deploymentId) => {
+            await this.jobs.recordSalesforceSubmission(job.id, deploymentId);
+          },
           onDeploymentProgress: async (progress) => { await this.jobs.recordSalesforceProgress(job.id, progress); },
+          onDeploymentPersistenceError: (stage, error) => {
+            persistenceWarnings.push(persistenceWarning(stage, error));
+          },
         });
+        persistenceWarnings.push(...(result.persistenceWarnings ?? []).map((warning) => redactSensitiveText(warning)));
         if (result.deployResult === undefined) {
           throw new SfudError('DEPLOY_FAILED', 'Salesforce 실제 배포 결과가 없습니다.');
         }
-        await this.jobs.recordDirectDeploymentArtifacts({
-          id: job.id,
-          payloadChecksum: result.payloadSha256,
-          runDirectory: result.runDirectory,
-          comparisonResult: result.comparison,
-          testPlan: result.testPlan,
-          ...(result.dryRunResult === undefined ? {} : { dryRunResult: result.dryRunResult }),
-          deploymentResult: result.deployResult,
-        });
         const deploymentId = extractDeploymentId(result.deployResult);
-        return deploymentId === undefined ? {} : { deploymentId };
+        try {
+          await this.jobs.recordDirectDeploymentArtifacts({
+            id: job.id,
+            payloadChecksum: result.payloadSha256,
+            runDirectory: result.runDirectory,
+            comparisonResult: result.comparison,
+            testPlan: result.testPlan,
+            ...(result.dryRunResult === undefined ? {} : { dryRunResult: result.dryRunResult }),
+            deploymentResult: result.deployResult,
+          });
+        } catch (error) {
+          persistenceWarnings.push(persistenceWarning('artifacts', error));
+        }
+        return {
+          ...(deploymentId === undefined ? {} : { deploymentId }),
+          ...(persistenceWarnings.length === 0
+            ? {}
+            : { persistenceWarning: persistenceWarnings.join(' ') }),
+        };
       } catch (error) {
         if (error instanceof SfudError && error.code === 'SF_EXTERNAL_STATE_UNKNOWN') {
           const message = redactSensitiveText(error.message);
@@ -291,6 +325,14 @@ export class DryRunService {
 
 function extractDeploymentIdFromText(value: string): string | undefined {
   return value.match(/\b0Af[A-Za-z0-9]{12,15}\b/u)?.[0];
+}
+
+function persistenceWarning(stage: 'submission' | 'progress' | 'artifacts', error: unknown): string {
+  const label = stage === 'submission'
+    ? 'Salesforce 배포 ID'
+    : stage === 'progress' ? 'Salesforce 진행 상태' : '배포 상세 결과';
+  const message = redactSensitiveText(error instanceof Error ? error.message : String(error));
+  return `${label} 저장 실패: ${message}`;
 }
 
 function assertInput(input: CreateDryRunInput): void {

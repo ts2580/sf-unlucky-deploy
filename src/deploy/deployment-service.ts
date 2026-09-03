@@ -39,6 +39,7 @@ export class DeploymentService {
   public async approveAndExecute(input: ApproveDeploymentRequest): Promise<DeploymentJob> {
     const job = await this.jobs.approveAndQueueDeployment(input);
     void this.coordinator.runDeployment(job.id, async () => {
+      const persistenceWarnings: string[] = [];
       try {
         const current = await this.jobs.getRequired(job.id);
         const dryRun = await this.jobs.getRequired(requiredString(current.dryRunJobId, 'dry-run 작업'));
@@ -65,11 +66,26 @@ export class DeploymentService {
             targetAlias: current.targetAlias,
             cwd,
             phase: 'DEPLOY',
+            onSubmitted: async (deploymentId) => {
+              await this.jobs.recordSalesforceSubmission(current.id, deploymentId);
+            },
             onProgress: async (progress) => { await this.jobs.recordSalesforceProgress(current.id, progress); },
+            onPersistenceError: (stage, error) => {
+              persistenceWarnings.push(persistenceWarning(stage, error));
+            },
           })));
-        await this.jobs.recordDeploymentResult(current.id, result);
         const deploymentId = extractDeploymentId(result);
-        return deploymentId === undefined ? {} : { deploymentId };
+        try {
+          await this.jobs.recordDeploymentResult(current.id, result);
+        } catch (error) {
+          persistenceWarnings.push(persistenceWarning('artifacts', error));
+        }
+        return {
+          ...(deploymentId === undefined ? {} : { deploymentId }),
+          ...(persistenceWarnings.length === 0
+            ? {}
+            : { persistenceWarning: persistenceWarnings.join(' ') }),
+        };
       } catch (error) {
         if ((error instanceof SfudError && error.code === 'SF_EXTERNAL_STATE_UNKNOWN')
           || isAmbiguousSalesforceFailure(error)) {
@@ -127,6 +143,14 @@ function requiredString(value: string | undefined, label: string): string {
 
 function extractDeploymentIdFromText(value: string): string | undefined {
   return value.match(/\b0Af[A-Za-z0-9]{12,15}\b/u)?.[0];
+}
+
+function persistenceWarning(stage: 'submission' | 'progress' | 'artifacts', error: unknown): string {
+  const label = stage === 'submission'
+    ? 'Salesforce 배포 ID'
+    : stage === 'progress' ? 'Salesforce 진행 상태' : '배포 상세 결과';
+  const message = redactSensitiveText(error instanceof Error ? error.message : String(error));
+  return `${label} 저장 실패: ${message}`;
 }
 
 function extractDeploymentId(value: unknown): string | undefined {

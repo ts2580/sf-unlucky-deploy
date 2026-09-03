@@ -177,6 +177,8 @@ function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: b
     prepared: job.prepared,
     ...(job.prepared ? { payloadChecksum: job.payloadChecksum } : {}),
     ...(job.salesforceDeploymentId === undefined ? {} : { salesforceDeploymentId: job.salesforceDeploymentId }),
+    remoteStatus: job.remoteStatus,
+    ...(job.persistenceWarning === undefined ? {} : { persistenceWarning: job.persistenceWarning }),
     ...(job.progress === undefined ? {} : { progress: job.progress }),
     ...(job.testPlan === undefined ? {} : { testPlan: job.testPlan }),
     ...(testCoverage === undefined ? {} : { testCoverage }),
