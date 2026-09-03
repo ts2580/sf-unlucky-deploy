@@ -66,6 +66,7 @@ export interface AsyncSalesforceDeploymentOptions {
   pollIntervalMs?: number;
   now?: () => Date;
   sleep?: (milliseconds: number) => Promise<void>;
+  beforeSubmit?: () => Promise<void> | void;
   onSubmitted?: (deploymentId: string) => Promise<void> | void;
   onProgress?: (progress: SalesforceDeploymentProgress) => Promise<void> | void;
   onPersistenceError?: (stage: 'submission' | 'progress', error: unknown) => Promise<void> | void;
@@ -83,6 +84,7 @@ export async function runAsyncSalesforceDeployment(
   let deploymentId: string | undefined;
 
   try {
+    await options.beforeSubmit?.();
     const submitted = sanitizeSfOutput(await options.sfClient.runJson(
       [...withoutWait(options.startArgs), '--async'],
       { cwd: options.cwd, timeoutMs: Math.min(timeoutMs, 5 * 60 * 1_000) },

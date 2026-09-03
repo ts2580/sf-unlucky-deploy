@@ -51,6 +51,7 @@ export interface DeployCommandDependencies {
   sfClient?: SfClient;
   stdout?: (value: string) => void;
   requestWorkspacePath?: string;
+  beforeDeploymentSubmit?: (phase: 'DRY_RUN' | 'DEPLOY') => Promise<void> | void;
   onDeploymentSubmitted?: (deploymentId: string, phase: 'DRY_RUN' | 'DEPLOY') => Promise<void> | void;
   onDeploymentProgress?: (progress: SalesforceDeploymentProgress) => Promise<void> | void;
   onDeploymentPersistenceError?: (
@@ -188,6 +189,7 @@ export async function runDeployCommand(
         commandProjectPath,
         options.wait,
         'DRY_RUN',
+        dependencies.beforeDeploymentSubmit,
         dependencies.onDeploymentSubmitted,
         dependencies.onDeploymentProgress,
         dependencies.onDeploymentPersistenceError,
@@ -215,6 +217,7 @@ export async function runDeployCommand(
         commandProjectPath,
         options.wait,
         'DEPLOY',
+        dependencies.beforeDeploymentSubmit,
         dependencies.onDeploymentSubmitted,
         dependencies.onDeploymentProgress,
         dependencies.onDeploymentPersistenceError,
@@ -270,6 +273,7 @@ async function runDeploymentRequest(
   cwd: string,
   waitMinutes = 60,
   phase: 'DRY_RUN' | 'DEPLOY',
+  beforeSubmit?: (phase: 'DRY_RUN' | 'DEPLOY') => Promise<void> | void,
   onSubmitted?: (deploymentId: string, phase: 'DRY_RUN' | 'DEPLOY') => Promise<void> | void,
   onProgress?: (progress: SalesforceDeploymentProgress) => Promise<void> | void,
   onPersistenceError?: (
@@ -285,6 +289,9 @@ async function runDeploymentRequest(
     cwd,
     waitMinutes,
     phase,
+    ...(beforeSubmit === undefined ? {} : {
+      beforeSubmit: async () => { await beforeSubmit(phase); },
+    }),
     ...(onSubmitted === undefined ? {} : {
       onSubmitted: async (deploymentId: string) => { await onSubmitted(deploymentId, phase); },
     }),

@@ -74,6 +74,8 @@ interface WorkspaceSource {
   location?: 'org' | 'server' | 'upload';
   label: string;
   detail: string;
+  username?: string;
+  maskedOrgId?: string;
   expiresAt?: string;
 }
 
@@ -706,6 +708,7 @@ function DeployPage({ user }: { user: ApiUser }) {
   const comparisonRequestControllerRef = useRef<AbortController | null>(null);
   const dryRunRequestControllerRef = useRef<AbortController | null>(null);
   const deploymentRequestControllerRef = useRef<AbortController | null>(null);
+  const directDeploymentIdempotencyKeyRef = useRef<string | null>(null);
   const comparisonJobSelectionKeyRef = useRef<string | null>(null);
   const dryRunJobSelectionKeyRef = useRef<string | null>(null);
   const metadataTypeSourceIds = compareCurrentType ? `${sourceId},${targetOrgId}` : sourceId;
@@ -788,10 +791,17 @@ function DeployPage({ user }: { user: ApiUser }) {
     deploymentRequestControllerRef.current?.abort();
     setDryRunSubmitting(false);
     setDeploymentSubmitting(false);
+    directDeploymentIdempotencyKeyRef.current = null;
     dryRunJobSelectionKeyRef.current = null;
     setDryRunJob(null);
     setDeploymentJob(null);
   }, [dryRunSelectionKey]);
+
+  useEffect(() => {
+    if (deploymentJob !== null && !['QUEUED', 'DEPLOYING'].includes(deploymentJob.status)) {
+      directDeploymentIdempotencyKeyRef.current = null;
+    }
+  }, [deploymentJob]);
 
   useEffect(() => {
     setDeploymentCart([]);
@@ -1146,13 +1156,23 @@ function DeployPage({ user }: { user: ApiUser }) {
     try {
       const approvedDryRun = dryRunJob?.status === 'APPROVAL_PENDING'
         && dryRunJob.payloadChecksum !== undefined;
+      const directIdempotencyKey = approvedDryRun
+        ? undefined
+        : directDeploymentIdempotencyKeyRef.current ?? crypto.randomUUID();
+      if (directIdempotencyKey !== undefined) {
+        directDeploymentIdempotencyKeyRef.current = directIdempotencyKey;
+      }
       const response = await fetch(approvedDryRun
         ? '/api/v1/deployments/execute'
         : '/api/v1/deployments/direct', {
         method: 'POST',
         credentials: 'same-origin',
         signal: controller.signal,
-        headers: { 'content-type': 'application/json', 'x-sfud-csrf': readCookie('sfud_csrf') ?? '' },
+        headers: {
+          'content-type': 'application/json',
+          'x-sfud-csrf': readCookie('sfud_csrf') ?? '',
+          ...(directIdempotencyKey === undefined ? {} : { 'idempotency-key': directIdempotencyKey }),
+        },
         body: JSON.stringify(approvedDryRun
           ? {
             dryRunJobId: dryRunJob.id,
@@ -1305,7 +1325,7 @@ function DeployPage({ user }: { user: ApiUser }) {
 
         <aside className="deploy-summary" aria-label="배포 대상">
           <p className="eyebrow">DEPLOYMENT TARGETS</p><h2>{deploying ? '실제 배포 중' : deploymentJob?.status === 'SUCCEEDED' ? '배포 성공' : dryRunning ? 'Dry-run 실행 중' : dryRunJob?.status === 'APPROVAL_PENDING' ? 'Target 배포 준비' : comparing ? '메타데이터 검색 중' : deploymentCart.length > 0 ? `${deploymentCart.length}개 선택됨` : '선택된 배포 대상이 없습니다'}</h2>
-          <dl><div><dt>Desired source</dt><dd>{source?.label ?? '선택 대기'}</dd></div><div><dt>Target org</dt><dd>{target?.label ?? '선택 대기'}</dd></div><div><dt>현재 검색</dt><dd>{selectedMetadataType?.name ?? 'type 선택 필요'}</dd></div><div><dt>직접 배포 테스트</dt><dd>{testNames.length > 0 ? `RunSpecifiedTests · ${testNames.length}개 · 75%` : 'NoTestRun'}</dd></div></dl>
+          <dl><div><dt>Desired source</dt><dd>{source?.label ?? '선택 대기'}</dd></div><div><dt>Target org</dt><dd>{target === undefined ? '선택 대기' : [target.label, target.username, target.maskedOrgId].filter(Boolean).join(' · ')}</dd></div><div><dt>현재 검색</dt><dd>{selectedMetadataType?.name ?? 'type 선택 필요'}</dd></div><div><dt>직접 배포 테스트</dt><dd>{testNames.length > 0 ? `RunSpecifiedTests · ${testNames.length}개 · 75%` : 'NoTestRun'}</dd></div></dl>
           <section className="deployment-cart" aria-label="선택한 배포 목록">
             <div className="deployment-cart-head"><strong>배포 대상</strong><span>{deploymentCart.length}개</span></div>
             {deploymentCart.length === 0
@@ -1326,7 +1346,7 @@ function DeployPage({ user }: { user: ApiUser }) {
               ? '성공한 Dry-run의 동일 payload를 배포합니다.'
               : testNames.length > 0
                 ? '선택한 테스트를 먼저 검증하고 코드 커버리지 75% 이상일 때만 배포합니다.'
-                : '테스트 없이 NoTestRun으로 바로 배포합니다. 프로덕션 org에서는 Salesforce가 거부할 수 있습니다.'} 선택된 Target org로 즉시 제출합니다.</p>
+                : '테스트 없이 NoTestRun으로 바로 배포합니다. 프로덕션 org에서는 Salesforce가 거부할 수 있습니다.'} 선택된 Target org로 즉시 제출합니다. 브라우저 연결이 끊겨도 이미 제출된 Salesforce 작업은 취소되지 않습니다.</p>
             {!canDeploy && <p className="approval-denied">DEPLOYER 또는 ADMIN 역할만 실제 배포할 수 있습니다.</p>}
             <button className={`button button-danger${deploying ? ' button-busy' : ''}`} type="button" onClick={() => void executeDeployment()} disabled={!canDeploy || deploymentCart.length === 0 || dryRunning || deploying}><Icon name={deploying ? 'refresh' : 'deploy'} />{deploymentSubmitting ? '배포 요청 중……' : deploying ? '배포 중……' : '배포 대상 실제 배포'}</button>
           </section>

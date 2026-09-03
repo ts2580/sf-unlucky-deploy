@@ -13,6 +13,8 @@ export type SfudErrorCode =
   | 'REMOTE_BIND_DENIED'
   | 'STORAGE_ERROR'
   | 'INVALID_JOB_STATE'
+  | 'IDEMPOTENCY_CONFLICT'
+  | 'ORG_IDENTITY_CHANGED'
   | 'APPROVAL_DENIED';
 
 export class SfudError extends Error {

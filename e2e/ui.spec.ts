@@ -378,10 +378,16 @@ test('선택 변경 후 이전 비교 polling 결과를 폐기한다', async ({ 
 
 test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시한다', async ({ page }) => {
   await page.route('**/api/v1/workspace', async (route) => route.fulfill({ json: {
-    orgs: [{ id: 'org:target', alias: 'target', label: 'Target', connected: true }],
+    orgs: [{
+      id: 'org:target', alias: 'target', label: 'Target', connected: true,
+      username: 'target@example.com', maskedOrgId: '00D00…001',
+    }],
     projects: [{ id: 'project-1', displayName: 'fixture-project', manifests: ['manifest/package.xml'] }],
     sources: [
-      { id: 'org:target', kind: 'org', label: 'target', detail: 'Target · Developer' },
+      {
+        id: 'org:target', kind: 'org', label: 'target', detail: 'Target · Developer',
+        username: 'target@example.com', maskedOrgId: '00D00…001',
+      },
       { id: 'project:project-1', kind: 'local', label: 'fixture-project', detail: 'Local DX project' },
     ],
   } }));
@@ -437,6 +443,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
     await route.fulfill({ status: 202, json: { job: deploymentFixture('QUEUED') } });
   });
   await page.route('**/api/v1/deployments/direct', async (route) => {
+    expect(route.request().headers()['idempotency-key']).toMatch(/^[0-9a-f-]{36}$/u);
     expect(route.request().postDataJSON()).toMatchObject({
       scope: 'selected',
       components: [{ type: 'ApexClass', fullName: 'NewClass' }],
@@ -478,6 +485,8 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await login(page, '/deploy');
   await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue('project:project-1');
   await expect(page.getByLabel('TARGET ORG 비교 소스')).toHaveValue('org:target');
+  await expect(page.getByRole('complementary', { name: '배포 대상' }))
+    .toContainText('target · target@example.com · 00D00…001');
   const directTestInput = page.getByLabel('테스트 클래스 직접 입력');
   await directTestInput.fill('Hello_Test, ord');
   const directTestSuggestions = page.getByRole('listbox', { name: 'source 테스트 클래스 검색 결과' });

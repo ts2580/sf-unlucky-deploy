@@ -76,7 +76,9 @@ export class DeploymentCoordinator {
       return;
     }
     await this.jobs.transition(jobId, 'FAILED', {
-      errorCode: 'JOB_EXECUTION_FAILED',
+      errorCode: error instanceof SfudError && error.code === 'ORG_IDENTITY_CHANGED'
+        ? error.code
+        : 'JOB_EXECUTION_FAILED',
       errorMessage: message,
       ...(error instanceof SfudError && error.code === 'DEPLOY_FAILED'
         ? { remoteStatus: 'FAILED' as const }

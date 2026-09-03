@@ -4,6 +4,7 @@ import type { ComparisonJob } from '../../compare/comparison-job-repository.js';
 import { redactSensitiveText } from '../../salesforce/sf-client.js';
 import { hasTestClassSuffix } from '../../deploy/test-plan.js';
 import { requireAuthenticatedSession } from './auth-routes.js';
+import { maskOrgId } from './workspace-service.js';
 
 interface CreateComparisonBody {
   projectId?: string;
@@ -36,7 +37,15 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
         Promise.resolve(app.sfudRuntime.workspace.listUploadedProjects(session.user.id)),
       ]);
       return reply.send({
-        orgs,
+        orgs: orgs.map((org) => ({
+          id: org.id,
+          alias: org.alias,
+          label: org.label,
+          connected: org.connected,
+          ...(org.edition === undefined ? {} : { edition: org.edition }),
+          ...(org.username === undefined ? {} : { username: org.username }),
+          ...(org.orgId === undefined ? {} : { maskedOrgId: maskOrgId(org.orgId) }),
+        })),
         projects,
         uploads,
         sources: [
@@ -46,6 +55,8 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
             location: 'org' as const,
             label: org.alias,
             detail: [org.label, org.edition].filter(Boolean).join(' · '),
+            ...(org.username === undefined ? {} : { username: org.username }),
+            ...(org.orgId === undefined ? {} : { maskedOrgId: maskOrgId(org.orgId) }),
           })),
           ...projects.map((project) => ({
             id: `project:${project.id}`,

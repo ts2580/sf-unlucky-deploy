@@ -7,6 +7,7 @@ import type { ComparisonResult } from '../metadata/comparator.js';
 import type { ApexTestPlan, RequestedTestLevel } from './test-plan.js';
 import type { SelectedMetadataComponent } from './selected-manifest.js';
 import type { SalesforceDeploymentProgress } from './salesforce-deployment.js';
+import type { OrgIdentitySnapshot } from './org-identity.js';
 
 export type DeploymentJobKind = 'DRY_RUN' | 'DEPLOY';
 export type DeploymentScope = 'MANIFEST' | 'ALL';
@@ -55,6 +56,8 @@ export interface DeploymentJob {
   progress?: SalesforceDeploymentProgress;
   remoteStatus: RemoteDeploymentStatus;
   persistenceWarning?: string;
+  sourceOrgIdentity?: OrgIdentitySnapshot;
+  targetOrgIdentity?: OrgIdentitySnapshot;
 }
 
 export interface CreateDryRunJobInput {
@@ -67,14 +70,23 @@ export interface CreateDryRunJobInput {
   runDirectory?: string;
   createdBy?: string;
   selectedComponents?: SelectedMetadataComponent[];
+  sourceOrgIdentity?: OrgIdentitySnapshot;
+  targetOrgIdentity: OrgIdentitySnapshot;
 }
 
 export interface CreateDirectDeploymentJobInput extends CreateDryRunJobInput {
   createdBy: string;
+  clientRequestId: string;
+  requestHash: string;
   requestedTestLevel: RequestedTestLevel;
   requestedTests: string[];
   targetConfirmation: string;
   confirmation: string;
+}
+
+export interface CreateDirectDeploymentJobResult {
+  job: DeploymentJob;
+  created: boolean;
 }
 
 export interface TransitionDetails {
@@ -122,7 +134,11 @@ interface DeploymentJobRow {
   progress_json: string | null;
   remote_status: RemoteDeploymentStatus;
   persistence_warning: string | null;
+  source_org_identity_json: string | null;
+  target_org_identity_json: string | null;
 }
+
+const DRY_RUN_APPROVAL_TTL_MS = 30 * 60 * 1_000;
 
 const ALLOWED_TRANSITIONS: Record<DeploymentJobStatus, ReadonlySet<DeploymentJobStatus>> = {
   QUEUED: new Set(['DRY_RUN_RUNNING', 'DEPLOYING', 'FAILED']),
@@ -150,8 +166,9 @@ export class DeploymentJobRepository {
       await transaction.run(`
         INSERT INTO deployment_jobs (
           id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
-          run_directory, selected_components_json, created_by, created_at, updated_at
-        ) VALUES (?, 'DRY_RUN', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          run_directory, selected_components_json, source_org_identity_json, target_org_identity_json,
+          created_by, created_at, updated_at
+        ) VALUES (?, 'DRY_RUN', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         id,
         input.source,
@@ -162,6 +179,8 @@ export class DeploymentJobRepository {
         input.payloadChecksum,
         input.runDirectory ?? null,
         input.selectedComponents === undefined ? null : JSON.stringify(input.selectedComponents),
+        input.sourceOrgIdentity === undefined ? null : JSON.stringify(input.sourceOrgIdentity),
+        JSON.stringify(input.targetOrgIdentity),
         input.createdBy ?? null,
         timestamp,
         timestamp,
@@ -174,7 +193,9 @@ export class DeploymentJobRepository {
     return this.notify(await this.getRequired(id));
   }
 
-  public async createDirectDeployment(input: CreateDirectDeploymentJobInput): Promise<DeploymentJob> {
+  public async createDirectDeployment(
+    input: CreateDirectDeploymentJobInput,
+  ): Promise<CreateDirectDeploymentJobResult> {
     if (input.confirmation !== '실제 배포') {
       throw new SfudError('APPROVAL_DENIED', '실제 배포 확인 문구가 일치하지 않습니다.');
     }
@@ -182,9 +203,25 @@ export class DeploymentJobRepository {
       throw new SfudError('APPROVAL_DENIED', '확인한 대상 org 별칭이 실제 배포 대상과 일치하지 않습니다.');
     }
     assertChecksum(input.payloadChecksum);
+    assertChecksum(input.requestHash);
+    assertClientRequestId(input.clientRequestId);
     const id = this.createId();
     const timestamp = this.now();
-    await runInImmediateTransaction(this.database, async (transaction) => {
+    const result = await runInImmediateTransaction(this.database, async (transaction) => {
+      const existing = await transaction.get<DeploymentJobRow & { request_hash: string | null }>(`
+        SELECT * FROM deployment_jobs
+        WHERE kind = 'DEPLOY' AND dry_run_job_id IS NULL
+          AND created_by = ? AND client_request_id = ?
+      `, input.createdBy, input.clientRequestId);
+      if (existing !== undefined) {
+        if (existing.request_hash !== input.requestHash) {
+          throw new SfudError(
+            'IDEMPOTENCY_CONFLICT',
+            '같은 Idempotency-Key가 다른 실제 배포 요청에 사용되었습니다.',
+          );
+        }
+        return { job: mapDeploymentJob(existing), created: false };
+      }
       const deployer = await transaction.get<{ role: string; disabled_at: string | null }>(
         'SELECT role, disabled_at FROM users WHERE id = ?',
         input.createdBy,
@@ -199,8 +236,9 @@ export class DeploymentJobRepository {
       await transaction.run(`
         INSERT INTO deployment_jobs (
           id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
-          run_directory, selected_components_json, created_by, created_at, updated_at
-        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          run_directory, selected_components_json, created_by, client_request_id, request_hash,
+          source_org_identity_json, target_org_identity_json, created_at, updated_at
+        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         id,
         input.source,
@@ -212,6 +250,10 @@ export class DeploymentJobRepository {
         input.runDirectory ?? null,
         input.selectedComponents === undefined ? null : JSON.stringify(input.selectedComponents),
         input.createdBy,
+        input.clientRequestId,
+        input.requestHash,
+        input.sourceOrgIdentity === undefined ? null : JSON.stringify(input.sourceOrgIdentity),
+        JSON.stringify(input.targetOrgIdentity),
         timestamp,
         timestamp,
       );
@@ -220,9 +262,11 @@ export class DeploymentJobRepository {
         payloadChecksum: input.payloadChecksum,
         testLevel: input.requestedTestLevel,
         tests: input.requestedTests,
+        clientRequestId: input.clientRequestId,
       }, timestamp);
+      return { job: await getRequired(transaction, id), created: true };
     });
-    return this.notify(await this.getRequired(id));
+    return result.created ? { job: this.notify(result.job), created: true } : result;
   }
 
   public async get(id: string): Promise<DeploymentJob | undefined> {
@@ -353,6 +397,13 @@ export class DeploymentJobRepository {
         if (!dryRun.prepared) {
           throw new SfudError('APPROVAL_DENIED', 'payload 준비가 완료되지 않은 dry-run 작업입니다.');
         }
+        if (dryRun.targetOrgIdentity === undefined) {
+          throw new SfudError('APPROVAL_DENIED', 'dry-run 대상 org identity가 없습니다. dry-run을 다시 실행하세요.');
+        }
+        const completedAt = dryRun.completedAt === undefined ? Number.NaN : Date.parse(dryRun.completedAt);
+        if (!Number.isFinite(completedAt) || Date.parse(this.now()) - completedAt > DRY_RUN_APPROVAL_TTL_MS) {
+          throw new SfudError('APPROVAL_DENIED', 'dry-run 승인 유효시간 30분이 지났습니다. dry-run을 다시 실행하세요.');
+        }
         if (
           dryRun.comparisonResult === undefined
           || dryRun.testPlan === undefined
@@ -387,8 +438,8 @@ export class DeploymentJobRepository {
           id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
           run_directory, selected_components_json, dry_run_job_id, is_prepared,
           comparison_result_json, test_plan_json, dry_run_result_json,
-          created_by, created_at, updated_at
-        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+          source_org_identity_json, target_org_identity_json, created_by, created_at, updated_at
+        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         deployJobId,
         dryRun.source,
@@ -403,6 +454,8 @@ export class DeploymentJobRepository {
         JSON.stringify(dryRun.comparisonResult),
         JSON.stringify(dryRun.testPlan),
         JSON.stringify(dryRun.dryRunResult),
+        dryRun.sourceOrgIdentity === undefined ? null : JSON.stringify(dryRun.sourceOrgIdentity),
+        JSON.stringify(dryRun.targetOrgIdentity),
         input.approvedBy,
         timestamp,
         timestamp,
@@ -474,6 +527,17 @@ export class DeploymentJobRepository {
     if (result.changes !== 1) {
       throw new SfudError('INVALID_JOB_STATE', 'Salesforce 배포 ID를 기록할 수 없는 작업 상태입니다.');
     }
+  }
+
+  public async recordOrgIdentityMismatch(
+    id: string,
+    detail: Record<string, unknown>,
+  ): Promise<void> {
+    const timestamp = this.now();
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const job = await getRequired(transaction, id);
+      await this.writeAudit(transaction, job.createdBy, 'ORG_IDENTITY_MISMATCH', id, detail, timestamp);
+    });
   }
 
   public async recordDirectDeploymentArtifacts(input: {
@@ -603,6 +667,12 @@ function assertChecksum(value: string): void {
   }
 }
 
+function assertClientRequestId(value: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$/u.test(value)) {
+    throw new SfudError('INVALID_ARGUMENT', 'Idempotency-Key 형식이 올바르지 않습니다.');
+  }
+}
+
 function isUniqueConstraintError(error: unknown): boolean {
   return error instanceof Error && /UNIQUE constraint failed/u.test(error.message);
 }
@@ -647,6 +717,12 @@ function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
       : { progress: JSON.parse(row.progress_json) as SalesforceDeploymentProgress }),
     remoteStatus: row.remote_status,
     ...(row.persistence_warning === null ? {} : { persistenceWarning: row.persistence_warning }),
+    ...(row.source_org_identity_json === null
+      ? {}
+      : { sourceOrgIdentity: JSON.parse(row.source_org_identity_json) as OrgIdentitySnapshot }),
+    ...(row.target_org_identity_json === null
+      ? {}
+      : { targetOrgIdentity: JSON.parse(row.target_org_identity_json) as OrgIdentitySnapshot }),
   };
 }
 

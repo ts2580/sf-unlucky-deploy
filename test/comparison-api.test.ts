@@ -54,12 +54,13 @@ describe('비교 API', () => {
       expect(workspace.statusCode).toBe(200);
       expect(workspace.json()).toMatchObject({
         orgs: [
-          { alias: 'left', connected: true },
-          { alias: 'right', connected: true },
+          { alias: 'left', connected: true, username: 'left@example.com', maskedOrgId: '00D00…001' },
+          { alias: 'right', connected: true, username: 'right@example.com', maskedOrgId: '00D00…002' },
         ],
         projects: [{ displayName: 'project', manifests: ['manifest/package.xml'] }],
       });
       expect(workspace.body).not.toContain('access-token-secret');
+      expect(workspace.body).not.toContain('00D000000000001');
       expect(workspace.body).not.toContain(projectPath);
       const projectId = workspace.json<{ projects: Array<{ id: string }> }>().projects[0]!.id;
       const metadataTypes = await server.inject({
@@ -261,8 +262,16 @@ class ComparisonSfClient implements SfClient {
         status: 0,
         result: {
           nonScratchOrgs: [
-            { alias: 'left', name: 'Left Org', orgEdition: 'Developer', connectedStatus: 'Connected', accessToken: 'access-token-secret' },
-            { alias: 'right', name: 'Right Org', orgEdition: 'Sandbox', connectedStatus: 'Connected' },
+            {
+              alias: 'left', username: 'left@example.com', orgId: '00D000000000001',
+              instanceUrl: 'https://left.example.my.salesforce.com', name: 'Left Org',
+              orgEdition: 'Developer', connectedStatus: 'Connected', accessToken: 'access-token-secret',
+            },
+            {
+              alias: 'right', username: 'right@example.com', orgId: '00D000000000002',
+              instanceUrl: 'https://right.example.my.salesforce.com', name: 'Right Org',
+              orgEdition: 'Sandbox', connectedStatus: 'Connected',
+            },
           ],
         },
       };

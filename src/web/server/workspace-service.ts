@@ -6,6 +6,7 @@ import path from 'node:path';
 import { listFiles } from '../../core/files.js';
 import { readProjectApiVersion, withRequestWorkspace } from '../../core/request-workspace.js';
 import type { SfClient } from '../../salesforce/sf-client.js';
+import type { OrgIdentitySnapshot } from '../../deploy/org-identity.js';
 
 const UPLOAD_TTL_MS = 4 * 60 * 60 * 1_000;
 
@@ -15,6 +16,9 @@ export interface WorkspaceOrg {
   label: string;
   edition?: string;
   connected: boolean;
+  username?: string;
+  orgId?: string;
+  instanceUrlHash?: string;
 }
 
 export interface WorkspaceProject {
@@ -43,6 +47,8 @@ interface RawOrg {
   name?: unknown;
   orgEdition?: unknown;
   connectedStatus?: unknown;
+  orgId?: unknown;
+  instanceUrl?: unknown;
 }
 
 export class WorkspaceService {
@@ -173,6 +179,21 @@ export class WorkspaceService {
     }
   }
 
+  public async getOrgIdentity(alias: string, refresh = false): Promise<OrgIdentitySnapshot> {
+    const orgs = refresh ? await this.refreshOrgs() : await this.listOrgs();
+    const org = orgs.find((candidate) => candidate.alias === alias && candidate.connected);
+    if (org === undefined) throw new Error(`연결된 Salesforce org가 아닙니다: ${alias}`);
+    if (org.username === undefined || org.orgId === undefined) {
+      throw new Error(`Salesforce org identity를 확인할 수 없습니다: ${alias}`);
+    }
+    return {
+      alias: org.alias,
+      username: org.username,
+      orgId: org.orgId,
+      ...(org.instanceUrlHash === undefined ? {} : { instanceUrlHash: org.instanceUrlHash }),
+    };
+  }
+
   public async listMetadataTypes(
     sourceIds: readonly string[],
     ownerUserId?: string,
@@ -282,10 +303,21 @@ export class WorkspaceService {
           label: stringValue(rawOrg.name) ?? alias,
           ...(stringValue(rawOrg.orgEdition) === undefined ? {} : { edition: stringValue(rawOrg.orgEdition)! }),
           connected: stringValue(rawOrg.connectedStatus)?.toLowerCase() === 'connected',
+          ...(stringValue(rawOrg.username) === undefined ? {} : { username: stringValue(rawOrg.username)! }),
+          ...(stringValue(rawOrg.orgId) === undefined ? {} : { orgId: stringValue(rawOrg.orgId)! }),
+          ...(stringValue(rawOrg.instanceUrl) === undefined ? {} : {
+            instanceUrlHash: createHash('sha256').update(normalizeInstanceUrl(stringValue(rawOrg.instanceUrl)!)).digest('hex'),
+          }),
         });
       }
     }
     return [...unique.values()].sort((left, right) => left.alias.localeCompare(right.alias));
+  }
+
+  private async refreshOrgs(): Promise<WorkspaceOrg[]> {
+    const value = await this.loadOrgs();
+    this.orgCache = { expiresAt: Date.now() + 5_000, value };
+    return value;
   }
 
   public async resolveProject(projectId: string): Promise<AllowedProject> {
@@ -528,4 +560,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function normalizeInstanceUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    return `${url.protocol}//${url.host}`.toLowerCase();
+  } catch {
+    return value.trim().toLowerCase().replace(/\/+$/u, '');
+  }
+}
+
+export function maskOrgId(value: string): string {
+  return value.length <= 8 ? `${value.slice(0, 3)}…` : `${value.slice(0, 5)}…${value.slice(-3)}`;
 }

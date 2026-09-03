@@ -14,6 +14,7 @@ import type { WorkspaceService } from '../web/server/workspace-service.js';
 import { DeploymentCoordinator, ReconciliationRequiredError } from './deployment-coordinator.js';
 import { DeploymentJobRepository, type DeploymentJob } from './deployment-job-repository.js';
 import { runAsyncSalesforceDeployment } from './salesforce-deployment.js';
+import { assertDeploymentOrgIdentities } from './org-identity-verifier.js';
 
 export interface ApproveDeploymentRequest {
   dryRunJobId: string;
@@ -66,6 +67,9 @@ export class DeploymentService {
             targetAlias: current.targetAlias,
             cwd,
             phase: 'DEPLOY',
+            beforeSubmit: async () => {
+              await assertDeploymentOrgIdentities(current, this.jobs, this.workspace);
+            },
             onSubmitted: async (deploymentId) => {
               await this.jobs.recordSalesforceSubmission(current.id, deploymentId);
             },

@@ -130,7 +130,11 @@ class UploadSfClient implements SfClient {
     }
     if (args[0] === 'org' && args[1] === 'list') {
       return { status: 0, result: { nonScratchOrgs: [
-        { alias: 'target', name: 'Target', orgEdition: 'Developer', connectedStatus: 'Connected' },
+        {
+          alias: 'target', username: 'target@example.com', orgId: '00D000000000001',
+          instanceUrl: 'https://target.example.my.salesforce.com', name: 'Target',
+          orgEdition: 'Developer', connectedStatus: 'Connected',
+        },
       ] } };
     }
     throw new Error(`예상하지 못한 sf 명령: ${args.join(' ')}`);

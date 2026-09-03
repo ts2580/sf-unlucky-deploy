@@ -7,6 +7,8 @@ import { redactSensitiveText, type SfClient } from '../salesforce/sf-client.js';
 import type { AllowedProject, WorkspaceService } from '../web/server/workspace-service.js';
 import { DeploymentCoordinator, ReconciliationRequiredError } from './deployment-coordinator.js';
 import { DeploymentJobRepository, type DeploymentJob } from './deployment-job-repository.js';
+import { assertDeploymentOrgIdentities } from './org-identity-verifier.js';
+import type { OrgIdentitySnapshot } from './org-identity.js';
 import {
   normalizeSelectedComponents,
   type SelectedMetadataComponent,
@@ -40,8 +42,14 @@ export interface CreateDryRunInput {
 }
 
 export interface CreateDirectDeploymentInput extends CreateDryRunInput {
+  clientRequestId: string;
   targetConfirmation: string;
   confirmation: string;
+}
+
+export interface CreateDirectDeploymentResult {
+  job: DeploymentJob;
+  created: boolean;
 }
 
 interface PreparedDeploymentRequest {
@@ -52,6 +60,8 @@ interface PreparedDeploymentRequest {
   manifestPath: string;
   selectedComponents?: SelectedMetadataComponent[];
   requestChecksum: string;
+  sourceOrgIdentity?: OrgIdentitySnapshot;
+  targetOrgIdentity: OrgIdentitySnapshot;
   releaseSources: () => void;
 }
 
@@ -73,6 +83,8 @@ export class DryRunService {
         targetAlias: prepared.targetAlias,
         manifestPath: prepared.manifestPath,
         payloadChecksum: prepared.requestChecksum,
+        targetOrgIdentity: prepared.targetOrgIdentity,
+        ...(prepared.sourceOrgIdentity === undefined ? {} : { sourceOrgIdentity: prepared.sourceOrgIdentity }),
         createdBy: input.createdBy,
         scope: prepared.scope === 'all' ? 'ALL' : 'MANIFEST',
         ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
@@ -86,6 +98,7 @@ export class DryRunService {
     void this.coordinator.runDryRun(job.id, async () => {
       const persistenceWarnings: string[] = [];
       try {
+        await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
         const result = await runDeployCommand({
           from: prepared.source,
           to: prepared.targetAlias,
@@ -108,6 +121,9 @@ export class DryRunService {
           cwd: prepared.project.realPath,
           sfClient: this.sfClient,
           stdout: () => undefined,
+          beforeDeploymentSubmit: async () => {
+            await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
+          },
           onDeploymentSubmitted: async (deploymentId) => {
             await this.jobs.recordSalesforceSubmission(job.id, deploymentId);
           },
@@ -149,19 +165,23 @@ export class DryRunService {
     return job;
   }
 
-  public async createDirect(input: CreateDirectDeploymentInput): Promise<DeploymentJob> {
+  public async createDirect(input: CreateDirectDeploymentInput): Promise<CreateDirectDeploymentResult> {
     const tests = [...new Set(input.tests)].sort((left, right) => left.localeCompare(right));
     const request: CreateDryRunInput = { ...input, tests };
     const prepared = await this.prepare(request);
-    let job: DeploymentJob;
+    let creation: CreateDirectDeploymentResult;
     try {
-      job = await this.jobs.createDirectDeployment({
+      creation = await this.jobs.createDirectDeployment({
         source: prepared.source,
         targetAlias: prepared.targetAlias,
         targetConfirmation: input.targetConfirmation,
         confirmation: input.confirmation,
         manifestPath: prepared.manifestPath,
         payloadChecksum: prepared.requestChecksum,
+        requestHash: prepared.requestChecksum,
+        clientRequestId: input.clientRequestId,
+        targetOrgIdentity: prepared.targetOrgIdentity,
+        ...(prepared.sourceOrgIdentity === undefined ? {} : { sourceOrgIdentity: prepared.sourceOrgIdentity }),
         createdBy: input.createdBy,
         scope: prepared.scope === 'all' ? 'ALL' : 'MANIFEST',
         ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
@@ -173,10 +193,16 @@ export class DryRunService {
       prepared.releaseSources();
       throw error;
     }
+    const { job } = creation;
+    if (!creation.created) {
+      prepared.releaseSources();
+      return creation;
+    }
 
     void this.coordinator.runDeployment(job.id, async () => {
       const persistenceWarnings: string[] = [];
       try {
+        await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
         const result = await runDeployCommand({
           from: prepared.source,
           to: prepared.targetAlias,
@@ -200,6 +226,9 @@ export class DryRunService {
           cwd: prepared.project.realPath,
           sfClient: this.sfClient,
           stdout: () => undefined,
+          beforeDeploymentSubmit: async () => {
+            await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
+          },
           onDeploymentSubmitted: async (deploymentId) => {
             await this.jobs.recordSalesforceSubmission(job.id, deploymentId);
           },
@@ -241,7 +270,7 @@ export class DryRunService {
         throw error;
       }
     }).finally(prepared.releaseSources).catch(() => undefined);
-    return job;
+    return creation;
   }
 
   private async prepare(input: CreateDryRunInput): Promise<PreparedDeploymentRequest> {
@@ -296,9 +325,15 @@ export class DryRunService {
         requiredString(input.manifest, 'manifest'),
       )).path;
     const targetAlias = targetSource.slice('org:'.length);
+    const [sourceOrgIdentity, targetOrgIdentity] = await Promise.all([
+      source.startsWith('org:')
+        ? this.workspace.getOrgIdentity(source.slice('org:'.length))
+        : Promise.resolve(undefined),
+      this.workspace.getOrgIdentity(targetAlias),
+    ]);
     const requestChecksum = createHash('sha256').update(JSON.stringify({
       projectPath: project.realPath,
-      manifestPath,
+      ...(scope === 'selected' ? {} : { manifestPath }),
       source,
       targetAlias,
       testLevel: input.testLevel,
@@ -309,6 +344,8 @@ export class DryRunService {
       scope,
       metadataType: input.metadataType,
       selectedComponents,
+      sourceOrgIdentity,
+      targetOrgIdentity,
     })).digest('hex');
     return {
       source,
@@ -318,6 +355,8 @@ export class DryRunService {
       manifestPath,
       ...(selectedComponents === undefined ? {} : { selectedComponents }),
       requestChecksum,
+      ...(sourceOrgIdentity === undefined ? {} : { sourceOrgIdentity }),
+      targetOrgIdentity,
       releaseSources: this.workspace.pinSources([input.sourceId], input.createdBy),
     };
   }

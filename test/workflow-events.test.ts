@@ -75,6 +75,7 @@ describe('작업 현황 SSE', () => {
 
     const job = await server.sfudRuntime.deploymentJobs.createDryRun({
       source: 'local:fixture', targetAlias: 'target', manifestPath: 'generated/package.xml',
+      targetOrgIdentity: { alias: 'target', username: 'target@example.com', orgId: '00D000000000001' },
       payloadChecksum: 'a'.repeat(64),
     });
     const reader = response.body!.getReader();

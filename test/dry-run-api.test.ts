@@ -212,7 +212,7 @@ describe('dry-run API', () => {
       const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
       const created = await fixture.server.inject({
         method: 'POST', url: '/api/v1/deployments/direct',
-        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'direct-no-tests' },
         payload: {
           scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
           sourceId, targetOrgId: 'org:target', testLevel: 'NoTestRun', tests: [], targetConfirmation: 'target',
@@ -251,7 +251,7 @@ describe('dry-run API', () => {
       const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
       const created = await fixture.server.inject({
         method: 'POST', url: '/api/v1/deployments/direct',
-        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': `direct-${testLevel}` },
         payload: {
           scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
           sourceId, targetOrgId: 'org:target', testLevel, tests: [],
@@ -289,7 +289,7 @@ describe('dry-run API', () => {
       const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
       const created = await fixture.server.inject({
         method: 'POST', url: '/api/v1/deployments/direct',
-        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'direct-with-tests' },
         payload: {
           scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
           sourceId, targetOrgId: 'org:target', testLevel: 'RunSpecifiedTests', tests: ['CoverageSpec'],
@@ -331,7 +331,7 @@ describe('dry-run API', () => {
       const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
       const created = await fixture.server.inject({
         method: 'POST', url: '/api/v1/deployments/direct',
-        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'direct-low-coverage' },
         payload: {
           scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
           sourceId, targetOrgId: 'org:target', testLevel: 'RunSpecifiedTests', tests: ['CoverageSpec'],
@@ -366,7 +366,7 @@ describe('dry-run API', () => {
 
       const created = await fixture.server.inject({
         method: 'POST', url: '/api/v1/deployments/direct',
-        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'direct-progress-failure' },
         payload: {
           scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
           sourceId, targetOrgId: 'org:target', testLevel: 'NoTestRun', tests: [],
@@ -402,7 +402,7 @@ describe('dry-run API', () => {
 
       const created = await fixture.server.inject({
         method: 'POST', url: '/api/v1/deployments/direct',
-        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'direct-artifact-failure' },
         payload: {
           scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
           sourceId, targetOrgId: 'org:target', testLevel: 'NoTestRun', tests: [],
@@ -425,6 +425,160 @@ describe('dry-run API', () => {
       expect(response.body).not.toContain('"errorCode"');
     } finally {
       vi.restoreAllMocks();
+      await fixture.close();
+    }
+  });
+
+  it('같은 Idempotency-Key 요청을 한 job과 한 번의 Salesforce 제출로 수렴시킨다', async () => {
+    const fixture = await createFixture(new DryRunSfClient());
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ sources: Array<{ id: string; kind: string }> }>();
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      const headers = {
+        cookie: auth.cookie,
+        'x-sfud-csrf': auth.csrfToken,
+        'idempotency-key': 'concurrent-direct-request',
+      };
+      const payload = {
+        scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+        sourceId, targetOrgId: 'org:target', testLevel: 'NoTestRun', tests: [],
+        targetConfirmation: 'target', confirmation: '실제 배포',
+      };
+
+      const [first, duplicate] = await Promise.all([
+        fixture.server.inject({ method: 'POST', url: '/api/v1/deployments/direct', headers, payload }),
+        fixture.server.inject({ method: 'POST', url: '/api/v1/deployments/direct', headers, payload }),
+      ]);
+      expect([first.statusCode, duplicate.statusCode].sort()).toEqual([200, 202]);
+      const jobId = first.json<{ job: { id: string } }>().job.id;
+      expect(duplicate.json<{ job: { id: string } }>().job.id).toBe(jobId);
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+
+      expect(await fixture.server.sfudRuntime.store.database.get(`
+        SELECT COUNT(*) count FROM deployment_jobs WHERE client_request_id = ?
+      `, headers['idempotency-key'])).toEqual({ count: 1 });
+      expect(deploymentStartCalls(fixture.client.calls)).toHaveLength(1);
+
+      const retry = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/direct', headers, payload,
+      });
+      expect(retry.statusCode).toBe(200);
+      expect(retry.json<{ job: { id: string } }>().job.id).toBe(jobId);
+      expect(deploymentStartCalls(fixture.client.calls)).toHaveLength(1);
+
+      const conflict = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/direct', headers,
+        payload: { ...payload, strict: true },
+      });
+      expect(conflict.statusCode).toBe(409);
+      expect(conflict.json()).toMatchObject({ error: { code: 'IDEMPOTENCY_CONFLICT' } });
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('Idempotency-Key가 없는 직접 배포 요청을 거부한다', async () => {
+    const fixture = await createFixture(new DryRunSfClient());
+    try {
+      const auth = await bootstrap(fixture.server);
+      const response = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/direct',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: {},
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ error: {
+        code: 'DIRECT_DEPLOYMENT_DENIED',
+        message: expect.stringContaining('Idempotency-Key'),
+      } });
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('queue 대기 중 target alias가 다른 org를 가리키면 제출 전에 차단한다', async () => {
+    const fixture = await createFixture(new DryRunSfClient('identity-changed'));
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ sources: Array<{ id: string; kind: string }> }>();
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      const created = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/direct',
+        headers: {
+          cookie: auth.cookie,
+          'x-sfud-csrf': auth.csrfToken,
+          'idempotency-key': 'identity-changed-direct',
+        },
+        payload: {
+          scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+          sourceId, targetOrgId: 'org:target', testLevel: 'NoTestRun', tests: [],
+          targetConfirmation: 'target', confirmation: '실제 배포',
+        },
+      });
+      const jobId = created.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+
+      expect(await fixture.server.sfudRuntime.deploymentJobs.getRequired(jobId)).toMatchObject({
+        status: 'FAILED', errorCode: 'ORG_IDENTITY_CHANGED', remoteStatus: 'NOT_SUBMITTED',
+      });
+      expect(deploymentStartCalls(fixture.client.calls)).toHaveLength(0);
+      const audit = await fixture.server.sfudRuntime.store.database.get<{ detail_json: string }>(`
+        SELECT detail_json FROM audit_events
+        WHERE entity_id = ? AND event_type = 'ORG_IDENTITY_MISMATCH'
+      `, jobId);
+      expect(audit?.detail_json).toContain('00D00…001');
+      expect(audit?.detail_json).toContain('00D00…099');
+      expect(audit?.detail_json).not.toContain('00D000000000099');
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('dry-run 뒤 target org identity가 바뀌면 승인 배포를 차단한다', async () => {
+    const client = new DryRunSfClient();
+    const fixture = await createFixture(client);
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ sources: Array<{ id: string; kind: string }> }>();
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      const dryRunResponse = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/dry-run',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: {
+          scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+          sourceId, targetOrgId: 'org:target', testLevel: 'RunLocalTests',
+        },
+      });
+      const dryRunId = dryRunResponse.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+      const dryRun = await fixture.server.sfudRuntime.deploymentJobs.getRequired(dryRunId);
+      client.orgId = '00D000000000099';
+
+      const approved = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/execute',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: {
+          dryRunJobId: dryRun.id,
+          payloadChecksum: dryRun.payloadChecksum,
+          targetAlias: 'target',
+          confirmation: '실제 배포',
+        },
+      });
+      const deployId = approved.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+
+      expect(await fixture.server.sfudRuntime.deploymentJobs.getRequired(deployId)).toMatchObject({
+        status: 'FAILED', errorCode: 'ORG_IDENTITY_CHANGED', remoteStatus: 'NOT_SUBMITTED',
+      });
+      expect(deploymentStartCalls(client.calls)).toHaveLength(1);
+    } finally {
       await fixture.close();
     }
   });
@@ -561,9 +715,11 @@ describe('dry-run API', () => {
 
 class DryRunSfClient implements SfClient {
   public readonly calls: Array<{ args: readonly string[]; options: SfRunOptions }> = [];
+  public orgId = '00D000000000001';
+  private orgListCalls = 0;
 
   public constructor(
-    private readonly failure: 'none' | 'definitive' | 'ambiguous' | 'reported' = 'none',
+    private readonly failure: 'none' | 'definitive' | 'ambiguous' | 'reported' | 'identity-changed' = 'none',
     private readonly coverage = 80,
   ) {}
 
@@ -575,8 +731,16 @@ class DryRunSfClient implements SfClient {
       ] } };
     }
     if (args[0] === 'org' && args[1] === 'list') {
+      this.orgListCalls += 1;
+      const orgId = this.failure === 'identity-changed' && this.orgListCalls > 1
+        ? '00D000000000099'
+        : this.orgId;
       return { status: 0, result: { nonScratchOrgs: [
-        { alias: 'target', name: 'Target', orgEdition: 'Developer', connectedStatus: 'Connected' },
+        {
+          alias: 'target', username: 'target@example.com', orgId,
+          instanceUrl: 'https://target.example.my.salesforce.com', name: 'Target',
+          orgEdition: 'Developer', connectedStatus: 'Connected',
+        },
       ] } };
     }
     if (args[0] === 'project' && args[1] === 'generate' && args[2] === 'manifest') {

@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 
+import { SfudError } from '../../core/errors.js';
 import type { DeploymentJob } from '../../deploy/deployment-job-repository.js';
 import type { RequestedTestLevel } from '../../deploy/test-plan.js';
 import { apexCoverageSummary } from '../../deploy/test-coverage.js';
@@ -99,8 +100,9 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
     });
     if (session === undefined) return;
     try {
+      const clientRequestId = idempotencyKey(request.headers['idempotency-key']);
       const settings = await app.sfudRuntime.settings.get(session.user.id);
-      const job = await app.sfudRuntime.dryRuns.createDirect({
+      const result = await app.sfudRuntime.dryRuns.createDirect({
         ...(request.body?.projectId === undefined ? {} : { projectId: request.body.projectId }),
         ...(request.body?.manifest === undefined ? {} : { manifest: request.body.manifest }),
         scope: request.body?.scope ?? 'manifest',
@@ -119,12 +121,14 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
         strict: request.body?.strict === true,
         targetConfirmation: requiredString(request.body?.targetConfirmation, '대상 org 별칭 확인'),
         confirmation: requiredString(request.body?.confirmation, '실제 배포 확인 문구'),
+        clientRequestId,
         createdBy: session.user.id,
       });
-      return reply.code(202).send({ job: publicJob(app, job, false) });
+      return reply.code(result.created ? 202 : 200).send({ job: publicJob(app, result.job, false) });
     } catch (error) {
-      return reply.code(400).send({ error: {
-        code: 'DIRECT_DEPLOYMENT_DENIED',
+      const conflict = error instanceof SfudError && error.code === 'IDEMPOTENCY_CONFLICT';
+      return reply.code(conflict ? 409 : 400).send({ error: {
+        code: conflict ? 'IDEMPOTENCY_CONFLICT' : 'DIRECT_DEPLOYMENT_DENIED',
         message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
       } });
     }
@@ -197,6 +201,13 @@ function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: b
 
 function requiredString(value: unknown, label: string): string {
   if (typeof value !== 'string' || value.length === 0) throw new Error(`${label} 선택이 필요합니다.`);
+  return value;
+}
+
+function idempotencyKey(value: string | string[] | undefined): string {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$/u.test(value)) {
+    throw new Error('유효한 Idempotency-Key 헤더가 필요합니다.');
+  }
   return value;
 }
 

@@ -45,7 +45,7 @@ describe('SQLite 저장소', () => {
     expect(await store.database.get('PRAGMA journal_mode')).toEqual({ journal_mode: 'wal' });
     expect(await store.database.get('PRAGMA busy_timeout')).toEqual({ timeout: 5_000 });
     expect(await store.database.get('SELECT COUNT(*) count FROM schema_migrations'))
-      .toEqual({ count: 12 });
+      .toEqual({ count: 14 });
     expect((await stat(path.dirname(databasePath))).mode & 0o777).toBe(0o700);
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
     await expect(readFile(databasePath)).resolves.toBeInstanceOf(Buffer);
@@ -155,6 +155,7 @@ describe('SQLite 저장소', () => {
     const dryRun = await jobs.createDryRun({
       source: 'local:sf-project',
       targetAlias: 'stdOrg',
+      targetOrgIdentity: orgIdentity('stdOrg'),
       manifestPath: 'manifest/package.xml',
       payloadChecksum: checksum,
       runDirectory: '.sfud/runs/dry-run-1',
@@ -216,6 +217,7 @@ describe('SQLite 저장소', () => {
     const dryRun = await jobs.createDryRun({
       source: 'org:aladin',
       targetAlias: 'stdOrg',
+      targetOrgIdentity: orgIdentity('stdOrg'),
       manifestPath: 'manifest/package.xml',
       payloadChecksum: checksum,
       createdBy: viewer.id,
@@ -241,6 +243,30 @@ describe('SQLite 저장소', () => {
     })).rejects.toThrow(/승인 권한/u);
   });
 
+  it('30분이 지난 dry-run 승인을 거부한다', async () => {
+    const store = await openMemoryStore();
+    let now = '2026-08-23T00:00:00.000Z';
+    const ids = ['expiry-deployer', 'expiry-dry-run'];
+    const users = new UserRepository(store.database, () => now, () => ids.shift()!);
+    const jobs = new DeploymentJobRepository(store.database, () => now, () => ids.shift()!);
+    const deployer = await users.create({
+      email: 'expiry@example.com', displayName: '승인 만료 검증', role: 'DEPLOYER',
+    });
+    const dryRun = await jobs.createDryRun({
+      source: 'local:sf-project', targetAlias: 'stdOrg', targetOrgIdentity: orgIdentity('stdOrg'),
+      manifestPath: 'manifest/package.xml', payloadChecksum: checksum, createdBy: deployer.id,
+    });
+    await jobs.transition(dryRun.id, 'DRY_RUN_RUNNING');
+    await recordPreparedArtifacts(jobs, dryRun.id);
+    await jobs.transition(dryRun.id, 'APPROVAL_PENDING');
+    now = '2026-08-23T00:31:00.000Z';
+
+    await expect(jobs.approveAndQueueDeployment({
+      dryRunJobId: dryRun.id, approvedBy: deployer.id, payloadChecksum: checksum,
+      targetAlias: 'stdOrg', confirmation: '실제 배포',
+    })).rejects.toThrow(/유효시간 30분/u);
+  });
+
   it('성공한 dry-run 없이도 권한과 확인 문구를 검증해 직접 배포를 기록한다', async () => {
     const store = await openMemoryStore();
     const ids = ['direct-deployer', 'direct-deploy-1'];
@@ -250,9 +276,11 @@ describe('SQLite 저장소', () => {
       email: 'direct@example.com', displayName: '직접 배포자', role: 'DEPLOYER',
     });
 
-    const deploy = await jobs.createDirectDeployment({
+    const { job: deploy, created } = await jobs.createDirectDeployment({
       source: 'local:sf-project', targetAlias: 'sandbox', targetConfirmation: 'sandbox',
+      targetOrgIdentity: orgIdentity('sandbox'),
       confirmation: '실제 배포', manifestPath: 'manifest/package.xml', payloadChecksum: checksum,
+      clientRequestId: 'direct-request-1', requestHash: checksum,
       createdBy: deployer.id, requestedTestLevel: 'NoTestRun', requestedTests: [],
       selectedComponents: [{ type: 'CustomObject', fullName: 'Book__c' }],
     });
@@ -261,11 +289,14 @@ describe('SQLite 저장소', () => {
       id: 'direct-deploy-1', kind: 'DEPLOY', status: 'QUEUED', targetAlias: 'sandbox',
       selectedComponents: [{ type: 'CustomObject', fullName: 'Book__c' }],
     });
+    expect(created).toBe(true);
     expect(deploy.testPlan).toBeUndefined();
     expect(deploy.dryRunJobId).toBeUndefined();
     await expect(jobs.createDirectDeployment({
       source: 'local:sf-project', targetAlias: 'sandbox', targetConfirmation: 'production',
+      targetOrgIdentity: orgIdentity('sandbox'),
       confirmation: '실제 배포', manifestPath: 'manifest/package.xml', payloadChecksum: checksum,
+      clientRequestId: 'direct-request-2', requestHash: checksum,
       createdBy: deployer.id, requestedTestLevel: 'NoTestRun', requestedTests: [],
     })).rejects.toThrow(/대상 org 별칭/u);
   });
@@ -276,6 +307,7 @@ describe('SQLite 저장소', () => {
     const job = await jobs.createDryRun({
       source: 'local:sf-project',
       targetAlias: 'stdOrg',
+      targetOrgIdentity: orgIdentity('stdOrg'),
       manifestPath: 'manifest/package.xml',
       payloadChecksum: checksum,
     });
@@ -293,6 +325,7 @@ describe('SQLite 저장소', () => {
     const jobs = new DeploymentJobRepository(store.database, fixedNow, () => 'dry-run-queued');
     const job = await jobs.createDryRun({
       source: 'local:sf-project', targetAlias: 'stdOrg',
+      targetOrgIdentity: orgIdentity('stdOrg'),
       manifestPath: 'manifest/package.xml', payloadChecksum: checksum,
     });
 
@@ -309,6 +342,7 @@ describe('SQLite 저장소', () => {
     const job = await jobs.createDryRun({
       source: 'local:sf-project',
       targetAlias: 'stdOrg',
+      targetOrgIdentity: orgIdentity('stdOrg'),
       manifestPath: 'manifest/package.xml',
       payloadChecksum: checksum,
     });
@@ -343,6 +377,10 @@ function deferred<T>(): {
 
 function fixedNow(): string {
   return '2026-08-23T00:00:00.000Z';
+}
+
+function orgIdentity(alias: string) {
+  return { alias, username: `${alias}@example.com`, orgId: `00D${alias.padEnd(12, '0')}` };
 }
 
 async function recordPreparedArtifacts(jobs: DeploymentJobRepository, id: string): Promise<void> {

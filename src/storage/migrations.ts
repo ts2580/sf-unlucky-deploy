@@ -313,6 +313,25 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE deployment_jobs ADD COLUMN persistence_warning TEXT;
     `,
   },
+  {
+    version: 13,
+    name: 'direct_deployment_idempotency',
+    sql: `
+      ALTER TABLE deployment_jobs ADD COLUMN client_request_id TEXT;
+      ALTER TABLE deployment_jobs ADD COLUMN request_hash TEXT;
+      CREATE UNIQUE INDEX idx_deployment_jobs_direct_request
+      ON deployment_jobs(created_by, client_request_id)
+      WHERE kind = 'DEPLOY' AND dry_run_job_id IS NULL AND client_request_id IS NOT NULL;
+    `,
+  },
+  {
+    version: 14,
+    name: 'deployment_org_identity',
+    sql: `
+      ALTER TABLE deployment_jobs ADD COLUMN source_org_identity_json TEXT;
+      ALTER TABLE deployment_jobs ADD COLUMN target_org_identity_json TEXT;
+    `,
+  },
 ];
 
 export async function applyMigrations(
