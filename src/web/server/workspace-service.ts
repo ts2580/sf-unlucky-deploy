@@ -101,8 +101,9 @@ export class WorkspaceService {
       });
     }
     await scavengeStaleUploadRoots();
-    const uploadRoot = await mkdtemp(path.join(os.tmpdir(), `sfud-uploads-${process.pid}-`));
-    await chmod(uploadRoot, 0o700);
+    const createdUploadRoot = await mkdtemp(path.join(os.tmpdir(), `sfud-uploads-${process.pid}-`));
+    await chmod(createdUploadRoot, 0o700);
+    const uploadRoot = await realpath(createdUploadRoot);
     return new WorkspaceService(sfClient, projects, {
       id: 'command-workspace',
       displayName: 'sfud command workspace',
