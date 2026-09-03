@@ -534,7 +534,11 @@ export class WorkspaceService {
 }
 
 async function validatePackageDirectories(projectPath: string, configurationPath: string): Promise<void> {
-  if (configurationPath !== path.join(projectPath, 'sfdx-project.json')) {
+  const [configurationRealPath, expectedRealPath] = await Promise.all([
+    realpath(configurationPath),
+    realpath(path.join(projectPath, 'sfdx-project.json')),
+  ]);
+  if (!samePath(configurationRealPath, expectedRealPath)) {
     throw new Error('sfdx-project.json 경로가 올바르지 않습니다.');
   }
   await resolveLocalPackageDirectories(projectPath);
@@ -597,7 +601,7 @@ export async function scavengeStaleUploadRoots(
     try {
       const candidateStat = await lstat(candidate);
       if (!candidateStat.isDirectory()
-        || (candidateStat.mode & 0o777) !== 0o700
+        || (process.platform !== 'win32' && (candidateStat.mode & 0o777) !== 0o700)
         || (typeof process.getuid === 'function' && candidateStat.uid !== process.getuid())
         || now - candidateStat.mtimeMs <= UPLOAD_TTL_MS) {
         continue;
@@ -618,6 +622,12 @@ export async function scavengeStaleUploadRoots(
 function isInside(parent: string, child: string): boolean {
   const relative = path.relative(parent, child);
   return relative.length > 0 && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
+}
+
+function samePath(left: string, right: string): boolean {
+  return process.platform === 'win32'
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right;
 }
 
 function isUploadStoragePath(candidate: string): boolean {

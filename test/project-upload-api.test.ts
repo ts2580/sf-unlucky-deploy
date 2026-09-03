@@ -28,7 +28,7 @@ describe('프로젝트 업로드 API', () => {
         ['teacher-project/force-app/main/default/classes/Hello.cls', 'public class Hello {}\n'],
         ['teacher-project/force-app/main/default/classes/Hello.cls-meta.xml', '<ApexClass/>\n'],
       ]);
-      expect(response.statusCode).toBe(201);
+      expect(response.statusCode, response.body).toBe(201);
       const source = response.json<{ source: { id: string; location: string; label: string } }>().source;
       expect(source).toMatchObject({ location: 'upload', label: 'teacher-project' });
       expect(response.body).not.toContain('/tmp/');
@@ -144,7 +144,8 @@ describe('프로젝트 업로드 API', () => {
           ['project/sfdx-project.json', '{"packageDirectories":[{"path":"force-app"}]}'],
           ['project/force-app/payload.txt', 'x'.repeat(240)],
         ];
-        expect((await upload(fixture.server, auth, files)).statusCode).toBe(201);
+        const accepted = await upload(fixture.server, auth, files);
+        expect(accepted.statusCode, accepted.body).toBe(201);
         const rejected = await upload(fixture.server, auth, files);
         expect(rejected.statusCode).toBe(413);
         expect(rejected.json()).toMatchObject({ error: {
@@ -175,10 +176,15 @@ describe('프로젝트 업로드 API', () => {
         utimes(unsafeMode, old, old),
       ]);
 
-      expect(await scavengeStaleUploadRoots(temporaryDirectory, 5 * 60 * 60 * 1_000)).toBe(1);
+      expect(await scavengeStaleUploadRoots(temporaryDirectory, 5 * 60 * 60 * 1_000))
+        .toBe(process.platform === 'win32' ? 2 : 1);
       await expect(access(stale)).rejects.toThrow();
       await expect(access(active)).resolves.toBeUndefined();
-      await expect(access(unsafeMode)).resolves.toBeUndefined();
+      if (process.platform === 'win32') {
+        await expect(access(unsafeMode)).rejects.toThrow();
+      } else {
+        await expect(access(unsafeMode)).resolves.toBeUndefined();
+      }
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true });
     }
