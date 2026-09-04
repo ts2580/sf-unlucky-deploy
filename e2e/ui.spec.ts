@@ -44,19 +44,92 @@ test('대시보드 shell과 핵심 안전 안내를 렌더링한다', async ({ p
   await expect(page.getByText('UI 27546')).toBeVisible();
 });
 
-test('390px 모바일 화면에서 body 수평 overflow가 없다', async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
+test('큰 화면의 작업 공간을 활용하고 좁은 화면에서는 패널을 쌓는다', async ({ page }, testInfo) => {
+  await mockResponsiveWorkspace(page);
+  await login(page, '/deploy');
+  await expect(page.getByRole('combobox', { name: 'Salesforce metadata type' })).toHaveValue('ApexClass');
+  for (const width of [2560, 2200, 2199, 1920, 1536, 1280, 1201, 1200, 1024, 980, 768, 701, 700, 430, 390, 360, 320]) {
+    await page.setViewportSize({ width, height: width < 700 ? 844 : 1440 });
+    const metrics = await page.evaluate(() => {
+      const box = (selector: string) => {
+        const rect = document.querySelector(selector)!.getBoundingClientRect();
+        return { x: rect.x, y: rect.y, width: rect.width, right: rect.right, bottom: rect.bottom };
+      };
+      return {
+        overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+        body: box('.app-body'), content: box('.content'), workspace: box('.deploy-workspace'),
+        source: box('.deploy-source-panel'), search: box('.deploy-search-panel'),
+        summary: box('.deploy-summary'), button: box('.comparison-run-button'),
+        options: box('.comparison-controls-row .option-grid'),
+      };
+    });
+    expect(metrics.overflow, `${width}px 가로 넘침`).toBe(false);
+    expect(metrics.button.right).toBeLessThan(metrics.search.right);
+    if (width > 1200) {
+      expect(metrics.content.width / metrics.body.width, `${width}px 본문 사용 비율`).toBeGreaterThan(.9);
+      expect(metrics.content.x - metrics.body.x).toBeLessThanOrEqual(49);
+      expect(metrics.body.right - metrics.content.right).toBeLessThanOrEqual(49);
+      expect(metrics.summary.x).toBeGreaterThanOrEqual(metrics.workspace.right);
+    } else {
+      expect(metrics.summary.y).toBeGreaterThanOrEqual(metrics.workspace.bottom);
+    }
+    if (width >= 2200) {
+      expect(Math.abs(metrics.source.y - metrics.search.y)).toBeLessThan(2);
+      expect(metrics.search.x).toBeGreaterThanOrEqual(metrics.source.right);
+      expect(metrics.summary.width).toBeGreaterThanOrEqual(350);
+    } else {
+      expect(metrics.search.y).toBeGreaterThanOrEqual(metrics.source.bottom);
+    }
+    if (width > 700) {
+      expect(Math.abs(metrics.options.y - metrics.button.y)).toBeLessThan(2);
+    } else {
+      expect(metrics.button.y).toBeGreaterThanOrEqual(metrics.options.bottom);
+    }
+    if ([2560, 1920, 390, 320].includes(width)) {
+      await page.screenshot({ path: testInfo.outputPath(`deploy-${width}.png`), fullPage: true });
+    }
+  }
+});
+
+test('320~430px 모바일에서 주요 화면과 컨트롤이 화면 안에 표시된다', async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await mockResponsiveWorkspace(page);
   await login(page);
-
-  const hasHorizontalOverflow = await page.evaluate(
-    () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
-  );
-
-  expect(hasHorizontalOverflow).toBe(false);
-  await expect(page.getByRole('link', { name: /비교 및 배포 시작/u })).toBeVisible();
-  await expect(page.getByRole('navigation', { name: '주요 메뉴' })).toBeVisible();
-  await expect(page.getByRole('link', { name: '실행 기록', exact: true })).toBeVisible();
-  await expect(page.getByRole('link', { name: '설정', exact: true })).toBeVisible();
+  for (const width of [320, 360, 390, 430]) {
+    await page.setViewportSize({ width, height: 844 });
+    for (const route of ['/', '/deploy', '/runs', '/settings', '/admin']) {
+      await page.goto(`http://127.0.0.1:27546${route}`);
+      await expect(page.getByRole('button', { name: '로그아웃' })).toBeVisible();
+      if (route === '/deploy') {
+        await expect(page.getByRole('combobox', { name: 'Salesforce metadata type' })).toHaveValue('ApexClass');
+      }
+      if (route === '/settings') {
+        await expect(page.locator('.connection-card')).toContainText('2개 org 사용 가능');
+        const help = await page.locator('#test-class-suffix-help').boundingBox();
+        const helpText = await page.locator('#test-class-suffix-help > span').boundingBox();
+        expect(helpText!.width, `${width}px 안내문 본문 너비`).toBeGreaterThan(help!.width * .85);
+      }
+      if (route === '/admin') await expect(page.locator('.admin-user-row').first()).toBeVisible();
+      const metrics = await page.evaluate(() => {
+        const viewport = document.documentElement.clientWidth;
+        return {
+          overflow: document.documentElement.scrollWidth > viewport,
+          clippedControls: [...document.querySelectorAll('button, input, select, a')]
+            .filter((element) => {
+              const rect = element.getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0 && (rect.x < -1 || rect.right > viewport + 1);
+            }).map((element) => element.getAttribute('aria-label') ?? element.textContent),
+        };
+      });
+      expect(metrics.overflow, `${width}px ${route} 가로 넘침`).toBe(false);
+      expect(metrics.clippedControls, `${width}px ${route} 컨트롤 잘림`).toEqual([]);
+      await expect(page.getByRole('navigation', { name: '주요 메뉴' })).toBeVisible();
+      await expect(page.getByRole('link', { name: '실행 기록', exact: true })).toBeVisible();
+      await expect(page.getByRole('link', { name: '설정', exact: true })).toBeVisible();
+    }
+  }
+  expect(pageErrors).toEqual([]);
 });
 
 test('메뉴마다 독립 URL과 화면을 제공한다', async ({ page }) => {
@@ -701,6 +774,25 @@ async function login(page: Page, path = '/') {
   await page.getByLabel('비밀번호').fill(password);
   await page.getByRole('button', { name: '로그인' }).click();
   await expect(page.getByRole('button', { name: '로그아웃' })).toBeVisible();
+}
+
+async function mockResponsiveWorkspace(page: Page) {
+  const sources = ['target', 'source'].map((alias) => ({
+    id: `org:${alias}`, kind: 'org', label: alias,
+    detail: `${alias} · Developer`,
+    username: `mobile.layout.${alias}.longaccountnameforresponsiveverification@example.test`,
+    maskedOrgId: '00D***********1234',
+  }));
+  await page.route('**/api/v1/workspace', async (route) => route.fulfill({ json: {
+    orgs: sources.map((source) => ({ ...source, alias: source.label, connected: true })),
+    projects: [], uploads: [], sources,
+  } }));
+  await page.route('**/api/v1/metadata-types**', async (route) => route.fulfill({ json: {
+    metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }],
+  } }));
+  await page.route('**/api/v1/apex-test-classes**', async (route) => route.fulfill({ json: {
+    testClasses: [],
+  } }));
 }
 
 function comparisonFixture(status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED'): ComparisonFixture {

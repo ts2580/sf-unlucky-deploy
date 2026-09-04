@@ -468,8 +468,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       </PageIntro>
 
       <div className="deploy-layout">
-        <div className="page-stack">
-          <section className="workflow-panel" aria-labelledby="deploy-source-heading">
+        <div className="page-stack deploy-workspace">
+          <section className="workflow-panel deploy-source-panel" aria-labelledby="deploy-source-heading">
             <div className="panel-heading"><span className="step-number">01</span><div><h2 id="deploy-source-heading">소스와 대상</h2></div><span className="panel-state">{workspace === null ? '조회 중' : 'DEPLOY VIEW'}</span></div>
             <div className="deploy-source-grid">
               <WorkspaceSourceSelect side="DESIRED SOURCE" value={sourceId} sources={workspace?.sources ?? []} onChange={setSourceId} tone="violet" />
@@ -478,7 +478,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
             </div>
           </section>
 
-          <section className="workflow-panel" aria-labelledby="deploy-scope-heading">
+          <section className="workflow-panel deploy-search-panel" aria-labelledby="deploy-scope-heading">
             <div className="panel-heading"><span className="step-number">02</span><div><h2 id="deploy-scope-heading">메타데이터 검색</h2></div><span className="panel-state">검색</span></div>
             <div className="compare-scope-grid metadata-scope-grid">
               <label><span className="field-label">Salesforce metadata type</span>
