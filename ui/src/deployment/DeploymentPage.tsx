@@ -53,6 +53,8 @@ interface MetadataTypeOption {
   directoryName: string;
 }
 
+type MetadataTypesStatus = 'idle' | 'loading' | 'ready' | 'error';
+
 interface ApexTestClassCandidate {
   name: string;
   matchesConfiguredSuffix: boolean;
@@ -81,7 +83,8 @@ function defaultMetadataType(metadataTypes: MetadataTypeOption[]): string {
 export function DeploymentPage({ user }: { user: ApiUser }) {
   const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null);
   const [metadataTypes, setMetadataTypes] = useState<MetadataTypeOption[]>([]);
-  const [metadataTypesLoading, setMetadataTypesLoading] = useState(false);
+  const [metadataTypesStatus, setMetadataTypesStatus] = useState<MetadataTypesStatus>('idle');
+  const [metadataTypesError, setMetadataTypesError] = useState('');
   const [scopeQuery, setScopeQuery] = useState('');
   const [sourceId, setSourceId] = useState('');
   const [targetOrgId, setTargetOrgId] = useState('');
@@ -153,9 +156,16 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   }, []);
 
   useEffect(() => {
-    if (sourceId.length === 0 || (compareCurrentType && targetOrgId.length === 0)) return;
+    if (sourceId.length === 0 || (compareCurrentType && targetOrgId.length === 0)) {
+      setMetadataTypes([]);
+      setScopeQuery('');
+      setMetadataTypesStatus('idle');
+      setMetadataTypesError('');
+      return;
+    }
     const controller = new AbortController();
-    setMetadataTypesLoading(true);
+    setMetadataTypesStatus('loading');
+    setMetadataTypesError('');
     apiRequest<{ metadataTypes: MetadataTypeOption[] }>(
       `/api/v1/metadata-types?sourceIds=${encodeURIComponent(metadataTypeSourceIds)}`, {
       signal: controller.signal,
@@ -163,12 +173,17 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       .then((data) => {
         setMetadataTypes(data.metadataTypes);
         setScopeQuery(defaultMetadataType(data.metadataTypes));
+        setMetadataTypesStatus('ready');
       })
       .catch((caught: unknown) => {
         if (caught instanceof DOMException && caught.name === 'AbortError') return;
-        setError(caught instanceof Error ? caught.message : 'Salesforce metadata type을 불러오지 못했습니다.');
-      })
-      .finally(() => { if (!controller.signal.aborted) setMetadataTypesLoading(false); });
+        setMetadataTypes([]);
+        setScopeQuery('');
+        setMetadataTypesStatus('error');
+        setMetadataTypesError(caught instanceof Error
+          ? caught.message
+          : 'Salesforce metadata type을 불러오지 못했습니다.');
+      });
     return () => controller.abort();
   }, [compareCurrentType, metadataTypeSourceIds, sourceId, targetOrgId]);
 
@@ -398,6 +413,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const selectedMetadataType = metadataTypes.find((entry) =>
     entry.name.toLowerCase() === scopeQuery.trim().toLowerCase());
   const scopeValid = selectedMetadataType !== undefined;
+  const metadataTypesInvalid = metadataTypesStatus === 'error'
+    || (metadataTypesStatus === 'ready' && !scopeValid);
   const canDeploy = ['DEPLOYER', 'ADMIN'].includes(user.role);
   const targetAlias = targetOrgId.startsWith('org:') ? targetOrgId.slice('org:'.length) : '';
   const changeTestLevel = (nextLevel: string) => {
@@ -594,13 +611,25 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
             <div className="panel-heading"><span className="step-number">02</span><div><h2 id="deploy-scope-heading">메타데이터 검색</h2></div><span className="panel-state">검색</span></div>
             <div className="compare-scope-grid metadata-scope-grid">
               <label><span className="field-label">Salesforce metadata type</span>
-                <input id="deploy-scope" list="salesforce-deploy-metadata-types" value={scopeQuery} onChange={(event) => setScopeQuery(event.target.value)} placeholder="metadata type 검색" autoComplete="off" disabled={workspace === null || metadataTypesLoading} aria-invalid={!scopeValid} />
+                <input id="deploy-scope" list="salesforce-deploy-metadata-types" value={scopeQuery} onChange={(event) => setScopeQuery(event.target.value)} placeholder="metadata type 검색" autoComplete="off" disabled={metadataTypesStatus !== 'ready'} aria-invalid={metadataTypesInvalid ? true : undefined} />
                 <datalist id="salesforce-deploy-metadata-types">
                   {metadataTypes.map((entry) => <option key={entry.name} value={entry.name}>{entry.directoryName}</option>)}
                 </datalist>
               </label>
             </div>
-            <p className={`field-hint${scopeValid ? '' : ' field-hint-error'}`}><Icon name="check" />{metadataTypesLoading ? 'Salesforce metadata type을 불러오는 중입니다.' : scopeValid ? `${metadataTypes.length}개 metadata type 검색 가능 · ${compareCurrentType ? 'source와 target의 합집합' : 'source 기준'}` : '목록에 있는 Salesforce metadata type을 선택하세요.'}</p>
+            <p className={`field-hint${metadataTypesInvalid ? ' field-hint-error' : ''}`}><Icon name="check" />{
+              metadataTypesStatus === 'idle'
+                ? 'Source와 Target을 확인한 뒤 metadata type을 조회합니다.'
+                : metadataTypesStatus === 'loading'
+                  ? 'Salesforce metadata type을 불러오는 중입니다.'
+                  : metadataTypesStatus === 'error'
+                    ? metadataTypesError
+                    : scopeValid
+                      ? `${metadataTypes.length}개 metadata type 검색 가능 · ${compareCurrentType ? 'source와 target의 합집합' : 'source 기준'}`
+                      : metadataTypes.length === 0
+                        ? '사용 가능한 Salesforce metadata type이 없습니다.'
+                        : '목록에 있는 Salesforce metadata type을 선택하세요.'
+            }</p>
             <div className="comparison-controls-row">
               <div className="option-grid">
                 <OptionToggle title="현재 타입 비교 실행" description="끄면 Source 메타데이터만 받아옵니다." checked={compareCurrentType} onChange={(checked) => {
@@ -609,7 +638,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
                 }} />
                 <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} disabled={!compareCurrentType} />
               </div>
-              <button className={`button button-secondary comparison-run-button${comparing ? ' comparison-run-loading' : ''}`} type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesLoading || !scopeValid || !sourceId || (compareCurrentType && (!targetOrgId || sourceId === targetOrgId))}><Icon name={comparing ? 'refresh' : 'compare'} />{comparing ? '메타데이터 받는 중……' : '메타데이터 받아오기'}</button>
+              <button className={`button button-secondary comparison-run-button${comparing ? ' comparison-run-loading' : ''}`} type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesStatus !== 'ready' || !scopeValid || !sourceId || (compareCurrentType && (!targetOrgId || sourceId === targetOrgId))}><Icon name={comparing ? 'refresh' : 'compare'} />{comparing ? '메타데이터 받는 중……' : '메타데이터 받아오기'}</button>
             </div>
           </section>
 
