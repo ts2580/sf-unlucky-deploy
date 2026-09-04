@@ -14,7 +14,7 @@ afterEach(async () => {
 });
 
 describe('웹 UI 서버', () => {
-  it('health API에서 로컬 서버 정보를 반환한다', async () => {
+  it('공개 health는 최소 정보만, 인증 diagnostics는 운영 정보를 반환한다', async () => {
     const server = await createWebServer({
       host: '127.0.0.1',
       port: 27_546,
@@ -29,8 +29,28 @@ describe('웹 UI 서버', () => {
     expect(response.json()).toMatchObject({
       status: 'ok',
       service: 'sfud-ui',
-      host: '127.0.0.1',
-      port: 27_546,
+    });
+    expect(response.json()).not.toHaveProperty('host');
+    expect(response.headers['x-content-type-options']).toBe('nosniff');
+    expect(response.headers['content-security-policy']).toContain("default-src 'self'");
+    expect((await server.inject('/api/v1/diagnostics')).statusCode).toBe(401);
+
+    const setup = await server.inject({
+      method: 'POST', url: '/api/v1/auth/bootstrap',
+      payload: {
+        bootstrapToken: server.sfudRuntime.auth.getBootstrapToken(),
+        email: 'diagnostics@example.com', displayName: '진단 관리자',
+        password: 'diagnostics password value',
+      },
+    });
+    const cookie = (setup.headers['set-cookie'] as string[])
+      .map((value) => value.split(';')[0]).join('; ');
+    const diagnostics = await server.inject({
+      url: '/api/v1/diagnostics', headers: { cookie },
+    });
+    expect(diagnostics.statusCode).toBe(200);
+    expect(diagnostics.json()).toMatchObject({
+      host: '127.0.0.1', port: 27_546,
       storage: { engine: 'sqlite', status: 'ok' },
       queue: { queuedCount: 0 },
     });

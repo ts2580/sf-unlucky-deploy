@@ -1,6 +1,7 @@
 import path from 'node:path';
 
 import { ensureEmptyDirectory, writeJson } from '../core/files.js';
+import { assertRunStorageCapacity } from '../storage/run-storage.js';
 import type { SourceSpec } from '../sources/source-spec.js';
 
 export interface RunContext {
@@ -23,6 +24,7 @@ export async function createRunContext(
     : path.join(cwd, '.sfud', 'runs', runId);
 
   await ensureEmptyDirectory(rootDirectory);
+  await assertRunStorageCapacity(rootDirectory);
   return {
     runId,
     rootDirectory,

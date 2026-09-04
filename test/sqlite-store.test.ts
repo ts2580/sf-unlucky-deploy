@@ -10,6 +10,7 @@ import {
   DeploymentCoordinator,
   ReconciliationRequiredError,
 } from '../src/deploy/deployment-coordinator.js';
+import { ComparisonJobRepository } from '../src/compare/comparison-job-repository.js';
 import { DeploymentJobRepository } from '../src/deploy/deployment-job-repository.js';
 import { SingleJobQueue } from '../src/deploy/single-job-queue.js';
 import { openSqliteStore, type SqliteStore } from '../src/storage/sqlite-store.js';
@@ -45,10 +46,135 @@ describe('SQLite 저장소', () => {
     expect(await store.database.get('PRAGMA journal_mode')).toEqual({ journal_mode: 'wal' });
     expect(await store.database.get('PRAGMA busy_timeout')).toEqual({ timeout: 5_000 });
     expect(await store.database.get('SELECT COUNT(*) count FROM schema_migrations'))
-      .toEqual({ count: 11 });
-    expect((await stat(path.dirname(databasePath))).mode & 0o777).toBe(0o700);
-    expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
+      .toEqual({ count: 16 });
+    if (process.platform !== 'win32') {
+      expect((await stat(path.dirname(databasePath))).mode & 0o777).toBe(0o700);
+      expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
+    }
     await expect(readFile(databasePath)).resolves.toBeInstanceOf(Buffer);
+  });
+
+  it('트랜잭션 롤백 중 독립 쿼리를 대기시키고 롤백 뒤 순서대로 실행한다', async () => {
+    const store = await openMemoryStore();
+    await store.database.exec(`
+      CREATE TABLE executor_regression (
+        id TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
+    `);
+    await store.database.run(`
+      INSERT INTO executor_regression (id, value) VALUES ('inside', 'initial'), ('outside', 'initial')
+    `);
+
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const transaction = store.database.transaction(async (database) => {
+      await database.run("UPDATE executor_regression SET value = 'rolled-back' WHERE id = 'inside'");
+      entered.resolve();
+      await release.promise;
+      throw new Error('rollback requested');
+    });
+    const rejected = expect(transaction).rejects.toThrow('rollback requested');
+
+    await entered.promise;
+    let outsideSettled = false;
+    const outsideWrite = store.database.run(
+      "UPDATE executor_regression SET value = 'committed' WHERE id = 'outside'",
+    ).then(() => {
+      outsideSettled = true;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(outsideSettled).toBe(false);
+
+    release.resolve();
+    await rejected;
+    await outsideWrite;
+    await expect(store.database.all(`
+      SELECT id, value FROM executor_regression ORDER BY id
+    `)).resolves.toEqual([
+      { id: 'inside', value: 'initial' },
+      { id: 'outside', value: 'committed' },
+    ]);
+  });
+
+  it('최근 작업 summary 조회에서 대형 상세 JSON을 읽거나 파싱하지 않는다', async () => {
+    const store = await openMemoryStore();
+    const users = new UserRepository(store.database, fixedNow, () => 'summary-user');
+    const user = await users.create({
+      email: 'summary@example.com', displayName: '요약 조회자', role: 'DEPLOYER',
+    });
+    const deploymentJobs = new DeploymentJobRepository(
+      store.database,
+      fixedNow,
+      () => 'summary-deployment',
+    );
+    const dryRun = await deploymentJobs.createDryRun({
+      source: 'local:source', targetAlias: 'target', targetOrgIdentity: orgIdentity('target'),
+      manifestPath: 'manifest/package.xml', payloadChecksum: checksum, createdBy: user.id,
+    });
+    await deploymentJobs.transition(dryRun.id, 'DRY_RUN_RUNNING');
+    await recordPreparedArtifacts(deploymentJobs, dryRun.id);
+    const deploymentStorage = await store.database.get<{
+      comparisonJson: string | null;
+      dryRunJson: string | null;
+      comparisonPath: string;
+      dryRunPath: string;
+    }>(`
+      SELECT comparison_result_json comparisonJson, dry_run_result_json dryRunJson,
+        comparison_artifact_path comparisonPath, dry_run_artifact_path dryRunPath
+      FROM deployment_jobs WHERE id = ?
+    `, dryRun.id);
+    expect(deploymentStorage).toMatchObject({ comparisonJson: null, dryRunJson: null });
+    expect(deploymentStorage?.comparisonPath).toMatch(/comparison\.json\.gz$/u);
+    expect(deploymentStorage?.dryRunPath).toMatch(/dry-run\.json\.gz$/u);
+
+    const comparisonJobs = new ComparisonJobRepository(
+      store.database,
+      fixedNow,
+      () => 'summary-comparison',
+    );
+    const comparison = await comparisonJobs.create({
+      projectPath: '/project', manifestPath: '/project/manifest/package.xml',
+      leftSource: 'org:target', rightSource: 'local:source', strict: false,
+      showIdentical: false, createdBy: user.id,
+    });
+    await comparisonJobs.markRunning(comparison.id);
+    const comparisonRunDirectory = await mkdtemp(path.join(os.tmpdir(), 'sfud-summary-comparison-'));
+    directories.push(comparisonRunDirectory);
+    await comparisonJobs.markSucceeded(comparison.id, comparisonResult, comparisonRunDirectory);
+    expect(await store.database.get(`
+      SELECT result_json resultJson, result_artifact_path resultPath
+      FROM comparison_jobs WHERE id = ?
+    `, comparison.id)).toMatchObject({
+      resultJson: null,
+      resultPath: expect.stringMatching(/comparison\.json\.gz$/u),
+    });
+
+    await store.database.run(`
+      UPDATE deployment_jobs
+      SET comparison_result_json = '{invalid', dry_run_result_json = '{invalid'
+      WHERE id = ?
+    `, dryRun.id);
+    await store.database.run(`
+      UPDATE comparison_jobs SET result_json = '{invalid' WHERE id = ?
+    `, comparison.id);
+
+    expect(await deploymentJobs.listRecentSummary()).toEqual([
+      expect.objectContaining({
+        id: dryRun.id,
+        comparisonSummary: comparisonResult.summary,
+      }),
+    ]);
+    expect((await deploymentJobs.listRecentSummary())[0]?.comparisonResult).toBeUndefined();
+    expect(await comparisonJobs.listRecentSummary()).toEqual([
+      expect.objectContaining({
+        id: comparison.id,
+        summary: comparisonResult.summary,
+      }),
+    ]);
+    expect((await comparisonJobs.listRecentSummary())[0]?.result).toBeUndefined();
+    await expect(deploymentJobs.getRequired(dryRun.id)).rejects.toThrow();
+    await expect(comparisonJobs.getRequired(comparison.id)).rejects.toThrow();
   });
 
   it('v8 승인 이력을 보존하면서 직접 배포를 허용하는 v9로 마이그레이션한다', async () => {
@@ -112,6 +238,7 @@ describe('SQLite 저장소', () => {
     const dryRun = await jobs.createDryRun({
       source: 'local:sf-project',
       targetAlias: 'stdOrg',
+      targetOrgIdentity: orgIdentity('stdOrg'),
       manifestPath: 'manifest/package.xml',
       payloadChecksum: checksum,
       runDirectory: '.sfud/runs/dry-run-1',
@@ -173,6 +300,7 @@ describe('SQLite 저장소', () => {
     const dryRun = await jobs.createDryRun({
       source: 'org:aladin',
       targetAlias: 'stdOrg',
+      targetOrgIdentity: orgIdentity('stdOrg'),
       manifestPath: 'manifest/package.xml',
       payloadChecksum: checksum,
       createdBy: viewer.id,
@@ -198,6 +326,30 @@ describe('SQLite 저장소', () => {
     })).rejects.toThrow(/승인 권한/u);
   });
 
+  it('30분이 지난 dry-run 승인을 거부한다', async () => {
+    const store = await openMemoryStore();
+    let now = '2026-08-23T00:00:00.000Z';
+    const ids = ['expiry-deployer', 'expiry-dry-run'];
+    const users = new UserRepository(store.database, () => now, () => ids.shift()!);
+    const jobs = new DeploymentJobRepository(store.database, () => now, () => ids.shift()!);
+    const deployer = await users.create({
+      email: 'expiry@example.com', displayName: '승인 만료 검증', role: 'DEPLOYER',
+    });
+    const dryRun = await jobs.createDryRun({
+      source: 'local:sf-project', targetAlias: 'stdOrg', targetOrgIdentity: orgIdentity('stdOrg'),
+      manifestPath: 'manifest/package.xml', payloadChecksum: checksum, createdBy: deployer.id,
+    });
+    await jobs.transition(dryRun.id, 'DRY_RUN_RUNNING');
+    await recordPreparedArtifacts(jobs, dryRun.id);
+    await jobs.transition(dryRun.id, 'APPROVAL_PENDING');
+    now = '2026-08-23T00:31:00.000Z';
+
+    await expect(jobs.approveAndQueueDeployment({
+      dryRunJobId: dryRun.id, approvedBy: deployer.id, payloadChecksum: checksum,
+      targetAlias: 'stdOrg', confirmation: '실제 배포',
+    })).rejects.toThrow(/유효시간 30분/u);
+  });
+
   it('성공한 dry-run 없이도 권한과 확인 문구를 검증해 직접 배포를 기록한다', async () => {
     const store = await openMemoryStore();
     const ids = ['direct-deployer', 'direct-deploy-1'];
@@ -207,22 +359,28 @@ describe('SQLite 저장소', () => {
       email: 'direct@example.com', displayName: '직접 배포자', role: 'DEPLOYER',
     });
 
-    const deploy = await jobs.createDirectDeployment({
+    const { job: deploy, created } = await jobs.createDirectDeployment({
       source: 'local:sf-project', targetAlias: 'sandbox', targetConfirmation: 'sandbox',
+      targetOrgIdentity: orgIdentity('sandbox'),
       confirmation: '실제 배포', manifestPath: 'manifest/package.xml', payloadChecksum: checksum,
-      createdBy: deployer.id, testPlan: { level: 'NoTestRun', tests: [], selection: 'configured' },
+      clientRequestId: 'direct-request-1', requestHash: checksum,
+      createdBy: deployer.id, requestedTestLevel: 'NoTestRun', requestedTests: [],
       selectedComponents: [{ type: 'CustomObject', fullName: 'Book__c' }],
     });
 
     expect(deploy).toMatchObject({
       id: 'direct-deploy-1', kind: 'DEPLOY', status: 'QUEUED', targetAlias: 'sandbox',
-      testPlan: { level: 'NoTestRun', tests: [] },
+      selectedComponents: [{ type: 'CustomObject', fullName: 'Book__c' }],
     });
+    expect(created).toBe(true);
+    expect(deploy.testPlan).toBeUndefined();
     expect(deploy.dryRunJobId).toBeUndefined();
     await expect(jobs.createDirectDeployment({
       source: 'local:sf-project', targetAlias: 'sandbox', targetConfirmation: 'production',
+      targetOrgIdentity: orgIdentity('sandbox'),
       confirmation: '실제 배포', manifestPath: 'manifest/package.xml', payloadChecksum: checksum,
-      createdBy: deployer.id, testPlan: { level: 'NoTestRun', tests: [], selection: 'configured' },
+      clientRequestId: 'direct-request-2', requestHash: checksum,
+      createdBy: deployer.id, requestedTestLevel: 'NoTestRun', requestedTests: [],
     })).rejects.toThrow(/대상 org 별칭/u);
   });
 
@@ -232,6 +390,7 @@ describe('SQLite 저장소', () => {
     const job = await jobs.createDryRun({
       source: 'local:sf-project',
       targetAlias: 'stdOrg',
+      targetOrgIdentity: orgIdentity('stdOrg'),
       manifestPath: 'manifest/package.xml',
       payloadChecksum: checksum,
     });
@@ -249,6 +408,7 @@ describe('SQLite 저장소', () => {
     const jobs = new DeploymentJobRepository(store.database, fixedNow, () => 'dry-run-queued');
     const job = await jobs.createDryRun({
       source: 'local:sf-project', targetAlias: 'stdOrg',
+      targetOrgIdentity: orgIdentity('stdOrg'),
       manifestPath: 'manifest/package.xml', payloadChecksum: checksum,
     });
 
@@ -265,6 +425,7 @@ describe('SQLite 저장소', () => {
     const job = await jobs.createDryRun({
       source: 'local:sf-project',
       targetAlias: 'stdOrg',
+      targetOrgIdentity: orgIdentity('stdOrg'),
       manifestPath: 'manifest/package.xml',
       payloadChecksum: checksum,
     });
@@ -286,15 +447,32 @@ async function openMemoryStore(): Promise<SqliteStore> {
   return store;
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
 function fixedNow(): string {
   return '2026-08-23T00:00:00.000Z';
 }
 
+function orgIdentity(alias: string) {
+  return { alias, username: `${alias}@example.com`, orgId: `00D${alias.padEnd(12, '0')}` };
+}
+
 async function recordPreparedArtifacts(jobs: DeploymentJobRepository, id: string): Promise<void> {
+  const runDirectory = await mkdtemp(path.join(os.tmpdir(), `sfud-artifacts-${id}-`));
+  directories.push(runDirectory);
   await jobs.recordDryRunArtifacts({
     id,
     payloadChecksum: checksum,
-    runDirectory: `.sfud/runs/${id}`,
+    runDirectory,
     comparisonResult,
     testPlan: { level: 'RunLocalTests', tests: [], selection: 'fallback' },
     dryRunResult: { status: 0, result: { id: '0Af-dry-run' } },

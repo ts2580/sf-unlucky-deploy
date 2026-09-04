@@ -46,23 +46,20 @@ jobs:
           npx playwright install --with-deps chromium
           npm run verify
 
-      - name: 릴리즈 패키지와 체크섬 생성
+      - name: 릴리즈 패키지와 공급망 산출물 생성
         run: |
           mkdir -p release
-          npm pack --pack-destination release
+          npx --yes npm@11.7.0 pack --pack-destination release
+          npx --yes npm@11.7.0 sbom \
+            --omit=dev \
+            --package-lock-only \
+            --sbom-format cyclonedx \
+            --sbom-type application > release/sbom.cdx.json
           cd release
-          sha256sum ./*.tgz > SHA256SUMS
+          sha256sum ./*.tgz ./sbom.cdx.json > SHA256SUMS
 
       - name: 설치 스모크 검증
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          smoke_directory="$(mktemp -d)"
-          npm install --global \
-            --prefix "${smoke_directory}" \
-            --allow-scripts=sqlite3 \
-            ./release/*.tgz
-          test "$("${smoke_directory}/bin/sfud" --version)" = "${RELEASE_TAG#v}"
+        run: node scripts/package-smoke.mjs ./release/*.tgz
 
       - name: GitHub Release 발행
         env:
@@ -71,6 +68,7 @@ jobs:
         run: |
           gh release create "${RELEASE_TAG}" \
             ./release/*.tgz \
+            ./release/sbom.cdx.json \
             ./release/SHA256SUMS \
             --verify-tag \
             --title "sf-unlucky-deploy ${RELEASE_TAG}" \

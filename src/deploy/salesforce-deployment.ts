@@ -1,6 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { SfudError } from '../core/errors.js';
+import { boundedCommandTimeoutMs, createDeadline, remainingDeadlineMs } from '../core/deadline.js';
 import {
   isAmbiguousSalesforceFailure,
   sanitizeSfOutput,
@@ -66,7 +67,50 @@ export interface AsyncSalesforceDeploymentOptions {
   pollIntervalMs?: number;
   now?: () => Date;
   sleep?: (milliseconds: number) => Promise<void>;
+  beforeSubmit?: () => Promise<void> | void;
+  onSubmitted?: (deploymentId: string) => Promise<void> | void;
   onProgress?: (progress: SalesforceDeploymentProgress) => Promise<void> | void;
+  onPersistenceError?: (stage: 'submission' | 'progress', error: unknown) => Promise<void> | void;
+  signal?: AbortSignal;
+}
+
+export interface SalesforceDeploymentReportOptions {
+  sfClient: SfClient;
+  deploymentId: string;
+  targetAlias: string;
+  cwd: string;
+  phase: SalesforceDeploymentPhase;
+  timeoutMs?: number;
+  now?: () => Date;
+  signal?: AbortSignal;
+}
+
+export interface SalesforceDeploymentReport {
+  report: unknown;
+  progress: SalesforceDeploymentProgress;
+}
+
+export async function reportSalesforceDeployment(
+  options: SalesforceDeploymentReportOptions,
+): Promise<SalesforceDeploymentReport> {
+  const report = sanitizeSfOutput(await options.sfClient.runJson([
+    'project', 'deploy', 'report',
+    '--job-id', options.deploymentId,
+    '--target-org', options.targetAlias,
+  ], {
+    cwd: options.cwd,
+    timeoutMs: options.timeoutMs ?? 5 * 60 * 1_000,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  }));
+  return {
+    report,
+    progress: toProgress(
+      report,
+      options.phase,
+      options.deploymentId,
+      options.now ?? (() => new Date()),
+    ),
+  };
 }
 
 export async function runAsyncSalesforceDeployment(
@@ -77,31 +121,50 @@ export async function runAsyncSalesforceDeployment(
   const pollIntervalMs = options.pollIntervalMs ?? 1_000;
   const now = options.now ?? (() => new Date());
   const sleep = options.sleep ?? (async (milliseconds) => { await delay(milliseconds); });
-  const startedAt = now().getTime();
+  const deadline = createDeadline(timeoutMs, () => now().getTime());
   let deploymentId: string | undefined;
 
   try {
+    await options.beforeSubmit?.();
     const submitted = sanitizeSfOutput(await options.sfClient.runJson(
       [...withoutWait(options.startArgs), '--async'],
-      { cwd: options.cwd, timeoutMs: Math.min(timeoutMs, 5 * 60 * 1_000) },
+      {
+        cwd: options.cwd,
+        timeoutMs: boundedCommandTimeoutMs(deadline, 5 * 60 * 1_000),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      },
     ));
     deploymentId = extractDeploymentId(submitted);
     if (deploymentId === undefined) {
       throw new SfudError('SF_RESPONSE_INVALID', 'Salesforce 비동기 배포 ID를 확인할 수 없습니다.');
     }
-    await options.onProgress?.(toProgress(submitted, options.phase, deploymentId, now));
+    await notifyWithoutInterruptingPolling(options.onSubmitted, [deploymentId], 'submission', options.onPersistenceError);
+    await notifyWithoutInterruptingPolling(
+      options.onProgress,
+      [toProgress(submitted, options.phase, deploymentId, now)],
+      'progress',
+      options.onPersistenceError,
+    );
 
+    let nextPollIntervalMs = pollIntervalMs;
     while (true) {
+      if (remainingDeadlineMs(deadline) === 0) {
+        throw new SfudError(
+          'SF_COMMAND_TIMEOUT',
+          `Salesforce 배포 ${deploymentId} 상태 확인이 ${waitMinutes}분을 초과했습니다.`,
+        );
+      }
       const report = sanitizeSfOutput(await options.sfClient.runJson([
         'project', 'deploy', 'report',
         '--job-id', deploymentId,
         '--target-org', options.targetAlias,
       ], {
         cwd: options.cwd,
-        timeoutMs: Math.min(timeoutMs, 5 * 60 * 1_000),
+        timeoutMs: boundedCommandTimeoutMs(deadline, 5 * 60 * 1_000),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       }));
       const progress = toProgress(report, options.phase, deploymentId, now);
-      await options.onProgress?.(progress);
+      await notifyWithoutInterruptingPolling(options.onProgress, [progress], 'progress', options.onPersistenceError);
       if (progress.done) {
         if (progress.success === false || !['Succeeded', 'SucceededPartial'].includes(progress.status)) {
           const summary = firstDiagnosticSummary(progress.diagnostics);
@@ -112,16 +175,14 @@ export async function runAsyncSalesforceDeployment(
         }
         return report;
       }
-      if (now().getTime() - startedAt >= timeoutMs) {
-        throw new SfudError(
-          'SF_COMMAND_TIMEOUT',
-          `Salesforce 배포 ${deploymentId} 상태 확인이 ${waitMinutes}분을 초과했습니다.`,
-        );
-      }
-      await sleep(pollIntervalMs);
+      await sleep(Math.min(nextPollIntervalMs, remainingDeadlineMs(deadline)));
+      nextPollIntervalMs = Math.min(Math.ceil(nextPollIntervalMs * 1.5), 5_000);
     }
   } catch (error) {
-    if (isAmbiguousSalesforceFailure(error)) {
+    const abortedAfterSubmission = error instanceof SfudError
+      && error.code === 'SF_COMMAND_ABORTED'
+      && deploymentId !== undefined;
+    if (abortedAfterSubmission || isAmbiguousSalesforceFailure(error)) {
       const message = error instanceof Error ? error.message : String(error);
       throw new SfudError(
         'SF_EXTERNAL_STATE_UNKNOWN',
@@ -130,6 +191,24 @@ export async function runAsyncSalesforceDeployment(
       );
     }
     throw error;
+  }
+}
+
+async function notifyWithoutInterruptingPolling<T extends readonly unknown[]>(
+  callback: ((...args: T) => Promise<void> | void) | undefined,
+  args: T,
+  stage: 'submission' | 'progress',
+  onError: AsyncSalesforceDeploymentOptions['onPersistenceError'],
+): Promise<void> {
+  if (callback === undefined) return;
+  try {
+    await callback(...args);
+  } catch (error) {
+    try {
+      await onError?.(stage, error);
+    } catch {
+      // 상태 관찰자 실패는 이미 제출된 Salesforce 작업의 polling을 중단할 수 없다.
+    }
   }
 }
 

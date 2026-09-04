@@ -284,6 +284,7 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(sourceOnlyResult.getByText('TARGET ONLY', { exact: true })).toHaveCount(0);
   await compareCurrentType.check();
   await expect(showIdentical).toBeEnabled();
+  await showIdentical.check();
   await expect(comparisonOptions.getByText('3개 metadata type 검색 가능 · source와 target의 합집합')).toBeVisible();
   await comparisonOptions.getByRole('button', { name: '메타데이터 받아오기' }).click();
   await expect(comparisonOptions.getByRole('button', { name: '메타데이터 받는 중……' })).toBeVisible({ timeout: 300 });
@@ -294,6 +295,11 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(page.getByRole('heading', { name: 'right → left' })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByLabel('비교 현황')).toContainText('완료');
   await expect(page.getByText('Hello', { exact: true })).toBeVisible();
+  const semanticEqualComponent = page.locator('details.component-result').filter({ hasText: 'Admin' });
+  await expect(semanticEqualComponent.locator('.component-status')).toHaveText('IDENTICAL');
+  await semanticEqualComponent.locator('summary').click();
+  await expect(semanticEqualComponent).toContainText('원문 SHA-256은 다릅니다. XML 의미 비교는 동일');
+  await expect(semanticEqualComponent).toContainText('metadata type 등록 정책');
   await expect(page.locator('.component-status', { hasText: 'MODIFIED' })).toBeVisible();
   const modifiedComponent = page.locator('details.component-result').filter({ hasText: 'Hello' });
   await modifiedComponent.locator('summary').click();
@@ -378,10 +384,16 @@ test('선택 변경 후 이전 비교 polling 결과를 폐기한다', async ({ 
 
 test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시한다', async ({ page }) => {
   await page.route('**/api/v1/workspace', async (route) => route.fulfill({ json: {
-    orgs: [{ id: 'org:target', alias: 'target', label: 'Target', connected: true }],
+    orgs: [{
+      id: 'org:target', alias: 'target', label: 'Target', connected: true,
+      username: 'target@example.com', maskedOrgId: '00D00…001',
+    }],
     projects: [{ id: 'project-1', displayName: 'fixture-project', manifests: ['manifest/package.xml'] }],
     sources: [
-      { id: 'org:target', kind: 'org', label: 'target', detail: 'Target · Developer' },
+      {
+        id: 'org:target', kind: 'org', label: 'target', detail: 'Target · Developer',
+        username: 'target@example.com', maskedOrgId: '00D00…001',
+      },
       { id: 'project:project-1', kind: 'local', label: 'fixture-project', detail: 'Local DX project' },
     ],
   } }));
@@ -394,7 +406,11 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await page.route('**/api/v1/apex-test-classes**', async (route) => {
     expect(new URL(route.request().url()).searchParams.get('sourceId')).toBe('project:project-1');
     await route.fulfill({ json: {
-      testClasses: ['Hello_Test', 'Order_Test'],
+      testClasses: [
+        { name: 'Hello_Test', matchesConfiguredSuffix: true },
+        { name: 'Order_Test', matchesConfiguredSuffix: true },
+        { name: 'Helper', matchesConfiguredSuffix: false },
+      ],
     } });
   });
   let comparisonPolls = 0;
@@ -437,10 +453,12 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
     await route.fulfill({ status: 202, json: { job: deploymentFixture('QUEUED') } });
   });
   await page.route('**/api/v1/deployments/direct', async (route) => {
+    expect(route.request().headers()['idempotency-key']).toMatch(/^[0-9a-f-]{36}$/u);
     expect(route.request().postDataJSON()).toMatchObject({
       scope: 'selected',
       components: [{ type: 'ApexClass', fullName: 'NewClass' }],
-      sourceId: 'project:project-1', targetOrgId: 'org:target', tests: ['Hello_Test'],
+      sourceId: 'project:project-1', targetOrgId: 'org:target',
+      testLevel: 'RunSpecifiedTests', tests: ['Hello_Test'],
       targetConfirmation: 'target', confirmation: '실제 배포',
     });
     await new Promise((resolve) => setTimeout(resolve, 750));
@@ -450,18 +468,25 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   let deploymentPolls = 0;
   let directDeploymentPolls = 0;
   await page.route('**/api/v1/deployment-jobs**', async (route) => {
-    if (new URL(route.request().url()).pathname === '/api/v1/deployment-jobs') {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname === '/api/v1/deployment-jobs') {
       await route.fulfill({ json: { jobs: [] } });
       return;
     }
-    if (new URL(route.request().url()).pathname.endsWith('/direct-deploy-1')) {
+    if (pathname.endsWith('/direct-deploy-1/reconcile')) {
+      expect(route.request().method()).toBe('POST');
+      expect(route.request().headers()['x-sfud-csrf']).toMatch(/^[A-Za-z0-9_-]{32,}$/u);
+      await route.fulfill({ json: { job: directDeploymentFixture('SUCCEEDED') } });
+      return;
+    }
+    if (pathname.endsWith('/direct-deploy-1')) {
       directDeploymentPolls += 1;
       await route.fulfill({ json: { job: directDeploymentFixture(
-        directDeploymentPolls > 1 ? 'SUCCEEDED' : 'DEPLOYING',
+        directDeploymentPolls > 1 ? 'RECONCILE_REQUIRED' : 'DEPLOYING',
       ) } });
       return;
     }
-    if (new URL(route.request().url()).pathname.endsWith('/deploy-1')) {
+    if (pathname.endsWith('/deploy-1')) {
       deploymentPolls += 1;
       await route.fulfill({ json: { job: deploymentFixture(deploymentPolls > 1 ? 'SUCCEEDED' : 'DEPLOYING') } });
       return;
@@ -477,6 +502,8 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await login(page, '/deploy');
   await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue('project:project-1');
   await expect(page.getByLabel('TARGET ORG 비교 소스')).toHaveValue('org:target');
+  await expect(page.getByRole('complementary', { name: '배포 대상' }))
+    .toContainText('target · target@example.com · 00D00…001');
   const directTestInput = page.getByLabel('테스트 클래스 직접 입력');
   await directTestInput.fill('Hello_Test, ord');
   const directTestSuggestions = page.getByRole('listbox', { name: 'source 테스트 클래스 검색 결과' });
@@ -531,10 +558,16 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByRole('region', { name: 'Target 바로 배포' }).getByRole('textbox')).toHaveCount(0);
   const apexTests = page.getByRole('region', { name: 'Apex 테스트 클래스 선택' });
   await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toBeVisible();
+  await expect(apexTests.getByRole('checkbox', { name: 'Helper' })).toBeVisible();
+  await expect(apexTests.locator('.apex-test-options label')).toHaveText([
+    /Hello_Test.*접미사 일치/u,
+    /Order_Test.*접미사 일치/u,
+    /Helper/u,
+  ]);
   await page.getByLabel('테스트 클래스 검색').fill('order');
   await expect(apexTests.getByRole('checkbox', { name: 'Order_Test' })).toBeVisible();
   await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toHaveCount(0);
-  await expect(apexTests.getByText('1 / 2개 표시')).toBeVisible();
+  await expect(apexTests.getByText('1 / 3개 표시')).toBeVisible();
   await page.getByLabel('테스트 클래스 검색').fill('');
   await page.getByLabel('테스트 수준').selectOption('RunSpecifiedTests');
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeDisabled();
@@ -548,6 +581,8 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByText('Salesforce 실제 배포 중')).toBeVisible();
   await expect(page.getByLabel('실제 배포 현황')).toContainText(/InProgress · 소요시간 \d+초/u);
   await expect(page.getByLabel('실제 배포 현황')).toContainText('컴포넌트 1/2');
+  await expect(page.getByText('Salesforce 상태 재확인이 필요합니다.')).toBeVisible({ timeout: 5_000 });
+  await page.getByRole('button', { name: 'Salesforce 상태 다시 확인' }).click();
   await expect(page.getByRole('heading', { name: 'Salesforce 실제 배포 성공' })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByText(/Hello_Test · 코드 커버리지 80.00%/u)).toBeVisible();
   await page.getByRole('combobox', { name: 'Salesforce metadata type' }).fill('CustomObject');
@@ -638,7 +673,7 @@ function comparisonFixture(status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED'): Comparis
     right: { id: 'org:right', kind: 'org', label: 'right' },
     ...(status !== 'SUCCEEDED' ? {} : {
       result: {
-        summary: { added: 0, removed: 0, modified: 1, identical: 0, total: 1, different: 1 },
+        summary: { added: 0, removed: 0, modified: 1, identical: 1, total: 2, different: 1 },
         warnings: [],
         components: [{
           key: 'ApexClass:Hello', type: 'ApexClass', fullName: 'Hello', status: 'MODIFIED',
@@ -652,6 +687,13 @@ function comparisonFixture(status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED'): Comparis
               xmlChanges: [{ kind: 'MODIFIED', path: 'ApexClass.status', before: 'Inactive', after: 'Active' }],
             },
           ],
+        }, {
+          key: 'Profile:Admin', type: 'Profile', fullName: 'Admin', status: 'IDENTICAL',
+          files: [{
+            path: 'profiles/Admin.profile', status: 'IDENTICAL', kind: 'xml', xmlChanges: [],
+            leftSha256: 'left-profile', rightSha256: 'right-profile', rawContentChanged: true,
+            xmlSemanticStatus: 'EQUAL', xmlComparisonPolicy: 'REGISTERED',
+          }],
         }],
       },
     }),
@@ -705,13 +747,18 @@ interface ComparisonFixture {
     summary: { added: number; removed: number; modified: number; identical: number; total: number; different: number };
     warnings: string[];
     components: Array<{
-      key: string; type: string; fullName: string; status: 'MODIFIED';
+      key: string; type: string; fullName: string; status: 'MODIFIED' | 'IDENTICAL';
       files: Array<{
         path: string;
         status: string;
         kind?: 'xml' | 'text' | 'binary';
         unifiedDiff?: string;
         xmlChanges?: Array<{ kind: 'MODIFIED'; path: string; before: string; after: string }>;
+        leftSha256?: string;
+        rightSha256?: string;
+        rawContentChanged?: boolean;
+        xmlSemanticStatus?: 'EQUAL' | 'DIFFERENT';
+        xmlComparisonPolicy?: 'REGISTERED' | 'GENERIC';
       }>;
     }>;
   };
@@ -723,6 +770,7 @@ function dryRunFixture(status: 'QUEUED' | 'DRY_RUN_RUNNING' | 'APPROVAL_PENDING'
     source: { id: 'project:project-1', kind: 'local', label: 'fixture-project' },
     target: { id: 'org:target', kind: 'org', label: 'target' },
     manifest: 'manifest/package.xml', prepared: status === 'APPROVAL_PENDING',
+    remoteStatus: status === 'APPROVAL_PENDING' ? 'SUCCEEDED' : 'NOT_SUBMITTED',
     createdAt: '2026-08-23T06:00:00.000Z',
     ...(status === 'DRY_RUN_RUNNING' ? {
       startedAt: new Date(Date.now() - 2_000).toISOString(),
@@ -780,6 +828,7 @@ function deploymentFixture(status: 'QUEUED' | 'DEPLOYING' | 'SUCCEEDED') {
     source: { id: 'project:project-1', kind: 'local', label: 'fixture-project' },
     target: { id: 'org:target', kind: 'org', label: 'target' },
     manifest: 'selected.xml', scope: 'selected', prepared: false,
+    remoteStatus: status === 'SUCCEEDED' ? 'SUCCEEDED' : status === 'DEPLOYING' ? 'RUNNING' : 'NOT_SUBMITTED',
     createdAt: '2026-08-23T06:01:00.000Z',
     ...(status === 'DEPLOYING' ? {
       startedAt: new Date(Date.now() - 2_000).toISOString(),
@@ -797,11 +846,17 @@ function deploymentFixture(status: 'QUEUED' | 'DEPLOYING' | 'SUCCEEDED') {
   };
 }
 
-function directDeploymentFixture(status: 'QUEUED' | 'DEPLOYING' | 'SUCCEEDED') {
+function directDeploymentFixture(status: 'QUEUED' | 'DEPLOYING' | 'SUCCEEDED' | 'RECONCILE_REQUIRED') {
   return {
-    ...deploymentFixture(status),
+    ...deploymentFixture(status === 'RECONCILE_REQUIRED' ? 'DEPLOYING' : status),
     id: 'direct-deploy-1',
+    status,
     testPlan: { level: 'RunSpecifiedTests', tests: ['Hello_Test'], selection: 'explicit' },
     ...(status === 'SUCCEEDED' ? { testCoverage: 80 } : {}),
+    ...(status === 'RECONCILE_REQUIRED' ? {
+      salesforceDeploymentId: '0Af-direct-deploy',
+      remoteStatus: 'UNKNOWN',
+      errorMessage: 'Salesforce CLI 연결이 종료되어 원격 상태를 확인하지 못했습니다.',
+    } : {}),
   };
 }

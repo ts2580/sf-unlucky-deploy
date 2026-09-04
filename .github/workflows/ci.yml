@@ -37,7 +37,8 @@ jobs:
 
           echo "동일 저장소의 canary 브랜치에서 시작한 main 승격 Pull Request입니다."
 
-  test:
+  linux-node24-full:
+    name: linux-node24-full
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -62,3 +63,58 @@ jobs:
 
       - name: HTML 리포트 E2E 테스트
         run: npm run test:e2e
+
+      - name: 릴리스 tarball 설치 스모크
+        run: npm run package:smoke
+
+  linux-node20:
+    name: linux-node20-unit-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 소스 체크아웃
+        uses: actions/checkout@v7
+
+      - name: Node.js 설정
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20.19
+          cache: npm
+
+      - name: 의존성 설치
+        run: npm ci
+
+      - name: 최소 지원 버전 단위 검증과 빌드
+        run: npm run check
+
+  windows-smoke:
+    name: windows-node${{ matrix.node }}-smoke
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20.19, 24]
+
+    steps:
+      - name: 소스 체크아웃
+        uses: actions/checkout@v7
+
+      - name: Node.js 설정
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: 의존성 설치
+        run: npm ci
+
+      - name: process path upload sqlite 스모크
+        run: npm run test:platform
+
+      - name: CLI UI 빌드
+        run: npm run build
+
+      - name: 릴리스 tarball 설치 스모크
+        run: npm run package:smoke

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFile } from 'node:fs/promises';
 
 import { compareXml } from '../src/metadata/xml-diff.js';
 
@@ -59,4 +60,34 @@ describe('XML metadata diff', () => {
       after: ' A + B ',
     });
   });
+
+  it.each([
+    ['Profile', 'profile-left.xml', 'profile-right.xml'],
+    ['PermissionSet', 'permission-set-left.xml', 'permission-set-right.xml'],
+  ])('%s의 key 기반 배열 순서는 semantic 차이로 보지 않는다', async (metadataType, leftName, rightName) => {
+    const [left, right] = await Promise.all([
+      fixture(leftName),
+      fixture(rightName),
+    ]);
+
+    expect(compareXml(left, right, { metadataType })).toEqual([]);
+  });
+
+  it('Layout의 배치 배열 순서 변경은 semantic 차이로 표시한다', async () => {
+    const [left, right] = await Promise.all([
+      fixture('layout-left.xml'),
+      fixture('layout-right.xml'),
+    ]);
+
+    expect(compareXml(left, right, { metadataType: 'Layout' })).toContainEqual({
+      kind: 'REORDERED',
+      path: 'Layout.layoutSections[label=주문 정보].layoutColumns.layoutItems.$order',
+      before: 'field=Name, field=Status__c',
+      after: 'field=Status__c, field=Name',
+    });
+  });
 });
+
+async function fixture(name: string): Promise<string> {
+  return await readFile(new URL(`./fixtures/xml/${name}`, import.meta.url), 'utf8');
+}

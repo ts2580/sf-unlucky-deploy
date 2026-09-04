@@ -23,11 +23,11 @@ describe('단일 배포 작업 큐', () => {
 
     await Promise.resolve();
     expect(events).toEqual(['job-1:start']);
-    expect(queue.status()).toEqual({ activeJobId: 'job-1', queuedCount: 1 });
+    expect(queue.status()).toEqual({ activeJobId: 'job-1', queuedCount: 1, accepting: true });
     releaseFirst();
     await Promise.all([first, second]);
     expect(events).toEqual(['job-1:start', 'job-1:end', 'job-2:start', 'job-2:end']);
-    expect(queue.status()).toEqual({ queuedCount: 0 });
+    expect(queue.status()).toEqual({ queuedCount: 0, accepting: true });
   });
 
   it('앞 작업이 실패해도 다음 작업을 실행하고 중복 ID를 거부한다', async () => {
@@ -47,5 +47,27 @@ describe('단일 배포 작업 큐', () => {
     await expect(first).rejects.toThrow('expected failure');
     await expect(second).resolves.toBe('completed');
     await queue.onIdle();
+  });
+
+  it('종료 시 새 작업을 거부하고 active 작업에 abort를 전달한다', async () => {
+    const queue = new SingleJobQueue();
+    const aborted = new Promise<void>((resolve) => {
+      void queue.enqueue('job-1', async (signal) => {
+        await new Promise<void>((_settle, reject) => {
+          signal.addEventListener('abort', () => {
+            resolve();
+            reject(new Error('aborted'));
+          }, { once: true });
+        });
+      }).catch(() => undefined);
+    });
+    await Promise.resolve();
+    queue.stopAccepting();
+    await expect(queue.enqueue('job-2', async () => undefined)).rejects.toThrow(/종료 중/u);
+    expect(await queue.waitForIdle(1)).toBe(false);
+    queue.abort();
+    await aborted;
+    expect(await queue.waitForIdle(100)).toBe(true);
+    expect(queue.status()).toEqual({ queuedCount: 0, accepting: false });
   });
 });

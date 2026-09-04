@@ -1,4 +1,4 @@
-import { access, mkdtemp, rm } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { SfClient, SfRunOptions } from '../src/salesforce/sf-client.js';
 import { createWebServer } from '../src/web/server/app.js';
+import { findManifests, scavengeStaleUploadRoots } from '../src/web/server/workspace-service.js';
 
 describe('프로젝트 업로드 API', () => {
   it('실행 디렉터리를 자동 노출하지 않고 브라우저 DX 폴더만 사용자 임시 소스로 등록한다', async () => {
@@ -27,7 +28,7 @@ describe('프로젝트 업로드 API', () => {
         ['teacher-project/force-app/main/default/classes/Hello.cls', 'public class Hello {}\n'],
         ['teacher-project/force-app/main/default/classes/Hello.cls-meta.xml', '<ApexClass/>\n'],
       ]);
-      expect(response.statusCode).toBe(201);
+      expect(response.statusCode, response.body).toBe(201);
       const source = response.json<{ source: { id: string; location: string; label: string } }>().source;
       expect(source).toMatchObject({ location: 'upload', label: 'teacher-project' });
       expect(response.body).not.toContain('/tmp/');
@@ -112,8 +113,91 @@ describe('프로젝트 업로드 API', () => {
       expect((await fixture.server.inject({
         url: '/api/v1/workspace', headers: { cookie: auth.cookie },
       })).json()).toMatchObject({ uploads: [] });
+
+      for (const unsafePath of [
+        'project/Node_Modules/dependency.js',
+        'project/CON.txt',
+        'project/classes/Name.cls:secret',
+        'project/classes/trailing. ',
+      ]) {
+        const unsafe = await upload(fixture.server, auth, [
+          ['project/sfdx-project.json', '{"packageDirectories":[{"path":"force-app"}]}'],
+          [unsafePath, 'unsafe'],
+        ]);
+        expect(unsafe.statusCode).toBe(400);
+        expect(unsafe.json()).toMatchObject({ error: { code: 'INVALID_PROJECT_UPLOAD' } });
+      }
     } finally {
       await fixture.close();
+    }
+  });
+
+  it('사용자별 및 서버 전체 업로드 quota를 초과하면 부분 업로드를 제거한다', async () => {
+    for (const limits of [
+      { userUploadQuotaBytes: 350, serverUploadQuotaBytes: 1_000, message: '사용자별' },
+      { userUploadQuotaBytes: 1_000, serverUploadQuotaBytes: 350, message: '서버 전체' },
+    ]) {
+      const fixture = await createFixture(limits);
+      try {
+        const auth = await bootstrap(fixture.server);
+        const files: Array<[string, string]> = [
+          ['project/sfdx-project.json', '{"packageDirectories":[{"path":"force-app"}]}'],
+          ['project/force-app/payload.txt', 'x'.repeat(240)],
+        ];
+        const accepted = await upload(fixture.server, auth, files);
+        expect(accepted.statusCode, accepted.body).toBe(201);
+        const rejected = await upload(fixture.server, auth, files);
+        expect(rejected.statusCode).toBe(413);
+        expect(rejected.json()).toMatchObject({ error: {
+          code: 'PROJECT_UPLOAD_QUOTA_EXCEEDED',
+          message: expect.stringContaining(limits.message),
+        } });
+        expect((await fixture.server.inject({
+          url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+        })).json<{ uploads: unknown[] }>().uploads).toHaveLength(1);
+      } finally {
+        await fixture.close();
+      }
+    }
+  });
+
+  it('소유권·권한·mtime을 확인해 stale upload root만 정리한다', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'sfud-upload-scavenger-'));
+    try {
+      const stale = path.join(temporaryDirectory, 'sfud-uploads-999999-fixture');
+      const active = path.join(temporaryDirectory, `sfud-uploads-${process.pid}-fixture`);
+      const unsafeMode = path.join(temporaryDirectory, 'sfud-uploads-999998-fixture');
+      await Promise.all([mkdir(stale), mkdir(active), mkdir(unsafeMode)]);
+      await Promise.all([chmod(stale, 0o700), chmod(active, 0o700), chmod(unsafeMode, 0o755)]);
+      const old = new Date(0);
+      await Promise.all([
+        utimes(stale, old, old),
+        utimes(active, old, old),
+        utimes(unsafeMode, old, old),
+      ]);
+
+      expect(await scavengeStaleUploadRoots(temporaryDirectory, 5 * 60 * 60 * 1_000))
+        .toBe(process.platform === 'win32' ? 2 : 1);
+      await expect(access(stale)).rejects.toThrow();
+      await expect(access(active)).resolves.toBeUndefined();
+      if (process.platform === 'win32') {
+        await expect(access(unsafeMode)).rejects.toThrow();
+      } else {
+        await expect(access(unsafeMode)).resolves.toBeUndefined();
+      }
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it('manifest 디렉터리의 ENOENT만 빈 목록으로 처리한다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-manifest-errors-'));
+    try {
+      await expect(findManifests(root)).resolves.toEqual([]);
+      await writeFile(path.join(root, 'manifest'), 'not a directory');
+      await expect(findManifests(root)).rejects.toMatchObject({ code: 'ENOTDIR' });
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });
@@ -130,20 +214,28 @@ class UploadSfClient implements SfClient {
     }
     if (args[0] === 'org' && args[1] === 'list') {
       return { status: 0, result: { nonScratchOrgs: [
-        { alias: 'target', name: 'Target', orgEdition: 'Developer', connectedStatus: 'Connected' },
+        {
+          alias: 'target', username: 'target@example.com', orgId: '00D000000000001',
+          instanceUrl: 'https://target.example.my.salesforce.com', name: 'Target',
+          orgEdition: 'Developer', connectedStatus: 'Connected',
+        },
       ] } };
     }
     throw new Error(`예상하지 못한 sf 명령: ${args.join(' ')}`);
   }
 }
 
-async function createFixture() {
+async function createFixture(limits: {
+  userUploadQuotaBytes?: number;
+  serverUploadQuotaBytes?: number;
+} = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-project-upload-api-'));
   const client = new UploadSfClient();
   const server = await createWebServer({
     host: '127.0.0.1', port: 27_546, assetsDirectory: '/missing',
     databasePath: path.join(root, 'data', 'sfud.db'), projectPaths: [],
     bootstrapToken: 'upload-bootstrap-token', sfClient: client,
+    ...limits,
   });
   return {
     client,

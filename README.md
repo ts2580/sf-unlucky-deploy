@@ -27,7 +27,7 @@ Salesforce org와 로컬 Salesforce DX 프로젝트의 메타데이터를 같은
 
 ## 요구 사항
 
-- Node.js 20 이상
+- Node.js 20.19 이상
 - npm
 - Salesforce CLI v2 (`sf`)
 - Git
@@ -48,6 +48,10 @@ npm ci
 npx playwright install chromium
 npm run verify
 ```
+
+의존성 설치 기준은 배포 tarball에도 포함되는 `npm-shrinkwrap.json`이다. 패키징과 릴리스
+설치 검증은 `packageManager`에 고정한 npm 11.7.0으로 수행해 서로 다른 로컬 npm 버전이
+배포 dependency tree를 바꾸지 않게 한다.
 
 도움말은 TypeScript 소스에서 바로 실행할 수 있다.
 
@@ -328,6 +332,11 @@ diff 결과만으로 destructive deployment를 자동 생성하거나 실행하�
 
 웹 UI는 사용자·권한·배포 승인·작업 상태와 감사 로그를 SQLite에 저장한다. 기본 위치는 현재 프로젝트의 `.sfud/sfud.db`다. 비교 리포트와 원본 실행 결과는 기존 `.sfud/runs` 파일 구조를 유지하며 데이터베이스에는 인덱스와 무결성 정보만 기록한다.
 
+프런트엔드는 `deployment`, `comparison`, `auth`, `admin` 기능 단위로 나뉜다. 배포 요청과 응답은
+TypeBox schema를 서버와 UI가 공유하며 Fastify와 브라우저 API client가 같은 계약을 runtime에
+검증한다. 공통 client는 CSRF header, 401 알림, 오류 응답, timeout·abort와 직접 배포
+idempotency key를 한곳에서 처리한다.
+
 ```bash
 npm run build
 node dist/cli.js ui --no-open
@@ -365,12 +374,20 @@ node dist/cli.js ui \
 
 브라우저의 **내 프로젝트 업로드**는 접속한 단말기에서 선택한 Salesforce DX 폴더를 서버의
 사용자별 임시 디렉터리로 전송한다. 업로드 프로젝트는 마지막 비교 또는 dry-run 사용 후
-4시간이 지나거나 서버 프로세스가 종료되면 제거된다. 업로드는 파일 2,000개, 파일당 10MB,
-전체 100MB로 제한하며 `.git`, `.sf`, `.sfdx`, `node_modules`, `.env`와 일반적인 비밀키 파일은
-받지 않는다. 서버 프로젝트는 경로 참조이고 업로드 프로젝트는 임시 복사본이므로 서로 다른
-소스 유형이다.
+4시간이 지나거나 서버 프로세스가 종료되면 제거된다. 서버 시작 시에도 소유자, `0700` 권한,
+mtime과 이전 프로세스 생존 여부를 확인해 stale upload만 정리한다. 업로드는 파일 2,000개,
+파일당 10MB, 요청당 100MB, 사용자당 500MB, 서버 전체 2GB로 제한한다. 사용자·서버 quota는
+`SFUD_USER_UPLOAD_QUOTA_BYTES`, `SFUD_SERVER_UPLOAD_QUOTA_BYTES`로 조정할 수 있다.
+`.git`, `.sf`, `.sfdx`, `node_modules`, `.env`와 일반적인 비밀키 파일은 대소문자와 무관하게 받지
+않으며 Windows 예약명, ADS 구분자, 끝의 점·공백도 거부한다. 서버 프로젝트는 경로 참조이고
+업로드 프로젝트는 임시 복사본이므로 서로 다른 소스 유형이다.
 
-`SFUD_DATA_DIR` 환경변수로도 저장 위치를 지정할 수 있다. 데이터 디렉터리는 `0700`, DB 파일은 `0600` 권한으로 제한하며 다음 설정을 적용한다.
+`SFUD_DATA_DIR` 환경변수로도 저장 위치를 지정할 수 있다. 데이터 디렉터리와 run 디렉터리는
+`0700`, DB와 artifact 파일은 `0600` 권한으로 제한한다. 비교 상세와 Salesforce 원문 결과는
+gzip artifact로 분리하며 최근 작업 목록은 별도 summary column만 조회한다. 기본 run 보존 기간은
+7일, 전체 상한은 5GB, 새 snapshot 시작에 필요한 최소 여유 공간은 512MB다. 각각
+`SFUD_RUN_RETENTION_HOURS`, `SFUD_RUN_MAX_BYTES`, `SFUD_RUN_MIN_FREE_BYTES`로 조정할 수 있다.
+SQLite에는 다음 설정을 적용한다.
 
 ```text
 foreign_keys = ON
@@ -385,7 +402,7 @@ SFUD_BOOTSTRAP_TOKEN="충분히-긴-일회용-설정-코드" \
 node dist/cli.js ui --no-open
 ```
 
-최초 관리자가 생성되면 해당 코드는 더 이상 사용할 수 없다. 비밀번호는 `scrypt`로 해시하고 세션·CSRF 토큰은 SHA-256 해시만 SQLite에 저장한다. 세션 쿠키는 `HttpOnly`, `SameSite=Strict`이며 HTTPS reverse proxy에서는 `Secure` 속성도 적용된다. Nginx 등 reverse proxy는 원래 `Host`와 `X-Forwarded-Proto` 헤더를 전달해야 한다.
+최초 관리자가 생성되면 해당 코드는 더 이상 사용할 수 없다. 비밀번호는 `scrypt`로 해시하고 세션·CSRF 토큰은 SHA-256 해시만 SQLite에 저장한다. 세션 쿠키는 `HttpOnly`, `SameSite=Strict`이며 HTTPS reverse proxy에서는 `Secure` 속성도 적용된다. 로그인과 최초 관리자 설정은 실패 횟수를 기준으로 제한한다.
 
 `ADMIN` 계정에는 **사용자 관리** 메뉴가 표시된다. 이 화면에서 초기 비밀번호와 함께 사용자를
 생성하고 `VIEWER`, `OPERATOR`, `DEPLOYER`, `ADMIN` 역할을 지정하거나 계정을 비활성화·재활성화할
@@ -396,7 +413,23 @@ node dist/cli.js ui --no-open
 ```nginx
 proxy_set_header Host $host;
 proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 ```
+
+reverse proxy 헤더는 proxy 주소를 명시적으로 신뢰한 경우에만 사용한다. 외부 HTTPS origin도 함께
+고정해야 scheme과 host를 모두 검증할 수 있다.
+
+```bash
+node dist/cli.js ui \
+  --host 127.0.0.1 \
+  --trusted-proxy 127.0.0.1 \
+  --public-origin https://deploy.example.com \
+  --no-open
+```
+
+여러 proxy는 `--trusted-proxy`를 반복하거나 `SFUD_TRUSTED_PROXIES`에 쉼표로 구분해 지정한다.
+`--public-origin`은 `SFUD_PUBLIC_ORIGIN`으로도 지정할 수 있다. 공개 `/api/v1/health`는 서비스 상태와
+버전만 반환하고, 저장소·queue·bind 정보는 로그인한 사용자의 `/api/v1/diagnostics`에서만 제공한다.
 
 인증된 사용자만 배포 작업 이력 API에 접근할 수 있고, 로그아웃을 포함한 상태 변경 요청은 동일 출처와 CSRF 토큰을 모두 검증한다. OIDC는 셀프 호스팅 로컬 계정과 병행할 수 있는 후속 인증 공급자로 추가한다.
 
@@ -423,15 +456,25 @@ desired source는 `--project`로 등록한 서버 프로젝트, 브라우저에�
 payload와 SHA-256을 고정한다. 성공한 Dry-run 뒤 실제 배포하면 서버가 동일 payload SHA-256을
 다시 확인한다.
 
-Dry-run 없이 바로 실제 배포할 수도 있다. 테스트 클래스를 선택했다면 서버가
-`RunSpecifiedTests` check-only를 먼저 실행하고 응답에 보고된 각 Apex 클래스·트리거의 라인
-커버리지가 모두 75% 이상일 때만 실제 배포한다. 테스트를 선택하지 않았다면 `NoTestRun`으로
-check-only 없이 배포한다. 프로덕션
-org처럼 `NoTestRun`을 허용하지 않는 대상은 Salesforce가 거부하며 실패 상태로 기록된다.
+Dry-run 없이 바로 실제 배포할 수도 있다. 이 경우에도 화면에서 선택한 테스트 수준을 check-only와
+실제 배포에 동일하게 적용한다. `auto`는 명시 테스트, staging의 접미사 테스트, `RunLocalTests`
+fallback 순서로 결정한다. 테스트 클래스를 명시했다면 `RunSpecifiedTests` check-only 응답에 보고된
+각 Apex 클래스·트리거의 라인 커버리지가 모두 75% 이상일 때만 실제 배포한다. `NoTestRun`을
+명시적으로 선택한 경우에만 check-only를 생략한다. 프로덕션 org처럼 `NoTestRun`을 허용하지 않는
+대상은 Salesforce가 거부하며 실패 상태로 기록된다.
 `DEPLOYER` 또는 `ADMIN` 사용자가 대상 org 별칭과 `실제 배포` 확인 문구를 정확히 입력해야 실제
 배포 버튼이 활성화된다.
-서버는 `sf org list --json` 결과에서 별칭, 표시 이름, edition, 연결 상태만 추출하며
-토큰·client ID·키 경로·로컬 절대 경로를 API에 반환하지 않는다.
+
+직접 배포 API는 8~200자의 `Idempotency-Key` 헤더를 요구한다. 같은 사용자가 같은 key와 같은
+요청을 재전송하면 기존 job을 반환하고, 같은 key를 다른 요청에 재사용하면
+`409 IDEMPOTENCY_CONFLICT`로 거부한다. 웹 UI는 한 배포 결과가 확정될 때까지 같은 UUID를
+재사용한다. HTTP 연결 중단은 이미 Salesforce에 제출된 작업의 취소를 뜻하지 않는다.
+
+dry-run과 직접 배포 job은 Salesforce CLI가 확인한 source·target의 username, org ID, instance URL
+지문을 함께 저장한다. Salesforce 제출 직전에 alias를 다시 조회해 identity가 달라졌으면 제출을
+차단하며, 성공한 dry-run의 승인 유효시간은 30분이다. UI에는 target alias, username, 마스킹한 org
+ID를 함께 표시한다. 서버는 토큰·client ID·키 경로·로컬 절대 경로와 전체 org ID를 API에 반환하지
+않는다.
 
 기본 비교 범위는 **전체 배포 가능 메타데이터 (SF CLI)**다. 서버가 LEFT와 RIGHT 각각의
 manifest를 동적으로 생성하고 합집합을 사용하므로 로컬 프로젝트의 `package.xml`에 의존하지
@@ -466,11 +509,28 @@ deploy:  QUEUED → DEPLOYING → SUCCEEDED | FAILED | RECONCILE_REQUIRED
 |---|---|
 | `npm run dev -- <args>` | TypeScript 소스에서 CLI 실행 |
 | `npm run typecheck` | CLI와 E2E TypeScript 검사 |
+| `npm run lint` | JavaScript 설정·스크립트 ESLint 검사 |
+| `npm run dead-code` | Knip 미사용 파일·export 검사 |
+| `npm run quality` | lint와 미사용 코드 검사 |
 | `npm test` | Vitest 단위·fixture 테스트 |
 | `npm run test:e2e` | Playwright HTML 리포트 테스트 |
+| `npm run test:platform` | process·path·upload·SQLite 플랫폼 스모크 |
 | `npm run build` | `dist/` 빌드 |
-| `npm run check` | 타입 검사, Vitest, 빌드 |
-| `npm run verify` | 타입 검사, Vitest, Playwright, 빌드 전체 검증 |
+| `npm run check` | 타입, 품질, Vitest, 빌드 검사 |
+| `npm run package:smoke` | tarball 생성·설치, dependency tree와 CLI 실행 검증 |
+| `npm run verify` | `check`와 Playwright 전체 검증 |
+
+## CI와 릴리스 산출물
+
+Pull Request와 공유 브랜치는 Linux Node.js 24의 전체 단위·브라우저·패키지 검증, Linux
+Node.js 20.19의 최소 지원 버전 검증, Windows Node.js 20.19·24의 플랫폼 및 설치 스모크를
+통과해야 한다. TypeScript의 미사용 선언 검사와 Knip의 미사용 export·파일 검사도 `check`에
+포함된다.
+
+태그 릴리스는 npm 11.7.0으로 `npm-shrinkwrap.json`이 포함된 tarball을 만든 뒤, 그 tarball을
+새 prefix에 설치해 전체 dependency tree와 `sfud --version`을 검증한다. GitHub Release에는
+tarball, SHA-256 체크섬과 CycloneDX JSON SBOM을 각각 첨부한다. SBOM은 공급망 구성의 가시성을
+위한 별도 산출물이며, 설치 재현성은 `npm-shrinkwrap.json`과 tarball 설치 검증으로 확보한다.
 
 ## 브랜치 승격 규칙
 

@@ -1,16 +1,27 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Database } from 'sqlite';
-
 import { SfudError } from '../core/errors.js';
+import type { DatabaseExecutor, DatabaseHandle } from '../storage/database-executor.js';
+import {
+  readCompressedJsonArtifact,
+  writeCompressedJsonArtifact,
+} from '../storage/json-artifact.js';
 import { runInImmediateTransaction } from '../storage/transaction.js';
-import type { ComparisonResult } from '../metadata/comparator.js';
-import type { ApexTestPlan } from './test-plan.js';
+import type { ComparisonResult, ComparisonSummary } from '../metadata/comparator.js';
+import type { ApexTestPlan, RequestedTestLevel } from './test-plan.js';
 import type { SelectedMetadataComponent } from './selected-manifest.js';
 import type { SalesforceDeploymentProgress } from './salesforce-deployment.js';
+import type { OrgIdentitySnapshot } from './org-identity.js';
 
 export type DeploymentJobKind = 'DRY_RUN' | 'DEPLOY';
 export type DeploymentScope = 'MANIFEST' | 'ALL';
+export type RemoteDeploymentStatus =
+  | 'NOT_SUBMITTED'
+  | 'SUBMITTED'
+  | 'RUNNING'
+  | 'SUCCEEDED'
+  | 'FAILED'
+  | 'UNKNOWN';
 export type DeploymentJobStatus =
   | 'QUEUED'
   | 'DRY_RUN_RUNNING'
@@ -41,12 +52,20 @@ export interface DeploymentJob {
   startedAt?: string;
   completedAt?: string;
   prepared: boolean;
+  comparisonArtifactPath?: string;
+  dryRunArtifactPath?: string;
+  deploymentArtifactPath?: string;
+  comparisonSummary?: ComparisonSummary;
   comparisonResult?: ComparisonResult;
   testPlan?: ApexTestPlan;
   dryRunResult?: unknown;
   selectedComponents?: SelectedMetadataComponent[];
   deploymentResult?: unknown;
   progress?: SalesforceDeploymentProgress;
+  remoteStatus: RemoteDeploymentStatus;
+  persistenceWarning?: string;
+  sourceOrgIdentity?: OrgIdentitySnapshot;
+  targetOrgIdentity?: OrgIdentitySnapshot;
 }
 
 export interface CreateDryRunJobInput {
@@ -59,19 +78,31 @@ export interface CreateDryRunJobInput {
   runDirectory?: string;
   createdBy?: string;
   selectedComponents?: SelectedMetadataComponent[];
+  sourceOrgIdentity?: OrgIdentitySnapshot;
+  targetOrgIdentity: OrgIdentitySnapshot;
 }
 
 export interface CreateDirectDeploymentJobInput extends CreateDryRunJobInput {
   createdBy: string;
-  testPlan: ApexTestPlan;
+  clientRequestId: string;
+  requestHash: string;
+  requestedTestLevel: RequestedTestLevel;
+  requestedTests: string[];
   targetConfirmation: string;
   confirmation: string;
+}
+
+export interface CreateDirectDeploymentJobResult {
+  job: DeploymentJob;
+  created: boolean;
 }
 
 export interface TransitionDetails {
   salesforceDeploymentId?: string;
   errorCode?: string;
   errorMessage?: string;
+  remoteStatus?: RemoteDeploymentStatus;
+  persistenceWarning?: string;
 }
 
 export interface ApproveDeploymentInput {
@@ -103,13 +134,28 @@ interface DeploymentJobRow {
   started_at: string | null;
   completed_at: string | null;
   is_prepared: number;
-  comparison_result_json: string | null;
-  test_plan_json: string | null;
-  dry_run_result_json: string | null;
-  selected_components_json: string | null;
-  deployment_result_json: string | null;
-  progress_json: string | null;
+  comparison_result_json?: string | null;
+  comparison_artifact_path?: string | null;
+  test_plan_json?: string | null;
+  dry_run_result_json?: string | null;
+  dry_run_artifact_path?: string | null;
+  selected_components_json?: string | null;
+  deployment_result_json?: string | null;
+  deployment_artifact_path?: string | null;
+  progress_json?: string | null;
+  remote_status: RemoteDeploymentStatus;
+  persistence_warning: string | null;
+  source_org_identity_json?: string | null;
+  target_org_identity_json?: string | null;
+  summary_added: number | null;
+  summary_removed: number | null;
+  summary_modified: number | null;
+  summary_identical: number | null;
+  summary_total: number | null;
+  summary_different: number | null;
 }
+
+const DRY_RUN_APPROVAL_TTL_MS = 30 * 60 * 1_000;
 
 const ALLOWED_TRANSITIONS: Record<DeploymentJobStatus, ReadonlySet<DeploymentJobStatus>> = {
   QUEUED: new Set(['DRY_RUN_RUNNING', 'DEPLOYING', 'FAILED']),
@@ -118,12 +164,12 @@ const ALLOWED_TRANSITIONS: Record<DeploymentJobStatus, ReadonlySet<DeploymentJob
   DEPLOYING: new Set(['SUCCEEDED', 'FAILED', 'RECONCILE_REQUIRED']),
   SUCCEEDED: new Set(),
   FAILED: new Set(),
-  RECONCILE_REQUIRED: new Set(['SUCCEEDED', 'FAILED']),
+  RECONCILE_REQUIRED: new Set(['APPROVAL_PENDING', 'SUCCEEDED', 'FAILED']),
 };
 
 export class DeploymentJobRepository {
   public constructor(
-    private readonly database: Database,
+    private readonly database: DatabaseExecutor,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly createId: () => string = randomUUID,
     private readonly onChanged?: (job: DeploymentJob) => void,
@@ -133,12 +179,13 @@ export class DeploymentJobRepository {
     assertChecksum(input.payloadChecksum);
     const id = this.createId();
     const timestamp = this.now();
-    await runInImmediateTransaction(this.database, async () => {
-      await this.database.run(`
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      await transaction.run(`
         INSERT INTO deployment_jobs (
           id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
-          run_directory, selected_components_json, created_by, created_at, updated_at
-        ) VALUES (?, 'DRY_RUN', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          run_directory, selected_components_json, source_org_identity_json, target_org_identity_json,
+          created_by, created_at, updated_at
+        ) VALUES (?, 'DRY_RUN', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         id,
         input.source,
@@ -149,11 +196,13 @@ export class DeploymentJobRepository {
         input.payloadChecksum,
         input.runDirectory ?? null,
         input.selectedComponents === undefined ? null : JSON.stringify(input.selectedComponents),
+        input.sourceOrgIdentity === undefined ? null : JSON.stringify(input.sourceOrgIdentity),
+        JSON.stringify(input.targetOrgIdentity),
         input.createdBy ?? null,
         timestamp,
         timestamp,
       );
-      await this.writeAudit(input.createdBy, 'DRY_RUN_QUEUED', id, {
+      await this.writeAudit(transaction, input.createdBy, 'DRY_RUN_QUEUED', id, {
         targetAlias: input.targetAlias,
         payloadChecksum: input.payloadChecksum,
       }, timestamp);
@@ -161,7 +210,9 @@ export class DeploymentJobRepository {
     return this.notify(await this.getRequired(id));
   }
 
-  public async createDirectDeployment(input: CreateDirectDeploymentJobInput): Promise<DeploymentJob> {
+  public async createDirectDeployment(
+    input: CreateDirectDeploymentJobInput,
+  ): Promise<CreateDirectDeploymentJobResult> {
     if (input.confirmation !== '실제 배포') {
       throw new SfudError('APPROVAL_DENIED', '실제 배포 확인 문구가 일치하지 않습니다.');
     }
@@ -169,10 +220,26 @@ export class DeploymentJobRepository {
       throw new SfudError('APPROVAL_DENIED', '확인한 대상 org 별칭이 실제 배포 대상과 일치하지 않습니다.');
     }
     assertChecksum(input.payloadChecksum);
+    assertChecksum(input.requestHash);
+    assertClientRequestId(input.clientRequestId);
     const id = this.createId();
     const timestamp = this.now();
-    await runInImmediateTransaction(this.database, async () => {
-      const deployer = await this.database.get<{ role: string; disabled_at: string | null }>(
+    const result = await runInImmediateTransaction(this.database, async (transaction) => {
+      const existing = await transaction.get<DeploymentJobRow & { request_hash: string | null }>(`
+        SELECT * FROM deployment_jobs
+        WHERE kind = 'DEPLOY' AND dry_run_job_id IS NULL
+          AND created_by = ? AND client_request_id = ?
+      `, input.createdBy, input.clientRequestId);
+      if (existing !== undefined) {
+        if (existing.request_hash !== input.requestHash) {
+          throw new SfudError(
+            'IDEMPOTENCY_CONFLICT',
+            '같은 Idempotency-Key가 다른 실제 배포 요청에 사용되었습니다.',
+          );
+        }
+        return { job: mapDeploymentJob(existing), created: false };
+      }
+      const deployer = await transaction.get<{ role: string; disabled_at: string | null }>(
         'SELECT role, disabled_at FROM users WHERE id = ?',
         input.createdBy,
       );
@@ -183,11 +250,12 @@ export class DeploymentJobRepository {
       ) {
         throw new SfudError('APPROVAL_DENIED', '실제 배포 권한이 없습니다.');
       }
-      await this.database.run(`
+      await transaction.run(`
         INSERT INTO deployment_jobs (
           id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
-          run_directory, selected_components_json, test_plan_json, created_by, created_at, updated_at
-        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          run_directory, selected_components_json, created_by, client_request_id, request_hash,
+          source_org_identity_json, target_org_identity_json, created_at, updated_at
+        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         id,
         input.source,
@@ -198,19 +266,24 @@ export class DeploymentJobRepository {
         input.payloadChecksum,
         input.runDirectory ?? null,
         input.selectedComponents === undefined ? null : JSON.stringify(input.selectedComponents),
-        JSON.stringify(input.testPlan),
         input.createdBy,
+        input.clientRequestId,
+        input.requestHash,
+        input.sourceOrgIdentity === undefined ? null : JSON.stringify(input.sourceOrgIdentity),
+        JSON.stringify(input.targetOrgIdentity),
         timestamp,
         timestamp,
       );
-      await this.writeAudit(input.createdBy, 'DIRECT_DEPLOYMENT_QUEUED', id, {
+      await this.writeAudit(transaction, input.createdBy, 'DIRECT_DEPLOYMENT_QUEUED', id, {
         targetAlias: input.targetAlias,
         payloadChecksum: input.payloadChecksum,
-        testLevel: input.testPlan.level,
-        tests: input.testPlan.tests,
+        testLevel: input.requestedTestLevel,
+        tests: input.requestedTests,
+        clientRequestId: input.clientRequestId,
       }, timestamp);
+      return { job: await getRequired(transaction, id), created: true };
     });
-    return this.notify(await this.getRequired(id));
+    return result.created ? { job: this.notify(result.job), created: true } : result;
   }
 
   public async get(id: string): Promise<DeploymentJob | undefined> {
@@ -218,7 +291,7 @@ export class DeploymentJobRepository {
       'SELECT * FROM deployment_jobs WHERE id = ?',
       id,
     );
-    return row === undefined ? undefined : mapDeploymentJob(row);
+    return row === undefined ? undefined : await hydrateArtifacts(mapDeploymentJob(row));
   }
 
   public async getRequired(id: string): Promise<DeploymentJob> {
@@ -234,8 +307,8 @@ export class DeploymentJobRepository {
     nextStatus: DeploymentJobStatus,
     details: TransitionDetails = {},
   ): Promise<DeploymentJob> {
-    await runInImmediateTransaction(this.database, async () => {
-      const current = await this.getRequired(id);
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const current = await getRequired(transaction, id);
       assertTransition(current, nextStatus);
       const timestamp = this.now();
       const startedAt = nextStatus === 'DRY_RUN_RUNNING' || nextStatus === 'DEPLOYING'
@@ -244,11 +317,13 @@ export class DeploymentJobRepository {
       const completedAt = nextStatus === 'APPROVAL_PENDING' || nextStatus === 'SUCCEEDED' || nextStatus === 'FAILED'
         ? timestamp
         : null;
-      const result = await this.database.run(`
+      const result = await transaction.run(`
         UPDATE deployment_jobs
         SET status = ?, updated_at = ?, started_at = ?, completed_at = ?,
             salesforce_deployment_id = COALESCE(?, salesforce_deployment_id),
-            error_code = ?, error_message = ?
+            error_code = ?, error_message = ?,
+            remote_status = COALESCE(?, remote_status),
+            persistence_warning = COALESCE(?, persistence_warning)
         WHERE id = ? AND status = ?
       `,
         nextStatus,
@@ -258,19 +333,23 @@ export class DeploymentJobRepository {
         details.salesforceDeploymentId ?? null,
         details.errorCode ?? null,
         details.errorMessage ?? null,
+        details.remoteStatus ?? null,
+        details.persistenceWarning ?? null,
         id,
         current.status,
       );
       if (result.changes !== 1) {
         throw new SfudError('INVALID_JOB_STATE', `배포 작업 상태가 동시에 변경되었습니다: ${id}`);
       }
-      await this.writeAudit(current.createdBy, 'DEPLOYMENT_STATUS_CHANGED', id, {
+      await this.writeAudit(transaction, current.createdBy, 'DEPLOYMENT_STATUS_CHANGED', id, {
         from: current.status,
         to: nextStatus,
         ...(details.salesforceDeploymentId === undefined
           ? {}
           : { salesforceDeploymentId: details.salesforceDeploymentId }),
         ...(details.errorCode === undefined ? {} : { errorCode: details.errorCode }),
+        ...(details.remoteStatus === undefined ? {} : { remoteStatus: details.remoteStatus }),
+        ...(details.persistenceWarning === undefined ? {} : { persistenceWarning: details.persistenceWarning }),
       }, timestamp);
     });
     return this.notify(await this.getRequired(id));
@@ -286,25 +365,38 @@ export class DeploymentJobRepository {
   }): Promise<void> {
     assertChecksum(input.payloadChecksum);
     const timestamp = this.now();
-    await runInImmediateTransaction(this.database, async () => {
-      const result = await this.database.run(`
+    const [comparisonArtifactPath, dryRunArtifactPath] = await Promise.all([
+      writeCompressedJsonArtifact(input.runDirectory, 'comparison.json.gz', input.comparisonResult),
+      writeCompressedJsonArtifact(input.runDirectory, 'dry-run.json.gz', input.dryRunResult),
+    ]);
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const result = await transaction.run(`
         UPDATE deployment_jobs
         SET payload_checksum = ?, run_directory = ?, is_prepared = 1,
-            comparison_result_json = ?, test_plan_json = ?, dry_run_result_json = ?, updated_at = ?
+            comparison_result_json = NULL, comparison_artifact_path = ?,
+            test_plan_json = ?, dry_run_result_json = NULL, dry_run_artifact_path = ?,
+            summary_added = ?, summary_removed = ?, summary_modified = ?,
+            summary_identical = ?, summary_total = ?, summary_different = ?, updated_at = ?
         WHERE id = ? AND kind = 'DRY_RUN' AND status = 'DRY_RUN_RUNNING' AND is_prepared = 0
       `,
       input.payloadChecksum,
       input.runDirectory,
-      JSON.stringify(input.comparisonResult),
+      comparisonArtifactPath,
       JSON.stringify(input.testPlan),
-      JSON.stringify(input.dryRunResult),
+      dryRunArtifactPath,
+      input.comparisonResult.summary.added,
+      input.comparisonResult.summary.removed,
+      input.comparisonResult.summary.modified,
+      input.comparisonResult.summary.identical,
+      input.comparisonResult.summary.total,
+      input.comparisonResult.summary.different,
       timestamp,
       input.id);
       if (result.changes !== 1) {
         throw new SfudError('INVALID_JOB_STATE', 'dry-run 결과를 기록할 수 없는 작업 상태입니다.');
       }
-      const job = await this.getRequired(input.id);
-      await this.writeAudit(job.createdBy, 'DRY_RUN_ARTIFACTS_RECORDED', input.id, {
+      const job = await getRequired(transaction, input.id);
+      await this.writeAudit(transaction, job.createdBy, 'DRY_RUN_ARTIFACTS_RECORDED', input.id, {
         payloadChecksum: input.payloadChecksum,
         testLevel: input.testPlan.level,
         different: input.comparisonResult.summary.different,
@@ -318,11 +410,12 @@ export class DeploymentJobRepository {
       throw new SfudError('APPROVAL_DENIED', '실제 배포 확인 문구가 일치하지 않습니다.');
     }
     assertChecksum(input.payloadChecksum);
+    const dryRunArtifacts = await this.getRequired(input.dryRunJobId);
 
     let deployJobId = '';
     try {
-      await runInImmediateTransaction(this.database, async () => {
-        const dryRun = await this.getRequired(input.dryRunJobId);
+      await runInImmediateTransaction(this.database, async (transaction) => {
+        const dryRun = await getRequired(transaction, input.dryRunJobId);
         if (dryRun.kind !== 'DRY_RUN' || dryRun.status !== 'APPROVAL_PENDING') {
           throw new SfudError('APPROVAL_DENIED', '승인 가능한 성공한 dry-run 작업이 아닙니다.');
         }
@@ -335,15 +428,22 @@ export class DeploymentJobRepository {
         if (!dryRun.prepared) {
           throw new SfudError('APPROVAL_DENIED', 'payload 준비가 완료되지 않은 dry-run 작업입니다.');
         }
+        if (dryRun.targetOrgIdentity === undefined) {
+          throw new SfudError('APPROVAL_DENIED', 'dry-run 대상 org identity가 없습니다. dry-run을 다시 실행하세요.');
+        }
+        const completedAt = dryRun.completedAt === undefined ? Number.NaN : Date.parse(dryRun.completedAt);
+        if (!Number.isFinite(completedAt) || Date.parse(this.now()) - completedAt > DRY_RUN_APPROVAL_TTL_MS) {
+          throw new SfudError('APPROVAL_DENIED', 'dry-run 승인 유효시간 30분이 지났습니다. dry-run을 다시 실행하세요.');
+        }
         if (
-          dryRun.comparisonResult === undefined
-          || dryRun.testPlan === undefined
-          || dryRun.dryRunResult === undefined
+          dryRunArtifacts.comparisonResult === undefined
+          || dryRunArtifacts.testPlan === undefined
+          || dryRunArtifacts.dryRunResult === undefined
         ) {
           throw new SfudError('APPROVAL_DENIED', 'dry-run 배포 아티팩트가 완전하지 않습니다.');
         }
 
-        const approver = await this.database.get<{ role: string; disabled_at: string | null }>(
+        const approver = await transaction.get<{ role: string; disabled_at: string | null }>(
           'SELECT role, disabled_at FROM users WHERE id = ?',
           input.approvedBy,
         );
@@ -354,7 +454,7 @@ export class DeploymentJobRepository {
         ) {
           throw new SfudError('APPROVAL_DENIED', '실제 배포 승인 권한이 없습니다.');
         }
-        const existingApproval = await this.database.get<{ existing: number }>(
+        const existingApproval = await transaction.get<{ existing: number }>(
           'SELECT 1 existing FROM deployment_approvals WHERE dry_run_job_id = ?',
           dryRun.id,
         );
@@ -364,13 +464,21 @@ export class DeploymentJobRepository {
 
         const timestamp = this.now();
         deployJobId = this.createId();
-        await this.database.run(`
+        await transaction.run(`
         INSERT INTO deployment_jobs (
           id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
           run_directory, selected_components_json, dry_run_job_id, is_prepared,
-          comparison_result_json, test_plan_json, dry_run_result_json,
-          created_by, created_at, updated_at
-        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+          comparison_result_json, comparison_artifact_path, test_plan_json,
+          dry_run_result_json, dry_run_artifact_path,
+          summary_added, summary_removed, summary_modified, summary_identical, summary_total, summary_different,
+          source_org_identity_json, target_org_identity_json, created_by, created_at, updated_at
+        ) VALUES (
+          ?, 'DEPLOY', 'QUEUED',
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,
+          ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?
+        )
       `,
         deployJobId,
         dryRun.source,
@@ -382,14 +490,28 @@ export class DeploymentJobRepository {
         dryRun.runDirectory ?? null,
         dryRun.selectedComponents === undefined ? null : JSON.stringify(dryRun.selectedComponents),
         dryRun.id,
-        JSON.stringify(dryRun.comparisonResult),
-        JSON.stringify(dryRun.testPlan),
-        JSON.stringify(dryRun.dryRunResult),
+        dryRunArtifacts.comparisonArtifactPath === undefined
+          ? JSON.stringify(dryRunArtifacts.comparisonResult)
+          : null,
+        dryRunArtifacts.comparisonArtifactPath ?? null,
+        JSON.stringify(dryRunArtifacts.testPlan),
+        dryRunArtifacts.dryRunArtifactPath === undefined
+          ? JSON.stringify(dryRunArtifacts.dryRunResult)
+          : null,
+        dryRunArtifacts.dryRunArtifactPath ?? null,
+        dryRun.comparisonSummary?.added ?? null,
+        dryRun.comparisonSummary?.removed ?? null,
+        dryRun.comparisonSummary?.modified ?? null,
+        dryRun.comparisonSummary?.identical ?? null,
+        dryRun.comparisonSummary?.total ?? null,
+        dryRun.comparisonSummary?.different ?? null,
+        dryRun.sourceOrgIdentity === undefined ? null : JSON.stringify(dryRun.sourceOrgIdentity),
+        JSON.stringify(dryRun.targetOrgIdentity),
         input.approvedBy,
         timestamp,
         timestamp,
       );
-        await this.database.run(`
+        await transaction.run(`
         INSERT INTO deployment_approvals (
           id, dry_run_job_id, deploy_job_id, approved_by,
           payload_checksum, target_alias, approved_at
@@ -403,7 +525,7 @@ export class DeploymentJobRepository {
         dryRun.targetAlias,
         timestamp,
       );
-        await this.writeAudit(input.approvedBy, 'DEPLOYMENT_APPROVED', deployJobId, {
+        await this.writeAudit(transaction, input.approvedBy, 'DEPLOYMENT_APPROVED', deployJobId, {
           dryRunJobId: dryRun.id,
           targetAlias: dryRun.targetAlias,
           payloadChecksum: dryRun.payloadChecksum,
@@ -420,11 +542,23 @@ export class DeploymentJobRepository {
 
   public async recordDeploymentResult(id: string, deploymentResult: unknown): Promise<void> {
     const timestamp = this.now();
+    const current = await this.getRequired(id);
+    const deploymentArtifactPath = current.runDirectory === undefined
+      ? undefined
+      : await writeCompressedJsonArtifact(
+        current.runDirectory,
+        'deployment.json.gz',
+        deploymentResult,
+      );
     const result = await this.database.run(`
       UPDATE deployment_jobs
-      SET deployment_result_json = ?, updated_at = ?
+      SET deployment_result_json = ?, deployment_artifact_path = ?, updated_at = ?
       WHERE id = ? AND kind = 'DEPLOY' AND status = 'DEPLOYING'
-    `, JSON.stringify(deploymentResult), timestamp, id);
+    `,
+    deploymentArtifactPath === undefined ? JSON.stringify(deploymentResult) : null,
+    deploymentArtifactPath ?? null,
+    timestamp,
+    id);
     if (result.changes !== 1) {
       throw new SfudError('INVALID_JOB_STATE', '실제 배포 결과를 기록할 수 없는 작업 상태입니다.');
     }
@@ -438,13 +572,71 @@ export class DeploymentJobRepository {
     const timestamp = this.now();
     const result = await this.database.run(`
       UPDATE deployment_jobs
-      SET progress_json = ?, salesforce_deployment_id = ?, updated_at = ?
+      SET progress_json = ?, salesforce_deployment_id = ?, remote_status = ?, updated_at = ?
       WHERE id = ? AND status IN ('DRY_RUN_RUNNING', 'DEPLOYING')
-    `, JSON.stringify(progress), progress.deploymentId, timestamp, id);
+    `, JSON.stringify(progress), progress.deploymentId, remoteStatusFromProgress(progress), timestamp, id);
     if (result.changes !== 1) {
       throw new SfudError('INVALID_JOB_STATE', 'Salesforce 배포 진행 상태를 기록할 수 없는 작업 상태입니다.');
     }
     this.notify(await this.getRequired(id));
+  }
+
+  public async recordSalesforceSubmission(id: string, deploymentId: string): Promise<void> {
+    const result = await this.database.run(`
+      UPDATE deployment_jobs
+      SET salesforce_deployment_id = ?, remote_status = 'SUBMITTED', updated_at = ?
+      WHERE id = ? AND status IN ('DRY_RUN_RUNNING', 'DEPLOYING')
+    `, deploymentId, this.now(), id);
+    if (result.changes !== 1) {
+      throw new SfudError('INVALID_JOB_STATE', 'Salesforce 배포 ID를 기록할 수 없는 작업 상태입니다.');
+    }
+  }
+
+  public async recordOrgIdentityMismatch(
+    id: string,
+    detail: Record<string, unknown>,
+  ): Promise<void> {
+    const timestamp = this.now();
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const job = await getRequired(transaction, id);
+      await this.writeAudit(transaction, job.createdBy, 'ORG_IDENTITY_MISMATCH', id, detail, timestamp);
+    });
+  }
+
+  public async recordReconciliationReport(input: {
+    id: string;
+    actorUserId: string;
+    report: unknown;
+    progress: SalesforceDeploymentProgress;
+    persistenceWarning?: string;
+  }): Promise<DeploymentJob> {
+    const timestamp = this.now();
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const current = await getRequired(transaction, input.id);
+      if (current.status !== 'RECONCILE_REQUIRED') {
+        throw new SfudError('INVALID_JOB_STATE', '재확인 가능한 배포 작업이 아닙니다.');
+      }
+      await transaction.run(`
+        UPDATE deployment_jobs
+        SET progress_json = ?, salesforce_deployment_id = ?, remote_status = ?,
+            deployment_result_json = CASE WHEN kind = 'DEPLOY' THEN ? ELSE deployment_result_json END,
+            persistence_warning = COALESCE(?, persistence_warning), updated_at = ?
+        WHERE id = ? AND status = 'RECONCILE_REQUIRED'
+      `,
+      JSON.stringify(input.progress),
+      input.progress.deploymentId,
+      remoteStatusFromProgress(input.progress),
+      JSON.stringify(input.report),
+      input.persistenceWarning ?? null,
+      timestamp,
+      input.id);
+      await this.writeAudit(transaction, input.actorUserId, 'DEPLOYMENT_RECONCILED', input.id, {
+        deploymentId: input.progress.deploymentId,
+        remoteStatus: remoteStatusFromProgress(input.progress),
+        done: input.progress.done,
+      }, timestamp);
+    });
+    return this.notify(await this.getRequired(input.id));
   }
 
   public async recordDirectDeploymentArtifacts(input: {
@@ -458,31 +650,49 @@ export class DeploymentJobRepository {
   }): Promise<void> {
     assertChecksum(input.payloadChecksum);
     const timestamp = this.now();
-    const result = await this.database.run(`
-      UPDATE deployment_jobs
-      SET payload_checksum = ?, run_directory = ?, is_prepared = 1,
-          comparison_result_json = ?, test_plan_json = ?, dry_run_result_json = ?,
-          deployment_result_json = ?, updated_at = ?
-      WHERE id = ? AND kind = 'DEPLOY' AND dry_run_job_id IS NULL AND status = 'DEPLOYING'
-    `,
-    input.payloadChecksum,
-    input.runDirectory,
-    JSON.stringify(input.comparisonResult),
-    JSON.stringify(input.testPlan),
-    input.dryRunResult === undefined ? null : JSON.stringify(input.dryRunResult),
-    JSON.stringify(input.deploymentResult),
-    timestamp,
-    input.id);
-    if (result.changes !== 1) {
-      throw new SfudError('INVALID_JOB_STATE', '직접 배포 결과를 기록할 수 없는 작업 상태입니다.');
-    }
-    const job = await this.getRequired(input.id);
-    await this.writeAudit(job.createdBy, 'DIRECT_DEPLOYMENT_ARTIFACTS_RECORDED', input.id, {
-      payloadChecksum: input.payloadChecksum,
-      testLevel: input.testPlan.level,
-      tests: input.testPlan.tests,
-      different: input.comparisonResult.summary.different,
-    }, timestamp);
+    const [comparisonArtifactPath, dryRunArtifactPath, deploymentArtifactPath] = await Promise.all([
+      writeCompressedJsonArtifact(input.runDirectory, 'comparison.json.gz', input.comparisonResult),
+      input.dryRunResult === undefined
+        ? Promise.resolve(undefined)
+        : writeCompressedJsonArtifact(input.runDirectory, 'dry-run.json.gz', input.dryRunResult),
+      writeCompressedJsonArtifact(input.runDirectory, 'deployment.json.gz', input.deploymentResult),
+    ]);
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const result = await transaction.run(`
+        UPDATE deployment_jobs
+        SET payload_checksum = ?, run_directory = ?, is_prepared = 1,
+            comparison_result_json = NULL, comparison_artifact_path = ?, test_plan_json = ?,
+            dry_run_result_json = NULL, dry_run_artifact_path = ?,
+            deployment_result_json = NULL, deployment_artifact_path = ?,
+            summary_added = ?, summary_removed = ?, summary_modified = ?,
+            summary_identical = ?, summary_total = ?, summary_different = ?, updated_at = ?
+        WHERE id = ? AND kind = 'DEPLOY' AND dry_run_job_id IS NULL AND status = 'DEPLOYING'
+      `,
+      input.payloadChecksum,
+      input.runDirectory,
+      comparisonArtifactPath,
+      JSON.stringify(input.testPlan),
+      dryRunArtifactPath ?? null,
+      deploymentArtifactPath,
+      input.comparisonResult.summary.added,
+      input.comparisonResult.summary.removed,
+      input.comparisonResult.summary.modified,
+      input.comparisonResult.summary.identical,
+      input.comparisonResult.summary.total,
+      input.comparisonResult.summary.different,
+      timestamp,
+      input.id);
+      if (result.changes !== 1) {
+        throw new SfudError('INVALID_JOB_STATE', '직접 배포 결과를 기록할 수 없는 작업 상태입니다.');
+      }
+      const job = await getRequired(transaction, input.id);
+      await this.writeAudit(transaction, job.createdBy, 'DIRECT_DEPLOYMENT_ARTIFACTS_RECORDED', input.id, {
+        payloadChecksum: input.payloadChecksum,
+        testLevel: input.testPlan.level,
+        tests: input.testPlan.tests,
+        different: input.comparisonResult.summary.different,
+      }, timestamp);
+    });
     this.notify(await this.getRequired(input.id));
   }
 
@@ -518,8 +728,23 @@ export class DeploymentJobRepository {
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
       throw new SfudError('INVALID_ARGUMENT', '조회 개수는 1부터 200 사이여야 합니다.');
     }
-    return (await this.database.all<DeploymentJobRow[]>(`
+    const jobs = (await this.database.all<DeploymentJobRow[]>(`
       SELECT * FROM deployment_jobs ORDER BY created_at DESC, id DESC LIMIT ?
+    `, limit)).map(mapDeploymentJob);
+    return await Promise.all(jobs.map(hydrateArtifacts));
+  }
+
+  public async listRecentSummary(limit = 50): Promise<DeploymentJob[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      throw new SfudError('INVALID_ARGUMENT', '조회 개수는 1부터 200 사이여야 합니다.');
+    }
+    return (await this.database.all<DeploymentJobRow[]>(`
+      SELECT id, kind, status, source, target_alias, manifest_path, scope, metadata_type,
+        payload_checksum, run_directory, salesforce_deployment_id, dry_run_job_id, created_by,
+        error_code, error_message, created_at, updated_at, started_at, completed_at, is_prepared,
+        remote_status, persistence_warning,
+        summary_added, summary_removed, summary_modified, summary_identical, summary_total, summary_different
+      FROM deployment_jobs ORDER BY created_at DESC, id DESC LIMIT ?
     `, limit)).map(mapDeploymentJob);
   }
 
@@ -529,17 +754,26 @@ export class DeploymentJobRepository {
   }
 
   private async writeAudit(
+    database: DatabaseHandle,
     actorUserId: string | undefined,
     eventType: string,
     entityId: string,
     detail: Record<string, unknown>,
     timestamp: string,
   ): Promise<void> {
-    await this.database.run(`
+    await database.run(`
       INSERT INTO audit_events (actor_user_id, event_type, entity_type, entity_id, detail_json, created_at)
       VALUES (?, ?, 'DEPLOYMENT_JOB', ?, ?, ?)
     `, actorUserId ?? null, eventType, entityId, JSON.stringify(detail), timestamp);
   }
+}
+
+async function getRequired(database: DatabaseHandle, id: string): Promise<DeploymentJob> {
+  const row = await database.get<DeploymentJobRow>('SELECT * FROM deployment_jobs WHERE id = ?', id);
+  if (row === undefined) {
+    throw new SfudError('INVALID_ARGUMENT', `배포 작업을 찾을 수 없습니다: ${id}`);
+  }
+  return mapDeploymentJob(row);
 }
 
 function assertTransition(job: DeploymentJob, nextStatus: DeploymentJobStatus): void {
@@ -563,11 +797,21 @@ function assertChecksum(value: string): void {
   }
 }
 
+function assertClientRequestId(value: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$/u.test(value)) {
+    throw new SfudError('INVALID_ARGUMENT', 'Idempotency-Key 형식이 올바르지 않습니다.');
+  }
+}
+
 function isUniqueConstraintError(error: unknown): boolean {
   return error instanceof Error && /UNIQUE constraint failed/u.test(error.message);
 }
 
 function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
+  const comparisonResult = row.comparison_result_json == null
+    ? undefined
+    : JSON.parse(row.comparison_result_json) as ComparisonResult;
+  const comparisonSummary = summaryFromRow(row) ?? comparisonResult?.summary;
   return {
     id: row.id,
     kind: row.kind,
@@ -591,19 +835,84 @@ function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
     ...(row.started_at === null ? {} : { startedAt: row.started_at }),
     ...(row.completed_at === null ? {} : { completedAt: row.completed_at }),
     prepared: row.is_prepared === 1,
-    ...(row.comparison_result_json === null
+    ...(row.comparison_artifact_path == null
       ? {}
-      : { comparisonResult: JSON.parse(row.comparison_result_json) as ComparisonResult }),
-    ...(row.test_plan_json === null ? {} : { testPlan: JSON.parse(row.test_plan_json) as ApexTestPlan }),
-    ...(row.dry_run_result_json === null ? {} : { dryRunResult: JSON.parse(row.dry_run_result_json) as unknown }),
-    ...(row.selected_components_json === null
+      : { comparisonArtifactPath: row.comparison_artifact_path }),
+    ...(row.dry_run_artifact_path == null
+      ? {}
+      : { dryRunArtifactPath: row.dry_run_artifact_path }),
+    ...(row.deployment_artifact_path == null
+      ? {}
+      : { deploymentArtifactPath: row.deployment_artifact_path }),
+    ...(comparisonSummary === undefined ? {} : { comparisonSummary }),
+    ...(comparisonResult === undefined ? {} : { comparisonResult }),
+    ...(row.test_plan_json == null ? {} : { testPlan: JSON.parse(row.test_plan_json) as ApexTestPlan }),
+    ...(row.dry_run_result_json == null ? {} : { dryRunResult: JSON.parse(row.dry_run_result_json) as unknown }),
+    ...(row.selected_components_json == null
       ? {}
       : { selectedComponents: JSON.parse(row.selected_components_json) as SelectedMetadataComponent[] }),
-    ...(row.deployment_result_json === null
+    ...(row.deployment_result_json == null
       ? {}
       : { deploymentResult: JSON.parse(row.deployment_result_json) as unknown }),
-    ...(row.progress_json === null
+    ...(row.progress_json == null
       ? {}
       : { progress: JSON.parse(row.progress_json) as SalesforceDeploymentProgress }),
+    remoteStatus: row.remote_status,
+    ...(row.persistence_warning === null ? {} : { persistenceWarning: row.persistence_warning }),
+    ...(row.source_org_identity_json == null
+      ? {}
+      : { sourceOrgIdentity: JSON.parse(row.source_org_identity_json) as OrgIdentitySnapshot }),
+    ...(row.target_org_identity_json == null
+      ? {}
+      : { targetOrgIdentity: JSON.parse(row.target_org_identity_json) as OrgIdentitySnapshot }),
   };
+}
+
+async function hydrateArtifacts(job: DeploymentJob): Promise<DeploymentJob> {
+  if (job.runDirectory === undefined) return job;
+  const [comparisonResult, dryRunResult, deploymentResult] = await Promise.all([
+    job.comparisonResult !== undefined || job.comparisonArtifactPath === undefined
+      ? Promise.resolve(job.comparisonResult)
+      : readCompressedJsonArtifact<ComparisonResult>(job.runDirectory, job.comparisonArtifactPath),
+    job.dryRunResult !== undefined || job.dryRunArtifactPath === undefined
+      ? Promise.resolve(job.dryRunResult)
+      : readCompressedJsonArtifact<unknown>(job.runDirectory, job.dryRunArtifactPath),
+    job.deploymentResult !== undefined || job.deploymentArtifactPath === undefined
+      ? Promise.resolve(job.deploymentResult)
+      : readCompressedJsonArtifact<unknown>(job.runDirectory, job.deploymentArtifactPath),
+  ]);
+  return {
+    ...job,
+    ...(comparisonResult === undefined ? {} : { comparisonResult }),
+    ...(dryRunResult === undefined ? {} : { dryRunResult }),
+    ...(deploymentResult === undefined ? {} : { deploymentResult }),
+    ...(job.comparisonSummary === undefined && comparisonResult?.summary === undefined
+      ? {}
+      : { comparisonSummary: job.comparisonSummary ?? comparisonResult!.summary }),
+  };
+}
+
+function summaryFromRow(row: DeploymentJobRow): ComparisonSummary | undefined {
+  const values = [
+    row.summary_added,
+    row.summary_removed,
+    row.summary_modified,
+    row.summary_identical,
+    row.summary_total,
+    row.summary_different,
+  ];
+  if (values.some((value) => typeof value !== 'number')) return undefined;
+  return {
+    added: row.summary_added!,
+    removed: row.summary_removed!,
+    modified: row.summary_modified!,
+    identical: row.summary_identical!,
+    total: row.summary_total!,
+    different: row.summary_different!,
+  };
+}
+
+function remoteStatusFromProgress(progress: SalesforceDeploymentProgress): RemoteDeploymentStatus {
+  if (progress.done) return progress.success === false ? 'FAILED' : 'SUCCEEDED';
+  return ['Queued', 'Pending'].includes(progress.status) ? 'SUBMITTED' : 'RUNNING';
 }

@@ -15,12 +15,27 @@ export interface StartWebUiOptions {
   open: boolean;
   dataDirectory?: string;
   projectPaths?: string[];
+  trustedProxies?: string[];
+  publicOrigin?: string;
   logger?: boolean;
 }
 
 export async function startWebUi(options: StartWebUiOptions): Promise<FastifyInstance> {
   assertSafeBind(options.host, options.allowRemote);
   const app = await createWebServer(options);
+  const closeOnSignal = () => {
+    void app.close().catch((error: unknown) => {
+      const reason = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`[UI_SHUTDOWN_FAILED] ${reason}\n`);
+      process.exitCode = 2;
+    });
+  };
+  process.once('SIGINT', closeOnSignal);
+  process.once('SIGTERM', closeOnSignal);
+  app.addHook('onClose', async () => {
+    process.removeListener('SIGINT', closeOnSignal);
+    process.removeListener('SIGTERM', closeOnSignal);
+  });
 
   try {
     const address = await app.listen({ host: options.host, port: options.port });

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://unpkg.com/knip@latest/schema.json",
+  "entry": [
+    "ui/src/main.tsx",
+    "test/**/*.test.ts",
+    "e2e/**/*.spec.ts"
+  ],
+  "project": [
+    "src/**/*.ts",
+    "ui/src/**/*.{ts,tsx,css}",
+    "test/**/*.ts",
+    "e2e/**/*.ts"
+  ],
+  "playwright": false
+}

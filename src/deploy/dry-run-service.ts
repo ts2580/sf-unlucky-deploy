@@ -7,6 +7,8 @@ import { redactSensitiveText, type SfClient } from '../salesforce/sf-client.js';
 import type { AllowedProject, WorkspaceService } from '../web/server/workspace-service.js';
 import { DeploymentCoordinator, ReconciliationRequiredError } from './deployment-coordinator.js';
 import { DeploymentJobRepository, type DeploymentJob } from './deployment-job-repository.js';
+import { assertDeploymentOrgIdentities } from './org-identity-verifier.js';
+import type { OrgIdentitySnapshot } from './org-identity.js';
 import {
   normalizeSelectedComponents,
   type SelectedMetadataComponent,
@@ -39,9 +41,15 @@ export interface CreateDryRunInput {
   createdBy: string;
 }
 
-export interface CreateDirectDeploymentInput extends Omit<CreateDryRunInput, 'testLevel'> {
+export interface CreateDirectDeploymentInput extends CreateDryRunInput {
+  clientRequestId: string;
   targetConfirmation: string;
   confirmation: string;
+}
+
+export interface CreateDirectDeploymentResult {
+  job: DeploymentJob;
+  created: boolean;
 }
 
 interface PreparedDeploymentRequest {
@@ -52,6 +60,8 @@ interface PreparedDeploymentRequest {
   manifestPath: string;
   selectedComponents?: SelectedMetadataComponent[];
   requestChecksum: string;
+  sourceOrgIdentity?: OrgIdentitySnapshot;
+  targetOrgIdentity: OrgIdentitySnapshot;
   releaseSources: () => void;
 }
 
@@ -65,14 +75,18 @@ export class DryRunService {
   ) {}
 
   public async create(input: CreateDryRunInput): Promise<DeploymentJob> {
+    this.coordinator.assertAccepting();
     const prepared = await this.prepare(input);
     let job: DeploymentJob;
     try {
+      this.coordinator.assertAccepting();
       job = await this.jobs.createDryRun({
         source: prepared.source,
         targetAlias: prepared.targetAlias,
         manifestPath: prepared.manifestPath,
         payloadChecksum: prepared.requestChecksum,
+        targetOrgIdentity: prepared.targetOrgIdentity,
+        ...(prepared.sourceOrgIdentity === undefined ? {} : { sourceOrgIdentity: prepared.sourceOrgIdentity }),
         createdBy: input.createdBy,
         scope: prepared.scope === 'all' ? 'ALL' : 'MANIFEST',
         ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
@@ -83,8 +97,10 @@ export class DryRunService {
       throw error;
     }
 
-    void this.coordinator.runDryRun(job.id, async () => {
+    void this.coordinator.runDryRun(job.id, async (signal) => {
+      const persistenceWarnings: string[] = [];
       try {
+        await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
         const result = await runDeployCommand({
           from: prepared.source,
           to: prepared.targetAlias,
@@ -107,19 +123,39 @@ export class DryRunService {
           cwd: prepared.project.realPath,
           sfClient: this.sfClient,
           stdout: () => undefined,
+          signal,
+          beforeDeploymentSubmit: async () => {
+            await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
+          },
+          onDeploymentSubmitted: async (deploymentId) => {
+            await this.jobs.recordSalesforceSubmission(job.id, deploymentId);
+          },
           onDeploymentProgress: async (progress) => { await this.jobs.recordSalesforceProgress(job.id, progress); },
+          onDeploymentPersistenceError: (stage, error) => {
+            persistenceWarnings.push(persistenceWarning(stage, error));
+          },
         });
+        persistenceWarnings.push(...(result.persistenceWarnings ?? []).map((warning) => redactSensitiveText(warning)));
         const payloadChecksum = result.payloadSha256;
-        await this.jobs.recordDryRunArtifacts({
-          id: job.id,
-          payloadChecksum,
-          runDirectory: result.runDirectory,
-          comparisonResult: result.comparison,
-          testPlan: result.testPlan,
-          dryRunResult: result.dryRunResult,
-        });
         const deploymentId = extractDeploymentId(result.dryRunResult);
-        return deploymentId === undefined ? {} : { deploymentId };
+        try {
+          await this.jobs.recordDryRunArtifacts({
+            id: job.id,
+            payloadChecksum,
+            runDirectory: result.runDirectory,
+            comparisonResult: result.comparison,
+            testPlan: result.testPlan,
+            dryRunResult: result.dryRunResult,
+          });
+        } catch (error) {
+          persistenceWarnings.push(persistenceWarning('artifacts', error));
+        }
+        return {
+          ...(deploymentId === undefined ? {} : { deploymentId }),
+          ...(persistenceWarnings.length === 0
+            ? {}
+            : { persistenceWarning: persistenceWarnings.join(' ') }),
+        };
       } catch (error) {
         if (error instanceof SfudError && error.code === 'SF_EXTERNAL_STATE_UNKNOWN') {
           const message = redactSensitiveText(error.message);
@@ -132,37 +168,46 @@ export class DryRunService {
     return job;
   }
 
-  public async createDirect(input: CreateDirectDeploymentInput): Promise<DeploymentJob> {
+  public async createDirect(input: CreateDirectDeploymentInput): Promise<CreateDirectDeploymentResult> {
+    this.coordinator.assertAccepting();
     const tests = [...new Set(input.tests)].sort((left, right) => left.localeCompare(right));
-    const testLevel: RequestedTestLevel = tests.length > 0 ? 'RunSpecifiedTests' : 'NoTestRun';
-    const request: CreateDryRunInput = { ...input, tests, testLevel };
+    const request: CreateDryRunInput = { ...input, tests };
     const prepared = await this.prepare(request);
-    let job: DeploymentJob;
+    let creation: CreateDirectDeploymentResult;
     try {
-      job = await this.jobs.createDirectDeployment({
+      this.coordinator.assertAccepting();
+      creation = await this.jobs.createDirectDeployment({
         source: prepared.source,
         targetAlias: prepared.targetAlias,
         targetConfirmation: input.targetConfirmation,
         confirmation: input.confirmation,
         manifestPath: prepared.manifestPath,
         payloadChecksum: prepared.requestChecksum,
+        requestHash: prepared.requestChecksum,
+        clientRequestId: input.clientRequestId,
+        targetOrgIdentity: prepared.targetOrgIdentity,
+        ...(prepared.sourceOrgIdentity === undefined ? {} : { sourceOrgIdentity: prepared.sourceOrgIdentity }),
         createdBy: input.createdBy,
         scope: prepared.scope === 'all' ? 'ALL' : 'MANIFEST',
         ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
         ...(prepared.selectedComponents === undefined ? {} : { selectedComponents: prepared.selectedComponents }),
-        testPlan: {
-          level: testLevel,
-          tests,
-          selection: tests.length > 0 ? 'explicit' : 'configured',
-        },
+        requestedTestLevel: input.testLevel,
+        requestedTests: tests,
       });
     } catch (error) {
       prepared.releaseSources();
       throw error;
     }
+    const { job } = creation;
+    if (!creation.created) {
+      prepared.releaseSources();
+      return creation;
+    }
 
-    void this.coordinator.runDeployment(job.id, async () => {
+    void this.coordinator.runDeployment(job.id, async (signal) => {
+      const persistenceWarnings: string[] = [];
       try {
+        await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
         const result = await runDeployCommand({
           from: prepared.source,
           to: prepared.targetAlias,
@@ -174,9 +219,9 @@ export class DryRunService {
             : { manifest: prepared.manifestPath }),
           reportDir: path.join(this.runsDirectory, job.id),
           execute: true,
-          skipDryRun: tests.length === 0,
+          skipDryRun: input.testLevel === 'NoTestRun',
           ...(tests.length === 0 ? {} : { minimumCoverage: 75 }),
-          testLevel,
+          testLevel: input.testLevel,
           tests,
           testClassSuffix: input.testClassSuffix,
           wait: input.waitMinutes,
@@ -186,22 +231,42 @@ export class DryRunService {
           cwd: prepared.project.realPath,
           sfClient: this.sfClient,
           stdout: () => undefined,
+          signal,
+          beforeDeploymentSubmit: async () => {
+            await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
+          },
+          onDeploymentSubmitted: async (deploymentId) => {
+            await this.jobs.recordSalesforceSubmission(job.id, deploymentId);
+          },
           onDeploymentProgress: async (progress) => { await this.jobs.recordSalesforceProgress(job.id, progress); },
+          onDeploymentPersistenceError: (stage, error) => {
+            persistenceWarnings.push(persistenceWarning(stage, error));
+          },
         });
+        persistenceWarnings.push(...(result.persistenceWarnings ?? []).map((warning) => redactSensitiveText(warning)));
         if (result.deployResult === undefined) {
           throw new SfudError('DEPLOY_FAILED', 'Salesforce 실제 배포 결과가 없습니다.');
         }
-        await this.jobs.recordDirectDeploymentArtifacts({
-          id: job.id,
-          payloadChecksum: result.payloadSha256,
-          runDirectory: result.runDirectory,
-          comparisonResult: result.comparison,
-          testPlan: result.testPlan,
-          ...(result.dryRunResult === undefined ? {} : { dryRunResult: result.dryRunResult }),
-          deploymentResult: result.deployResult,
-        });
         const deploymentId = extractDeploymentId(result.deployResult);
-        return deploymentId === undefined ? {} : { deploymentId };
+        try {
+          await this.jobs.recordDirectDeploymentArtifacts({
+            id: job.id,
+            payloadChecksum: result.payloadSha256,
+            runDirectory: result.runDirectory,
+            comparisonResult: result.comparison,
+            testPlan: result.testPlan,
+            ...(result.dryRunResult === undefined ? {} : { dryRunResult: result.dryRunResult }),
+            deploymentResult: result.deployResult,
+          });
+        } catch (error) {
+          persistenceWarnings.push(persistenceWarning('artifacts', error));
+        }
+        return {
+          ...(deploymentId === undefined ? {} : { deploymentId }),
+          ...(persistenceWarnings.length === 0
+            ? {}
+            : { persistenceWarning: persistenceWarnings.join(' ') }),
+        };
       } catch (error) {
         if (error instanceof SfudError && error.code === 'SF_EXTERNAL_STATE_UNKNOWN') {
           const message = redactSensitiveText(error.message);
@@ -211,7 +276,7 @@ export class DryRunService {
         throw error;
       }
     }).finally(prepared.releaseSources).catch(() => undefined);
-    return job;
+    return creation;
   }
 
   private async prepare(input: CreateDryRunInput): Promise<PreparedDeploymentRequest> {
@@ -266,9 +331,15 @@ export class DryRunService {
         requiredString(input.manifest, 'manifest'),
       )).path;
     const targetAlias = targetSource.slice('org:'.length);
+    const [sourceOrgIdentity, targetOrgIdentity] = await Promise.all([
+      source.startsWith('org:')
+        ? this.workspace.getOrgIdentity(source.slice('org:'.length))
+        : Promise.resolve(undefined),
+      this.workspace.getOrgIdentity(targetAlias),
+    ]);
     const requestChecksum = createHash('sha256').update(JSON.stringify({
       projectPath: project.realPath,
-      manifestPath,
+      ...(scope === 'selected' ? {} : { manifestPath }),
       source,
       targetAlias,
       testLevel: input.testLevel,
@@ -279,6 +350,8 @@ export class DryRunService {
       scope,
       metadataType: input.metadataType,
       selectedComponents,
+      sourceOrgIdentity,
+      targetOrgIdentity,
     })).digest('hex');
     return {
       source,
@@ -288,6 +361,8 @@ export class DryRunService {
       manifestPath,
       ...(selectedComponents === undefined ? {} : { selectedComponents }),
       requestChecksum,
+      ...(sourceOrgIdentity === undefined ? {} : { sourceOrgIdentity }),
+      targetOrgIdentity,
       releaseSources: this.workspace.pinSources([input.sourceId], input.createdBy),
     };
   }
@@ -295,6 +370,14 @@ export class DryRunService {
 
 function extractDeploymentIdFromText(value: string): string | undefined {
   return value.match(/\b0Af[A-Za-z0-9]{12,15}\b/u)?.[0];
+}
+
+function persistenceWarning(stage: 'submission' | 'progress' | 'artifacts', error: unknown): string {
+  const label = stage === 'submission'
+    ? 'Salesforce 배포 ID'
+    : stage === 'progress' ? 'Salesforce 진행 상태' : '배포 상세 결과';
+  const message = redactSensitiveText(error instanceof Error ? error.message : String(error));
+  return `${label} 저장 실패: ${message}`;
 }
 
 function assertInput(input: CreateDryRunInput): void {
