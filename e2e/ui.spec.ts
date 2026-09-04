@@ -56,6 +56,14 @@ test('큰 화면의 작업 공간을 활용하고 좁은 화면에서는 패널�
   await expect(approval).toContainText('NoTestRun 배포 · 프로덕션 org에서 거부될 수 있습니다.');
   await expect(approval).toContainText('선택한 Target에 실제 반영됩니다. 브라우저를 닫아도 배포는 계속됩니다.');
   await expect(page.getByText('TARGET ONLY는 선택할 수 없습니다.')).toBeVisible();
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const baseFonts = await page.evaluate(() => {
+    const fontSize = (selector: string) => parseFloat(getComputedStyle(document.querySelector(selector)!).fontSize);
+    return {
+      heading: fontSize('#deploy-source-heading'), button: fontSize('.comparison-run-button'),
+      option: fontSize('.option-toggle strong'), description: fontSize('.option-toggle small'),
+    };
+  });
   for (const width of [2560, 2200, 2199, 1920, 1536, 1280, 1201, 1200, 1024, 980, 768, 701, 700, 430, 390, 360, 320]) {
     await page.setViewportSize({ width, height: width < 700 ? 844 : 1440 });
     const metrics = await page.evaluate(() => {
@@ -63,6 +71,7 @@ test('큰 화면의 작업 공간을 활용하고 좁은 화면에서는 패널�
         const rect = document.querySelector(selector)!.getBoundingClientRect();
         return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, right: rect.right, bottom: rect.bottom };
       };
+      const fontSize = (selector: string) => parseFloat(getComputedStyle(document.querySelector(selector)!).fontSize);
       return {
         overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
         body: box('.app-body'), content: box('.content'), workspace: box('.deploy-workspace'),
@@ -70,8 +79,18 @@ test('큰 화면의 작업 공간을 활용하고 좁은 화면에서는 패널�
         summary: box('.deploy-summary'), button: box('.comparison-run-button'),
         options: box('.comparison-controls-row .option-toggle:nth-child(2)'),
         status: box('.workflow-status-panel'), steps: box('.deployment-steps'),
+        fonts: {
+          root: fontSize('html'), heading: fontSize('#deploy-source-heading'),
+          button: fontSize('.comparison-run-button'), option: fontSize('.option-toggle strong'),
+          description: fontSize('.option-toggle small'),
+        },
       };
     });
+    const expectedRootSize = width >= 2200 ? 19 : width >= 1920 ? 18 : 16;
+    expect(metrics.fonts.root, `${width}px 기본 글자 크기`).toBe(expectedRootSize);
+    for (const key of ['heading', 'button', 'option', 'description'] as const) {
+      expect(metrics.fonts[key], `${width}px ${key} 글자 배율`).toBeCloseTo(baseFonts[key] * expectedRootSize / 16, 2);
+    }
     expect(metrics.overflow, `${width}px 가로 넘침`).toBe(false);
     expect(metrics.button.right).toBeLessThan(metrics.search.right);
     expect(Math.abs(metrics.button.width - metrics.options.width), `${width}px 버튼 너비`).toBeLessThan(1);

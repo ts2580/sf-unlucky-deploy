@@ -262,7 +262,12 @@ button:focus-visible, a:focus-visible { outline: 3px solid #60a5fa; outline-offs
 @keyframes spin { to { transform:rotate(360deg) } }
 @media (prefers-reduced-motion: reduce) { *,*::before,*::after { scroll-behavior: auto!important; animation-duration: .01ms!important; animation-iteration-count: 1!important; transition-duration: .01ms!important; } }
 
+@media (min-width: 1920px) {
+  html { font-size: 112.5%; }
+}
+
 @media (min-width: 2200px) {
+  html { font-size: 118.75%; }
   .deploy-workspace { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
   .deploy-workspace > * { min-width: 0; grid-column: 1 / -1; }
   .deploy-workspace > .deploy-source-panel,
