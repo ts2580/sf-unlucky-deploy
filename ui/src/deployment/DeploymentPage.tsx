@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
+import { useWorkflowUpdates } from './useWorkflowUpdates';
+
 import type {
   CreateDirectDeploymentRequest,
   CreateDryRunRequest,
@@ -8,7 +10,6 @@ import type {
 import { ApiClientTimeoutError, apiRequest } from '../api-client';
 import type { ApiUser } from '../auth/api';
 import {
-  getComparisonJob,
   startComparison,
   type ComparisonComponent,
   type ComparisonJobResponse,
@@ -18,7 +19,6 @@ import { Icon } from '../components/Icon';
 import { PageIntro } from '../components/PageIntro';
 import {
   executeApprovedDeployment,
-  getDeploymentJob,
   reconcileDeploymentJob,
   startDirectDeployment,
   startDryRun as requestDryRun,
@@ -28,7 +28,6 @@ import {
   DryRunResultPanel,
   SubmissionProgress,
   WorkflowStatusPanel,
-  type LiveStatus,
 } from './DeploymentStatus';
 
 type DryRunJobResponse = DeploymentJobResponse;
@@ -66,14 +65,6 @@ interface DeploymentCartItem {
   fullName: string;
 }
 
-interface WorkflowEventMessage {
-  resource: 'comparison' | 'deployment';
-  jobId: string;
-  kind: string;
-  status: string;
-  updatedAt: string;
-}
-
 function defaultMetadataType(metadataTypes: MetadataTypeOption[]): string {
   return metadataTypes.find((metadataType) => metadataType.name === 'ApexClass')?.name
     ?? metadataTypes[0]?.name
@@ -106,7 +97,6 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const [apexTestClassesLoading, setApexTestClassesLoading] = useState(false);
   const [apexTestClassesError, setApexTestClassesError] = useState('');
   const [testInputFocused, setTestInputFocused] = useState(false);
-  const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
   const comparisonRequestControllerRef = useRef<AbortController | null>(null);
   const dryRunRequestControllerRef = useRef<AbortController | null>(null);
   const deploymentRequestControllerRef = useRef<AbortController | null>(null);
@@ -126,14 +116,14 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const dryRunSelectionKey = [sourceId, targetOrgId, cartSelectionKey, testLevel, tests].join('\u0000');
   const workflowSelectionKeyRef = useRef(workflowSelectionKey);
   const dryRunSelectionKeyRef = useRef(dryRunSelectionKey);
-  const comparisonJobRef = useRef(comparisonJob);
-  const dryRunJobRef = useRef(dryRunJob);
-  const deploymentJobRef = useRef(deploymentJob);
   workflowSelectionKeyRef.current = workflowSelectionKey;
   dryRunSelectionKeyRef.current = dryRunSelectionKey;
-  comparisonJobRef.current = comparisonJob;
-  dryRunJobRef.current = dryRunJob;
-  deploymentJobRef.current = deploymentJob;
+  const liveStatus = useWorkflowUpdates({
+    comparisonJob, dryRunJob, deploymentJob,
+    setComparisonJob, setDryRunJob, setDeploymentJob,
+    workflowSelectionKey, dryRunSelectionKey,
+    comparisonJobSelectionKeyRef, dryRunJobSelectionKeyRef, setError,
+  });
   const canRun = ['OPERATOR', 'DEPLOYER', 'ADMIN'].includes(user.role);
   const hasApexDeployment = deploymentCart.some((item) => item.type === 'ApexClass');
 
@@ -256,139 +246,6 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       .finally(() => { if (!controller.signal.aborted) setApexTestClassesLoading(false); });
     return () => controller.abort();
   }, [hasApexDeployment, sourceId, testInputFocused]);
-
-  useEffect(() => {
-    const events = new EventSource('/api/v1/workflow/events');
-    setLiveStatus('connecting');
-    events.onopen = () => setLiveStatus('connected');
-    events.onerror = () => setLiveStatus('reconnecting');
-    const handleWorkflowEvent = (rawEvent: Event) => {
-      if (!(rawEvent instanceof MessageEvent) || typeof rawEvent.data !== 'string') return;
-      let event: WorkflowEventMessage;
-      try {
-        event = JSON.parse(rawEvent.data) as WorkflowEventMessage;
-      } catch {
-        return;
-      }
-
-      if (event.resource === 'comparison' && comparisonJobRef.current?.id === event.jobId) {
-        const selectionKey = comparisonJobSelectionKeyRef.current;
-        if (selectionKey === null || selectionKey !== workflowSelectionKeyRef.current) return;
-        void getComparisonJob(event.jobId)
-          .then((data) => {
-            if (
-              comparisonJobRef.current?.id === event.jobId
-              && comparisonJobSelectionKeyRef.current === selectionKey
-              && workflowSelectionKeyRef.current === selectionKey
-            ) setComparisonJob(data.job);
-          })
-          .catch(() => undefined);
-        return;
-      }
-
-      if (event.resource !== 'deployment') return;
-      if (dryRunJobRef.current?.id === event.jobId) {
-        const selectionKey = dryRunJobSelectionKeyRef.current;
-        if (selectionKey === null || selectionKey !== dryRunSelectionKeyRef.current) return;
-        void getDeploymentJob(event.jobId)
-          .then((data) => {
-            if (
-              dryRunJobRef.current?.id === event.jobId
-              && dryRunJobSelectionKeyRef.current === selectionKey
-              && dryRunSelectionKeyRef.current === selectionKey
-            ) setDryRunJob(data.job);
-          })
-          .catch(() => undefined);
-      }
-      if (deploymentJobRef.current?.id === event.jobId) {
-        void getDeploymentJob(event.jobId)
-          .then((data) => {
-            if (deploymentJobRef.current?.id === event.jobId) {
-              setDeploymentJob(data.job);
-            }
-          })
-          .catch(() => undefined);
-      }
-    };
-    events.addEventListener('workflow', handleWorkflowEvent);
-    return () => {
-      events.removeEventListener('workflow', handleWorkflowEvent);
-      events.close();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (comparisonJob === null || !['QUEUED', 'RUNNING'].includes(comparisonJob.status)) return;
-    const selectionKey = comparisonJobSelectionKeyRef.current;
-    if (selectionKey === null) return;
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => {
-      getComparisonJob(comparisonJob.id, controller.signal)
-        .then((data) => {
-          if (
-            controller.signal.aborted
-            || workflowSelectionKeyRef.current !== selectionKey
-            || comparisonJobSelectionKeyRef.current !== selectionKey
-            || data.job.id !== comparisonJob.id
-          ) return;
-          setComparisonJob(data.job);
-        })
-        .catch((caught: unknown) => {
-          if (caught instanceof DOMException && caught.name === 'AbortError') return;
-          setError(caught instanceof Error ? caught.message : '비교 상태를 확인하지 못했습니다.');
-        });
-    }, 900);
-    return () => {
-      window.clearTimeout(timeout);
-      controller.abort();
-    };
-  }, [comparisonJob]);
-
-  useEffect(() => {
-    if (dryRunJob === null || !['QUEUED', 'DRY_RUN_RUNNING'].includes(dryRunJob.status)) return;
-    const selectionKey = dryRunJobSelectionKeyRef.current;
-    if (selectionKey === null) return;
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => {
-      getDeploymentJob(dryRunJob.id, controller.signal)
-        .then((data) => {
-          if (
-            controller.signal.aborted
-            || dryRunSelectionKeyRef.current !== selectionKey
-            || dryRunJobSelectionKeyRef.current !== selectionKey
-            || data.job.id !== dryRunJob.id
-          ) return;
-          setDryRunJob(data.job);
-        })
-        .catch((caught: unknown) => {
-          if (caught instanceof DOMException && caught.name === 'AbortError') return;
-          setError(caught instanceof Error ? caught.message : 'dry-run 상태를 확인하지 못했습니다.');
-        });
-    }, 1_000);
-    return () => {
-      window.clearTimeout(timeout);
-      controller.abort();
-    };
-  }, [dryRunJob]);
-
-  useEffect(() => {
-    if (deploymentJob === null || !['QUEUED', 'DEPLOYING'].includes(deploymentJob.status)) return;
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => {
-      getDeploymentJob(deploymentJob.id, controller.signal)
-        .then((data) => {
-          if (!controller.signal.aborted && data.job.id === deploymentJob.id) setDeploymentJob(data.job);
-        })
-        .catch((caught: unknown) => {
-          if (caught instanceof DOMException && caught.name === 'AbortError') return;
-          setError(caught instanceof Error ? caught.message : '배포 상태를 확인하지 못했습니다.');
-        });
-    }, 1_000);
-    return () => {
-      window.clearTimeout(timeout);
-      controller.abort();
-    };
-  }, [deploymentJob]);
 
   const source = workspace?.sources.find((entry) => entry.id === sourceId);
   const target = workspace?.sources.find((entry) => entry.id === targetOrgId);
