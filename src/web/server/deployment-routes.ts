@@ -35,6 +35,7 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
       } });
     }
     try {
+      const clientRequestId = idempotencyKey(request.headers['idempotency-key']);
       const settings = await app.sfudRuntime.settings.get(session.user.id);
       const job = await app.sfudRuntime.dryRuns.create({
         ...(request.body?.projectId === undefined ? {} : { projectId: request.body.projectId }),
@@ -54,11 +55,13 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
         waitMinutes: request.body?.waitMinutes ?? 60,
         strict: request.body?.strict === true,
         createdBy: session.user.id,
+        clientRequestId,
       });
       return reply.code(202).send({ job: publicJob(app, job, false) });
     } catch (error) {
-      return reply.code(400).send({ error: {
-        code: 'INVALID_DRY_RUN_REQUEST',
+      const conflict = error instanceof SfudError && error.code === 'IDEMPOTENCY_CONFLICT';
+      return reply.code(conflict ? 409 : 400).send({ error: {
+        code: conflict ? 'IDEMPOTENCY_CONFLICT' : 'INVALID_DRY_RUN_REQUEST',
         message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
       } });
     }

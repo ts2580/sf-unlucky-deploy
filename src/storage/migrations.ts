@@ -387,6 +387,15 @@ const MIGRATIONS: Migration[] = [
       CHECK (test_coverage IS NULL OR (test_coverage >= 0 AND test_coverage <= 100));
     `,
   },
+  {
+    version: 18,
+    name: 'dry_run_idempotency',
+    sql: `
+      CREATE UNIQUE INDEX idx_deployment_jobs_dry_run_request
+      ON deployment_jobs(created_by, client_request_id)
+      WHERE kind = 'DRY_RUN' AND client_request_id IS NOT NULL;
+    `,
+  },
 ];
 
 export async function applyMigrations(

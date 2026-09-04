@@ -94,6 +94,17 @@ export interface CreateDirectDeploymentJobInput extends CreateDryRunJobInput {
   confirmation: string;
 }
 
+export interface CreateIdempotentDryRunJobInput extends CreateDryRunJobInput {
+  createdBy: string;
+  clientRequestId: string;
+  requestHash: string;
+}
+
+export interface CreateDryRunJobResult {
+  job: DeploymentJob;
+  created: boolean;
+}
+
 export interface CreateDirectDeploymentJobResult {
   job: DeploymentJob;
   created: boolean;
@@ -193,16 +204,45 @@ export class DeploymentJobRepository {
   ) {}
 
   public async createDryRun(input: CreateDryRunJobInput): Promise<DeploymentJob> {
+    return (await this.createDryRunJob(input)).job;
+  }
+
+  public async createIdempotentDryRun(
+    input: CreateIdempotentDryRunJobInput,
+  ): Promise<CreateDryRunJobResult> {
+    assertClientRequestId(input.clientRequestId);
+    assertChecksum(input.requestHash);
+    return await this.createDryRunJob(input);
+  }
+
+  private async createDryRunJob(
+    input: CreateDryRunJobInput & Partial<Pick<CreateIdempotentDryRunJobInput, 'clientRequestId' | 'requestHash'>>,
+  ): Promise<CreateDryRunJobResult> {
     assertChecksum(input.payloadChecksum);
     const id = this.createId();
     const timestamp = this.now();
-    await runInImmediateTransaction(this.database, async (transaction) => {
+    const result = await runInImmediateTransaction(this.database, async (transaction) => {
+      if (input.clientRequestId !== undefined && input.requestHash !== undefined) {
+        const existing = await transaction.get<DeploymentJobRow & { request_hash: string | null }>(`
+          SELECT * FROM deployment_jobs
+          WHERE kind = 'DRY_RUN' AND created_by = ? AND client_request_id = ?
+        `, input.createdBy, input.clientRequestId);
+        if (existing !== undefined) {
+          if (existing.request_hash !== input.requestHash) {
+            throw new SfudError(
+              'IDEMPOTENCY_CONFLICT',
+              '같은 Idempotency-Key가 다른 dry-run 요청에 사용되었습니다.',
+            );
+          }
+          return { job: mapDeploymentJob(existing), created: false };
+        }
+      }
       await transaction.run(`
         INSERT INTO deployment_jobs (
           id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
           run_directory, selected_components_json, source_org_identity_json, target_org_identity_json,
-          created_by, created_at, updated_at
-        ) VALUES (?, 'DRY_RUN', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          created_by, client_request_id, request_hash, created_at, updated_at
+        ) VALUES (?, 'DRY_RUN', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         id,
         input.source,
@@ -216,17 +256,20 @@ export class DeploymentJobRepository {
         input.sourceOrgIdentity === undefined ? null : JSON.stringify(input.sourceOrgIdentity),
         JSON.stringify(input.targetOrgIdentity),
         input.createdBy ?? null,
+        input.clientRequestId ?? null,
+        input.requestHash ?? null,
         timestamp,
         timestamp,
       );
       await this.writeAudit(transaction, input.createdBy, 'DRY_RUN_QUEUED', id, {
         targetAlias: input.targetAlias,
         payloadChecksum: input.payloadChecksum,
+        ...(input.clientRequestId === undefined ? {} : { clientRequestId: input.clientRequestId }),
       }, timestamp);
+      return { job: await getRequired(transaction, id), created: true };
     });
-    const job = await this.getRequired(id);
-    await this.notifyById(id);
-    return job;
+    if (result.created) await this.notifyById(result.job.id);
+    return result;
   }
 
   public async createDirectDeployment(
@@ -490,12 +533,13 @@ export class DeploymentJobRepository {
         ) {
           throw new SfudError('APPROVAL_DENIED', '실제 배포 승인 권한이 없습니다.');
         }
-        const existingApproval = await transaction.get<{ existing: number }>(
-          'SELECT 1 existing FROM deployment_approvals WHERE dry_run_job_id = ?',
+        const existingApproval = await transaction.get<{ deploy_job_id: string }>(
+          'SELECT deploy_job_id FROM deployment_approvals WHERE dry_run_job_id = ?',
           dryRun.id,
         );
         if (existingApproval !== undefined) {
-          throw new SfudError('APPROVAL_DENIED', '이미 실제 배포가 승인된 dry-run 작업입니다.');
+          deployJobId = existingApproval.deploy_job_id;
+          return;
         }
 
         const timestamp = this.now();
@@ -571,9 +615,18 @@ export class DeploymentJobRepository {
       });
     } catch (error) {
       if (isUniqueConstraintError(error)) {
-        throw new SfudError('APPROVAL_DENIED', '이미 실제 배포가 승인된 dry-run 작업입니다.');
+        const existingApproval = await this.database.get<{ deploy_job_id: string }>(
+          'SELECT deploy_job_id FROM deployment_approvals WHERE dry_run_job_id = ?',
+          input.dryRunJobId,
+        );
+        if (existingApproval !== undefined) {
+          deployJobId = existingApproval.deploy_job_id;
+        } else {
+          throw new SfudError('APPROVAL_DENIED', '이미 실제 배포가 승인된 dry-run 작업입니다.');
+        }
+      } else {
+        throw error;
       }
-      throw error;
     }
     const job = await this.getRequired(deployJobId);
     await this.notifyById(deployJobId);

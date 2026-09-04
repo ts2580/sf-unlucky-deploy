@@ -28,10 +28,11 @@ export function getDeploymentJob(id: string, signal?: AbortSignal): Promise<Depl
 
 export function startDryRun(
   body: CreateDryRunRequest,
+  idempotencyKey: string,
   signal?: AbortSignal,
 ): Promise<DeploymentJobEnvelope> {
   return apiRequest('/api/v1/deployments/dry-run', {
-    method: 'POST', body, signal, csrf: true,
+    method: 'POST', body, signal, csrf: true, idempotencyKey,
     requestSchema: CreateDryRunRequestSchema,
     responseSchema: DeploymentJobResponseSchema,
   });

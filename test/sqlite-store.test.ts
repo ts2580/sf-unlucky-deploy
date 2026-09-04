@@ -46,7 +46,7 @@ describe('SQLite 저장소', () => {
     expect(await store.database.get('PRAGMA journal_mode')).toEqual({ journal_mode: 'wal' });
     expect(await store.database.get('PRAGMA busy_timeout')).toEqual({ timeout: 5_000 });
     expect(await store.database.get('SELECT COUNT(*) count FROM schema_migrations'))
-      .toEqual({ count: 17 });
+      .toEqual({ count: 18 });
     if (process.platform !== 'win32') {
       expect((await stat(path.dirname(databasePath))).mode & 0o777).toBe(0o700);
       expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -291,7 +291,7 @@ describe('SQLite 저장소', () => {
       payloadChecksum: checksum,
       targetAlias: 'stdOrg',
       confirmation: '실제 배포',
-    })).rejects.toThrow(/이미 실제 배포가 승인/u);
+    })).resolves.toMatchObject({ id: deploy.id });
   });
 
   it('checksum 변경, 권한 부족, 잘못된 상태 전이를 차단한다', async () => {

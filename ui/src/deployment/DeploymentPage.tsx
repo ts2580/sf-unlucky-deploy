@@ -5,7 +5,7 @@ import type {
   CreateDryRunRequest,
   DeploymentJobResponse,
 } from '../../../src/api/deployment-contracts';
-import { apiRequest } from '../api-client';
+import { ApiClientTimeoutError, apiRequest } from '../api-client';
 import type { ApiUser } from '../auth/api';
 import {
   getComparisonJob,
@@ -110,6 +110,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const comparisonRequestControllerRef = useRef<AbortController | null>(null);
   const dryRunRequestControllerRef = useRef<AbortController | null>(null);
   const deploymentRequestControllerRef = useRef<AbortController | null>(null);
+  const dryRunIdempotencyKeyRef = useRef<string | null>(null);
   const directDeploymentIdempotencyKeyRef = useRef<string | null>(null);
   const comparisonJobSelectionKeyRef = useRef<string | null>(null);
   const dryRunJobSelectionKeyRef = useRef<string | null>(null);
@@ -200,11 +201,18 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     deploymentRequestControllerRef.current?.abort();
     setDryRunSubmitting(false);
     setDeploymentSubmitting(false);
+    dryRunIdempotencyKeyRef.current = null;
     directDeploymentIdempotencyKeyRef.current = null;
     dryRunJobSelectionKeyRef.current = null;
     setDryRunJob(null);
     setDeploymentJob(null);
   }, [dryRunSelectionKey]);
+
+  useEffect(() => {
+    if (dryRunJob !== null && !['QUEUED', 'DRY_RUN_RUNNING'].includes(dryRunJob.status)) {
+      dryRunIdempotencyKeyRef.current = null;
+    }
+  }, [dryRunJob]);
 
   useEffect(() => {
     if (deploymentJob !== null && !['QUEUED', 'DEPLOYING'].includes(deploymentJob.status)) {
@@ -506,7 +514,9 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
         waitMinutes: 60,
         strict: false,
       };
-      const data = await requestDryRun(body, controller.signal);
+      const idempotencyKey = dryRunIdempotencyKeyRef.current ?? crypto.randomUUID();
+      dryRunIdempotencyKeyRef.current = idempotencyKey;
+      const data = await requestDryRun(body, idempotencyKey, controller.signal);
       if (
         controller.signal.aborted
         || dryRunSelectionKeyRef.current !== selectionKey
@@ -515,7 +525,9 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       setDryRunJob(data.job);
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === 'AbortError') return;
-      setError(caught instanceof Error ? caught.message : 'dry-run을 시작하지 못했습니다.');
+      setError(caught instanceof ApiClientTimeoutError
+        ? `${caught.message} dry-run을 다시 실행하면 같은 작업을 안전하게 찾습니다.`
+        : caught instanceof Error ? caught.message : 'dry-run을 시작하지 못했습니다.');
     } finally {
       if (dryRunRequestControllerRef.current === controller) {
         dryRunRequestControllerRef.current = null;
@@ -566,7 +578,9 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       }
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === 'AbortError') return;
-      setError(caught instanceof Error ? caught.message : '실제 배포를 시작하지 못했습니다.');
+      setError(caught instanceof ApiClientTimeoutError
+        ? `${caught.message} 실제 배포를 다시 실행하면 이미 생성된 작업을 안전하게 찾습니다.`
+        : caught instanceof Error ? caught.message : '실제 배포를 시작하지 못했습니다.');
     } finally {
       if (deploymentRequestControllerRef.current === controller) {
         deploymentRequestControllerRef.current = null;
