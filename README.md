@@ -353,6 +353,14 @@ node dist/cli.js ui --no-open
 SFUD_UI_HOST=192.168.0.62 SFUD_UI_PORT=27546 ./start-local.sh
 ```
 
+`start-local.sh`는 프로젝트 루트의 `.env`가 있으면 Node.js의 dotenv parser로 읽고
+`SFUD_*` 변수만 적용한다. 이미 셸에서 지정한 환경변수는 `.env`보다 우선한다. 실제 `.env`는
+Git에서 제외되므로 `.env.example`을 복사해 로컬 실행 주소와 reverse proxy 설정을 관리한다.
+
+```bash
+cp .env.example .env
+```
+
 loopback이 아닌 주소에는 스크립트가 `--allow-remote`를 자동으로 추가한다. 추가 CLI 옵션은
 스크립트 뒤에 그대로 전달할 수 있다. 예: `./start-local.sh --project /path/to/project`.
 
