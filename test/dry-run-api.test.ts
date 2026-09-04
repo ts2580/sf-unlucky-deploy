@@ -87,6 +87,20 @@ describe('dry-run API', () => {
       });
       expect(response.body).not.toContain('must-not-leak');
       expect(response.body).not.toContain(fixture.projectPath);
+      const storedJob = await fixture.server.sfudRuntime.deploymentJobs.getRequired(jobId);
+      await rm(storedJob.runDirectory!, { recursive: true, force: true });
+      const expiredDetails = await fixture.server.inject({
+        url: `/api/v1/deployment-jobs/${jobId}/artifacts`,
+        headers: { cookie: auth.cookie },
+      });
+      expect(expiredDetails.statusCode).toBe(200);
+      expect(expiredDetails.json()).toMatchObject({ job: {
+        id: jobId,
+        status: 'APPROVAL_PENDING',
+        artifactsExpired: true,
+      } });
+      expect(expiredDetails.body).not.toContain('"comparison"');
+      expect(expiredDetails.body).not.toContain('"dryRunResult"');
       const deployCalls = deploymentStartCalls(fixture.client.calls);
       expect(deployCalls).toHaveLength(1);
       expect(deployCalls[0]!.args).toContain('--dry-run');
@@ -165,6 +179,12 @@ describe('dry-run API', () => {
       await fixture.server.sfudRuntime.deploymentQueue.onIdle();
       const dryRun = await fixture.server.sfudRuntime.deploymentJobs.getRequired(dryRunId);
       expect(dryRun).toMatchObject({ status: 'APPROVAL_PENDING', prepared: true });
+      const recentJobs = (await fixture.server.inject({
+        url: '/api/v1/deployment-jobs', headers: { cookie: auth.cookie },
+      })).json<{ jobs: Array<{ id: string; scope?: string; components?: unknown[] }> }>().jobs;
+      expect(recentJobs.find((job) => job.id === dryRunId)).toMatchObject({
+        scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+      });
       expect(await readFile(dryRun.manifestPath, 'utf8')).toContain('<members>Hello</members>');
       expect(await readFile(dryRun.manifestPath, 'utf8')).not.toContain('<members>Hello_Test</members>');
 
@@ -881,6 +901,29 @@ describe('dry-run API', () => {
       expect(response.statusCode).toBe(400);
       expect(response.json()).toMatchObject({ error: { code: 'INVALID_DRY_RUN_REQUEST' } });
       expect(deploymentStartCalls(fixture.client.calls)).toHaveLength(0);
+      expect(await fixture.server.sfudRuntime.store.database.get('SELECT COUNT(*) count FROM deployment_jobs'))
+        .toEqual({ count: 0 });
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('waitMinutes 120분 초과 요청을 공유 API 계약에서 거부한다', async () => {
+    const fixture = await createFixture(new DryRunSfClient());
+    try {
+      const auth = await bootstrap(fixture.server);
+      const response = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/dry-run',
+        headers: {
+          cookie: auth.cookie,
+          'x-sfud-csrf': auth.csrfToken,
+          'idempotency-key': 'dry-run-invalid-wait',
+        },
+        payload: { waitMinutes: 121 },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ error: { code: 'INVALID_DRY_RUN_REQUEST' } });
       expect(await fixture.server.sfudRuntime.store.database.get('SELECT COUNT(*) count FROM deployment_jobs'))
         .toEqual({ count: 0 });
     } finally {

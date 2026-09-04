@@ -2,17 +2,19 @@ import { access, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   assertRunStorageCapacity,
   prepareRunStorage,
   runStoragePolicyFromEnvironment,
 } from '../src/storage/run-storage.js';
+import { createRunContext } from '../src/commands/run-context.js';
 
 const roots: string[] = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(roots.splice(0).map(async (root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -48,6 +50,13 @@ describe('run storage policy', () => {
       minFreeBytes: 1_024,
     });
     expect(() => runStoragePolicyFromEnvironment({ SFUD_RUN_MAX_BYTES: '0' })).toThrow(/0보다 큰/u);
+  });
+
+  it.each(['compare', 'deploy'] as const)('%s snapshot context를 생성할 때마다 여유 공간을 다시 검사한다', async (command) => {
+    const root = await temporaryRoot();
+    vi.stubEnv('SFUD_RUN_MIN_FREE_BYTES', String(Number.MAX_SAFE_INTEGER));
+
+    await expect(createRunContext(root, `${command}-run`, command)).rejects.toThrow(/여유 공간/u);
   });
 });
 

@@ -68,6 +68,7 @@ export interface DeploymentJob {
   persistenceWarning?: string;
   sourceOrgIdentity?: OrgIdentitySnapshot;
   targetOrgIdentity?: OrgIdentitySnapshot;
+  artifactsExpired?: boolean;
 }
 
 export interface CreateDryRunJobInput {
@@ -971,17 +972,15 @@ function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
 
 async function hydrateArtifacts(job: DeploymentJob): Promise<DeploymentJob> {
   if (job.runDirectory === undefined) return job;
-  const [comparisonResult, dryRunResult, deploymentResult] = await Promise.all([
-    job.comparisonResult !== undefined || job.comparisonArtifactPath === undefined
-      ? Promise.resolve(job.comparisonResult)
-      : readCompressedJsonArtifact<ComparisonResult>(job.runDirectory, job.comparisonArtifactPath),
-    job.dryRunResult !== undefined || job.dryRunArtifactPath === undefined
-      ? Promise.resolve(job.dryRunResult)
-      : readCompressedJsonArtifact<unknown>(job.runDirectory, job.dryRunArtifactPath),
-    job.deploymentResult !== undefined || job.deploymentArtifactPath === undefined
-      ? Promise.resolve(job.deploymentResult)
-      : readCompressedJsonArtifact<unknown>(job.runDirectory, job.deploymentArtifactPath),
+  const [comparisonArtifact, dryRunArtifact, deploymentArtifact] = await Promise.all([
+    loadArtifact(job.runDirectory, job.comparisonArtifactPath, job.comparisonResult),
+    loadArtifact(job.runDirectory, job.dryRunArtifactPath, job.dryRunResult),
+    loadArtifact(job.runDirectory, job.deploymentArtifactPath, job.deploymentResult),
   ]);
+  const comparisonResult = comparisonArtifact.value as ComparisonResult | undefined;
+  const dryRunResult = dryRunArtifact.value;
+  const deploymentResult = deploymentArtifact.value;
+  const artifactsExpired = comparisonArtifact.expired || dryRunArtifact.expired || deploymentArtifact.expired;
   return {
     ...job,
     ...(comparisonResult === undefined ? {} : { comparisonResult }),
@@ -990,7 +989,26 @@ async function hydrateArtifacts(job: DeploymentJob): Promise<DeploymentJob> {
     ...(job.comparisonSummary === undefined && comparisonResult?.summary === undefined
       ? {}
       : { comparisonSummary: job.comparisonSummary ?? comparisonResult!.summary }),
+    ...(artifactsExpired ? { artifactsExpired: true } : {}),
   };
+}
+
+async function loadArtifact<T>(
+  runDirectory: string,
+  artifactPath: string | undefined,
+  inlineValue: T | undefined,
+): Promise<{ value: T | undefined; expired: boolean }> {
+  if (inlineValue !== undefined || artifactPath === undefined) {
+    return { value: inlineValue, expired: false };
+  }
+  try {
+    return { value: await readCompressedJsonArtifact<T>(runDirectory, artifactPath), expired: false };
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+      return { value: undefined, expired: true };
+    }
+    throw error;
+  }
 }
 
 function summaryFromRow(row: DeploymentJobRow): ComparisonSummary | undefined {

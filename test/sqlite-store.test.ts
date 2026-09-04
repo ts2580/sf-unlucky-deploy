@@ -134,6 +134,12 @@ describe('SQLite 저장소', () => {
       comparisonSummary: comparisonResult.summary,
     }));
     await expect(deploymentJobs.getRequired(dryRun.id)).rejects.toThrow();
+    await rm(deploymentStorage!.comparisonPath);
+    await expect(deploymentJobs.getRequired(dryRun.id)).resolves.toEqual(expect.objectContaining({
+      id: dryRun.id,
+      artifactsExpired: true,
+      dryRunResult: expect.any(Object),
+    }));
 
     const comparisonJobs = new ComparisonJobRepository(
       store.database,

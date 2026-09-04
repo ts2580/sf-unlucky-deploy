@@ -30,7 +30,7 @@ const DryRunFields = {
   targetOrgId: Type.Optional(Type.String({ minLength: 1 })),
   testLevel: Type.Optional(RequestedTestLevelSchema),
   tests: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-  waitMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 240 })),
+  waitMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 120 })),
   strict: Type.Optional(Type.Boolean()),
 };
 
@@ -158,6 +158,7 @@ const DeploymentJobSchema = Type.Object({
   startedAt: Type.Optional(Type.String()),
   updatedAt: Type.Optional(Type.String()),
   completedAt: Type.Optional(Type.String()),
+  artifactsExpired: Type.Optional(Type.Boolean()),
 }, { additionalProperties: true });
 
 export const DeploymentJobResponseSchema = Type.Object({ job: DeploymentJobSchema });
