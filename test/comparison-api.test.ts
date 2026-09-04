@@ -186,6 +186,42 @@ describe('비교 API', () => {
       expect(sfClient.calls.filter((args) =>
         args[0] === 'project' && args[1] === 'generate' && args[2] === 'manifest'))
         .toHaveLength(2);
+
+      const callsBeforeSourceOnly = sfClient.calls.length;
+      const sourceOnlyCreated = await server.inject({
+        method: 'POST',
+        url: '/api/v1/comparisons',
+        headers: { cookie, 'x-sfud-csrf': csrfToken },
+        payload: {
+          scope: 'all',
+          metadataType: 'ApexClass',
+          rightSourceId: 'org:right',
+          sourceOnly: true,
+        },
+      });
+      expect(sourceOnlyCreated.statusCode).toBe(202);
+      const sourceOnlyJobId = sourceOnlyCreated.json<{ job: { id: string } }>().job.id;
+      await server.sfudRuntime.comparisonQueue.onIdle();
+      const sourceOnlyCompleted = await server.inject({
+        url: `/api/v1/comparisons/${sourceOnlyJobId}`,
+        headers: { cookie },
+      });
+      expect(sourceOnlyCompleted.json()).toMatchObject({
+        job: {
+          mode: 'source',
+          status: 'SUCCEEDED',
+          left: { id: 'org:right' },
+          right: { id: 'org:right' },
+          result: { summary: { added: 1, total: 1 } },
+        },
+      });
+      const sourceOnlyCalls = sfClient.calls.slice(callsBeforeSourceOnly);
+      expect(sourceOnlyCalls.filter((args) =>
+        args[0] === 'project' && args[1] === 'generate' && args[2] === 'manifest'))
+        .toHaveLength(1);
+      expect(sourceOnlyCalls.filter((args) =>
+        args[0] === 'project' && args[1] === 'retrieve' && args[2] === 'start'))
+        .toEqual([expect.arrayContaining(['--target-org', 'right'])]);
     } finally {
       await server.close();
       await rm(root, { recursive: true, force: true });
