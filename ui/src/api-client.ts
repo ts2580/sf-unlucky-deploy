@@ -30,12 +30,24 @@ class ApiClientError extends Error {
   }
 }
 
+export class ApiClientTimeoutError extends ApiClientError {
+  public constructor(timeoutMs: number) {
+    super(`API 응답을 ${Math.ceil(timeoutMs / 1_000)}초 동안 받지 못했습니다. 요청은 서버에서 계속 처리될 수 있습니다.`, 0, 'CLIENT_TIMEOUT');
+    this.name = 'ApiClientTimeoutError';
+  }
+}
+
 export async function apiRequest<TResponse, TBody = never>(
   url: string,
   options: ApiRequestOptions<TBody> = {},
 ): Promise<TResponse> {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), options.timeoutMs ?? 30_000);
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  let timedOut = false;
+  const timeout = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   const abort = () => controller.abort();
   options.signal?.addEventListener('abort', abort, { once: true });
   if (options.signal?.aborted === true) abort();
@@ -82,6 +94,16 @@ export async function apiRequest<TResponse, TBody = never>(
       );
     }
     return payload as TResponse;
+  } catch (error) {
+    if (
+      timedOut
+      && options.signal?.aborted !== true
+      && error instanceof DOMException
+      && error.name === 'AbortError'
+    ) {
+      throw new ApiClientTimeoutError(timeoutMs);
+    }
+    throw error;
   } finally {
     window.clearTimeout(timeout);
     options.signal?.removeEventListener('abort', abort);

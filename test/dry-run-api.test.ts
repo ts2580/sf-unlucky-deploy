@@ -45,7 +45,7 @@ describe('dry-run API', () => {
       const created = await fixture.server.inject({
         method: 'POST',
         url: '/api/v1/deployments/dry-run',
-        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'dry-run-basic' },
         payload: {
           projectId,
           manifest: 'manifest/package.xml',
@@ -111,7 +111,7 @@ describe('dry-run API', () => {
 
       const created = await fixture.server.inject({
         method: 'POST', url: '/api/v1/deployments/dry-run',
-        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'dry-run-all' },
         payload: {
           scope: 'all', metadataType: 'ApexClass', sourceId, targetOrgId: 'org:target',
           testLevel: 'RunLocalTests', waitMinutes: 10,
@@ -148,7 +148,7 @@ describe('dry-run API', () => {
       const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
       const created = await fixture.server.inject({
         method: 'POST', url: '/api/v1/deployments/dry-run',
-        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'dry-run-selected' },
         payload: {
           scope: 'selected',
           components: [{ type: 'ApexClass', fullName: 'Hello' }],
@@ -430,7 +430,77 @@ describe('dry-run API', () => {
     }
   });
 
-  it('같은 Idempotency-Key 요청을 한 job과 한 번의 Salesforce 제출로 수렴시킨다', async () => {
+  it('같은 dry-run Idempotency-Key를 한 job과 한 번의 Salesforce 제출로 수렴시킨다', async () => {
+    const fixture = await createFixture(new DryRunSfClient());
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ sources: Array<{ id: string; kind: string }> }>();
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      const headers = {
+        cookie: auth.cookie,
+        'x-sfud-csrf': auth.csrfToken,
+        'idempotency-key': 'concurrent-dry-run-request',
+      };
+      const payload = {
+        scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+        sourceId, targetOrgId: 'org:target', testLevel: 'RunLocalTests', tests: [],
+      };
+
+      const [first, duplicate] = await Promise.all([
+        fixture.server.inject({ method: 'POST', url: '/api/v1/deployments/dry-run', headers, payload }),
+        fixture.server.inject({ method: 'POST', url: '/api/v1/deployments/dry-run', headers, payload }),
+      ]);
+      expect(first.statusCode).toBe(202);
+      expect(duplicate.statusCode).toBe(202);
+      const jobId = first.json<{ job: { id: string } }>().job.id;
+      expect(duplicate.json<{ job: { id: string } }>().job.id).toBe(jobId);
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+
+      expect(await fixture.server.sfudRuntime.store.database.get(`
+        SELECT COUNT(*) count FROM deployment_jobs WHERE client_request_id = ?
+      `, headers['idempotency-key'])).toEqual({ count: 1 });
+      expect(deploymentStartCalls(fixture.client.calls)).toHaveLength(1);
+
+      const retry = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/dry-run', headers, payload,
+      });
+      expect(retry.statusCode).toBe(202);
+      expect(retry.json<{ job: { id: string } }>().job.id).toBe(jobId);
+      expect(deploymentStartCalls(fixture.client.calls)).toHaveLength(1);
+
+      const conflict = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/dry-run', headers,
+        payload: { ...payload, strict: true },
+      });
+      expect(conflict.statusCode).toBe(409);
+      expect(conflict.json()).toMatchObject({ error: { code: 'IDEMPOTENCY_CONFLICT' } });
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('Idempotency-Key가 없는 dry-run 요청을 거부한다', async () => {
+    const fixture = await createFixture(new DryRunSfClient());
+    try {
+      const auth = await bootstrap(fixture.server);
+      const response = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/dry-run',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: {},
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ error: {
+        code: 'INVALID_DRY_RUN_REQUEST',
+        message: expect.stringContaining('Idempotency-Key'),
+      } });
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('같은 직접 배포 Idempotency-Key 요청을 한 job과 한 번의 Salesforce 제출로 수렴시킨다', async () => {
     const fixture = await createFixture(new DryRunSfClient());
     try {
       const auth = await bootstrap(fixture.server);
@@ -551,7 +621,7 @@ describe('dry-run API', () => {
       const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
       const dryRunResponse = await fixture.server.inject({
         method: 'POST', url: '/api/v1/deployments/dry-run',
-        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'dry-run-identity' },
         payload: {
           scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
           sourceId, targetOrgId: 'org:target', testLevel: 'RunLocalTests',
@@ -594,7 +664,7 @@ describe('dry-run API', () => {
       const created = await fixture.server.inject({
         method: 'POST',
         url: '/api/v1/deployments/dry-run',
-        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'dry-run-failure' },
         payload: {
           projectId: workspace.projects[0]!.id,
           manifest: 'manifest/package.xml',
@@ -623,7 +693,7 @@ describe('dry-run API', () => {
       })).json<{ projects: Array<{ id: string }>; sources: Array<{ id: string; kind: string }> }>();
       const created = await fixture.server.inject({
         method: 'POST', url: '/api/v1/deployments/dry-run',
-        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'dry-run-diagnostics' },
         payload: {
           projectId: workspace.projects[0]!.id,
           manifest: 'manifest/package.xml',
@@ -664,7 +734,7 @@ describe('dry-run API', () => {
       })).json<{ projects: Array<{ id: string }>; sources: Array<{ id: string; kind: string }> }>();
       const created = await fixture.server.inject({
         method: 'POST', url: '/api/v1/deployments/dry-run',
-        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'dry-run-ambiguous' },
         payload: {
           projectId: workspace.projects[0]!.id, manifest: 'manifest/package.xml',
           sourceId: workspace.sources.find((source) => source.kind === 'local')!.id,

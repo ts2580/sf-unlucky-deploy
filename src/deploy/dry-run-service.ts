@@ -39,6 +39,7 @@ export interface CreateDryRunInput {
   waitMinutes: number;
   strict: boolean;
   createdBy: string;
+  clientRequestId: string;
 }
 
 export interface CreateDirectDeploymentInput extends CreateDryRunInput {
@@ -77,10 +78,10 @@ export class DryRunService {
   public async create(input: CreateDryRunInput): Promise<DeploymentJob> {
     this.coordinator.assertAccepting();
     const prepared = await this.prepare(input);
-    let job: DeploymentJob;
+    let creation: { job: DeploymentJob; created: boolean };
     try {
       this.coordinator.assertAccepting();
-      job = await this.jobs.createDryRun({
+      creation = await this.jobs.createIdempotentDryRun({
         source: prepared.source,
         targetAlias: prepared.targetAlias,
         manifestPath: prepared.manifestPath,
@@ -88,6 +89,8 @@ export class DryRunService {
         targetOrgIdentity: prepared.targetOrgIdentity,
         ...(prepared.sourceOrgIdentity === undefined ? {} : { sourceOrgIdentity: prepared.sourceOrgIdentity }),
         createdBy: input.createdBy,
+        clientRequestId: input.clientRequestId,
+        requestHash: prepared.requestChecksum,
         scope: prepared.scope === 'all' ? 'ALL' : 'MANIFEST',
         ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
         ...(prepared.selectedComponents === undefined ? {} : { selectedComponents: prepared.selectedComponents }),
@@ -95,6 +98,12 @@ export class DryRunService {
     } catch (error) {
       prepared.releaseSources();
       throw error;
+    }
+
+    const { job } = creation;
+    if (!creation.created) {
+      prepared.releaseSources();
+      return job;
     }
 
     void this.coordinator.runDryRun(job.id, async (signal) => {

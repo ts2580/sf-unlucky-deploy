@@ -12,7 +12,6 @@ import {
 } from '../../api/deployment-contracts.js';
 import { SfudError } from '../../core/errors.js';
 import type { DeploymentJob } from '../../deploy/deployment-job-repository.js';
-import { apexCoverageSummary } from '../../deploy/test-coverage.js';
 import { redactSensitiveText } from '../../salesforce/sf-client.js';
 import { requireAuthenticatedSession } from './auth-routes.js';
 
@@ -36,6 +35,7 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
       } });
     }
     try {
+      const clientRequestId = idempotencyKey(request.headers['idempotency-key']);
       const settings = await app.sfudRuntime.settings.get(session.user.id);
       const job = await app.sfudRuntime.dryRuns.create({
         ...(request.body?.projectId === undefined ? {} : { projectId: request.body.projectId }),
@@ -55,11 +55,13 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
         waitMinutes: request.body?.waitMinutes ?? 60,
         strict: request.body?.strict === true,
         createdBy: session.user.id,
+        clientRequestId,
       });
       return reply.code(202).send({ job: publicJob(app, job, false) });
     } catch (error) {
-      return reply.code(400).send({ error: {
-        code: 'INVALID_DRY_RUN_REQUEST',
+      const conflict = error instanceof SfudError && error.code === 'IDEMPOTENCY_CONFLICT';
+      return reply.code(conflict ? 409 : 400).send({ error: {
+        code: conflict ? 'IDEMPOTENCY_CONFLICT' : 'INVALID_DRY_RUN_REQUEST',
         message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
       } });
     }
@@ -167,11 +169,11 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
   }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
-    const job = await app.sfudRuntime.deploymentJobs.get(request.params.id);
+    const job = await app.sfudRuntime.deploymentJobs.getSummary(request.params.id);
     if (job === undefined) {
       return reply.code(404).send({ error: { code: 'DEPLOYMENT_JOB_NOT_FOUND', message: '배포 작업을 찾을 수 없습니다.' } });
     }
-    return reply.send({ job: publicJob(app, job, true) });
+    return reply.send({ job: publicJob(app, job, false) });
   });
 
   app.post<{ Params: { id: string } }>(
@@ -204,9 +206,6 @@ function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: b
     left: { ...job.comparisonResult.left, displayName: target.label },
     right: { ...job.comparisonResult.right, displayName: source.label },
   } : undefined;
-  const testCoverage = job.dryRunResult === undefined
-    ? undefined
-    : apexCoverageSummary(job.dryRunResult)?.minimumPercentage;
   return {
     id: job.id,
     kind: job.kind,
@@ -229,7 +228,7 @@ function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: b
     ...(job.persistenceWarning === undefined ? {} : { persistenceWarning: job.persistenceWarning }),
     ...(job.progress === undefined ? {} : { progress: job.progress }),
     ...(job.testPlan === undefined ? {} : { testPlan: job.testPlan }),
-    ...(testCoverage === undefined ? {} : { testCoverage }),
+    ...(job.testCoverage === undefined ? {} : { testCoverage: job.testCoverage }),
     ...(job.comparisonSummary === undefined ? {} : { comparisonSummary: job.comparisonSummary }),
     ...(comparison === undefined ? {} : { comparison }),
     ...(includeArtifacts && job.dryRunResult !== undefined ? { dryRunResult: job.dryRunResult } : {}),

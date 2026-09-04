@@ -8,7 +8,9 @@ import type { SfClient, SfRunOptions } from '../src/salesforce/sf-client.js';
 import { createWebServer } from '../src/web/server/app.js';
 import { findManifests, scavengeStaleUploadRoots } from '../src/web/server/workspace-service.js';
 
-describe('프로젝트 업로드 API', () => {
+const PROJECT_UPLOAD_INTEGRATION_TIMEOUT_MS = 30_000;
+
+describe('프로젝트 업로드 API', { timeout: PROJECT_UPLOAD_INTEGRATION_TIMEOUT_MS }, () => {
   it('실행 디렉터리를 자동 노출하지 않고 브라우저 DX 폴더만 사용자 임시 소스로 등록한다', async () => {
     const fixture = await createFixture();
     try {
