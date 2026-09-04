@@ -9,6 +9,7 @@ import {
 import { runInImmediateTransaction } from '../storage/transaction.js';
 import type { ComparisonResult, ComparisonSummary } from '../metadata/comparator.js';
 import type { ApexTestPlan, RequestedTestLevel } from './test-plan.js';
+import { apexCoverageSummary } from './test-coverage.js';
 import type { SelectedMetadataComponent } from './selected-manifest.js';
 import type { SalesforceDeploymentProgress } from './salesforce-deployment.js';
 import type { OrgIdentitySnapshot } from './org-identity.js';
@@ -56,6 +57,7 @@ export interface DeploymentJob {
   dryRunArtifactPath?: string;
   deploymentArtifactPath?: string;
   comparisonSummary?: ComparisonSummary;
+  testCoverage?: number;
   comparisonResult?: ComparisonResult;
   testPlan?: ApexTestPlan;
   dryRunResult?: unknown;
@@ -153,9 +155,24 @@ interface DeploymentJobRow {
   summary_identical: number | null;
   summary_total: number | null;
   summary_different: number | null;
+  test_coverage: number | null;
 }
 
 const DRY_RUN_APPROVAL_TTL_MS = 30 * 60 * 1_000;
+const DEPLOYMENT_JOB_SUMMARY_COLUMNS = `
+  id, kind, status, source, target_alias, manifest_path, scope, metadata_type,
+  payload_checksum, run_directory, salesforce_deployment_id, dry_run_job_id, created_by,
+  error_code, error_message, created_at, updated_at, started_at, completed_at, is_prepared,
+  NULL AS comparison_result_json, NULL AS comparison_artifact_path,
+  test_plan_json,
+  NULL AS dry_run_result_json, NULL AS dry_run_artifact_path,
+  selected_components_json,
+  NULL AS deployment_result_json, NULL AS deployment_artifact_path,
+  progress_json, remote_status, persistence_warning,
+  source_org_identity_json, target_org_identity_json,
+  summary_added, summary_removed, summary_modified, summary_identical, summary_total, summary_different,
+  test_coverage
+`;
 
 const ALLOWED_TRANSITIONS: Record<DeploymentJobStatus, ReadonlySet<DeploymentJobStatus>> = {
   QUEUED: new Set(['DRY_RUN_RUNNING', 'DEPLOYING', 'FAILED']),
@@ -207,7 +224,9 @@ export class DeploymentJobRepository {
         payloadChecksum: input.payloadChecksum,
       }, timestamp);
     });
-    return this.notify(await this.getRequired(id));
+    const job = await this.getRequired(id);
+    await this.notifyById(id);
+    return job;
   }
 
   public async createDirectDeployment(
@@ -302,6 +321,22 @@ export class DeploymentJobRepository {
     return job;
   }
 
+  public async getSummary(id: string): Promise<DeploymentJob | undefined> {
+    const row = await this.database.get<DeploymentJobRow>(`
+      SELECT ${DEPLOYMENT_JOB_SUMMARY_COLUMNS}
+      FROM deployment_jobs WHERE id = ?
+    `, id);
+    return row === undefined ? undefined : mapDeploymentJob(row);
+  }
+
+  public async getRequiredSummary(id: string): Promise<DeploymentJob> {
+    const job = await this.getSummary(id);
+    if (job === undefined) {
+      throw new SfudError('INVALID_ARGUMENT', `배포 작업을 찾을 수 없습니다: ${id}`);
+    }
+    return job;
+  }
+
   public async transition(
     id: string,
     nextStatus: DeploymentJobStatus,
@@ -352,7 +387,7 @@ export class DeploymentJobRepository {
         ...(details.persistenceWarning === undefined ? {} : { persistenceWarning: details.persistenceWarning }),
       }, timestamp);
     });
-    return this.notify(await this.getRequired(id));
+    return await this.notifyById(id);
   }
 
   public async recordDryRunArtifacts(input: {
@@ -376,7 +411,7 @@ export class DeploymentJobRepository {
             comparison_result_json = NULL, comparison_artifact_path = ?,
             test_plan_json = ?, dry_run_result_json = NULL, dry_run_artifact_path = ?,
             summary_added = ?, summary_removed = ?, summary_modified = ?,
-            summary_identical = ?, summary_total = ?, summary_different = ?, updated_at = ?
+            summary_identical = ?, summary_total = ?, summary_different = ?, test_coverage = ?, updated_at = ?
         WHERE id = ? AND kind = 'DRY_RUN' AND status = 'DRY_RUN_RUNNING' AND is_prepared = 0
       `,
       input.payloadChecksum,
@@ -390,6 +425,7 @@ export class DeploymentJobRepository {
       input.comparisonResult.summary.identical,
       input.comparisonResult.summary.total,
       input.comparisonResult.summary.different,
+      apexCoverageSummary(input.dryRunResult)?.minimumPercentage ?? null,
       timestamp,
       input.id);
       if (result.changes !== 1) {
@@ -402,7 +438,7 @@ export class DeploymentJobRepository {
         different: input.comparisonResult.summary.different,
       }, timestamp);
     });
-    this.notify(await this.getRequired(input.id));
+    await this.notifyById(input.id);
   }
 
   public async approveAndQueueDeployment(input: ApproveDeploymentInput): Promise<DeploymentJob> {
@@ -471,12 +507,13 @@ export class DeploymentJobRepository {
           comparison_result_json, comparison_artifact_path, test_plan_json,
           dry_run_result_json, dry_run_artifact_path,
           summary_added, summary_removed, summary_modified, summary_identical, summary_total, summary_different,
+          test_coverage,
           source_org_identity_json, target_org_identity_json, created_by, created_at, updated_at
         ) VALUES (
           ?, 'DEPLOY', 'QUEUED',
           ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,
           ?, ?, ?, ?, ?,
-          ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?
         )
       `,
@@ -505,6 +542,7 @@ export class DeploymentJobRepository {
         dryRun.comparisonSummary?.identical ?? null,
         dryRun.comparisonSummary?.total ?? null,
         dryRun.comparisonSummary?.different ?? null,
+        dryRun.testCoverage ?? null,
         dryRun.sourceOrgIdentity === undefined ? null : JSON.stringify(dryRun.sourceOrgIdentity),
         JSON.stringify(dryRun.targetOrgIdentity),
         input.approvedBy,
@@ -537,12 +575,14 @@ export class DeploymentJobRepository {
       }
       throw error;
     }
-    return this.notify(await this.getRequired(deployJobId));
+    const job = await this.getRequired(deployJobId);
+    await this.notifyById(deployJobId);
+    return job;
   }
 
   public async recordDeploymentResult(id: string, deploymentResult: unknown): Promise<void> {
     const timestamp = this.now();
-    const current = await this.getRequired(id);
+    const current = await this.getRequiredSummary(id);
     const deploymentArtifactPath = current.runDirectory === undefined
       ? undefined
       : await writeCompressedJsonArtifact(
@@ -562,7 +602,7 @@ export class DeploymentJobRepository {
     if (result.changes !== 1) {
       throw new SfudError('INVALID_JOB_STATE', '실제 배포 결과를 기록할 수 없는 작업 상태입니다.');
     }
-    this.notify(await this.getRequired(id));
+    await this.notifyById(id);
   }
 
   public async recordSalesforceProgress(
@@ -578,7 +618,7 @@ export class DeploymentJobRepository {
     if (result.changes !== 1) {
       throw new SfudError('INVALID_JOB_STATE', 'Salesforce 배포 진행 상태를 기록할 수 없는 작업 상태입니다.');
     }
-    this.notify(await this.getRequired(id));
+    await this.notifyById(id);
   }
 
   public async recordSalesforceSubmission(id: string, deploymentId: string): Promise<void> {
@@ -620,6 +660,7 @@ export class DeploymentJobRepository {
         UPDATE deployment_jobs
         SET progress_json = ?, salesforce_deployment_id = ?, remote_status = ?,
             deployment_result_json = CASE WHEN kind = 'DEPLOY' THEN ? ELSE deployment_result_json END,
+            test_coverage = CASE WHEN kind = 'DRY_RUN' THEN ? ELSE test_coverage END,
             persistence_warning = COALESCE(?, persistence_warning), updated_at = ?
         WHERE id = ? AND status = 'RECONCILE_REQUIRED'
       `,
@@ -627,6 +668,7 @@ export class DeploymentJobRepository {
       input.progress.deploymentId,
       remoteStatusFromProgress(input.progress),
       JSON.stringify(input.report),
+      apexCoverageSummary(input.report)?.minimumPercentage ?? null,
       input.persistenceWarning ?? null,
       timestamp,
       input.id);
@@ -636,7 +678,9 @@ export class DeploymentJobRepository {
         done: input.progress.done,
       }, timestamp);
     });
-    return this.notify(await this.getRequired(input.id));
+    const job = await this.getRequired(input.id);
+    await this.notifyById(input.id);
+    return job;
   }
 
   public async recordDirectDeploymentArtifacts(input: {
@@ -665,7 +709,7 @@ export class DeploymentJobRepository {
             dry_run_result_json = NULL, dry_run_artifact_path = ?,
             deployment_result_json = NULL, deployment_artifact_path = ?,
             summary_added = ?, summary_removed = ?, summary_modified = ?,
-            summary_identical = ?, summary_total = ?, summary_different = ?, updated_at = ?
+            summary_identical = ?, summary_total = ?, summary_different = ?, test_coverage = ?, updated_at = ?
         WHERE id = ? AND kind = 'DEPLOY' AND dry_run_job_id IS NULL AND status = 'DEPLOYING'
       `,
       input.payloadChecksum,
@@ -680,6 +724,9 @@ export class DeploymentJobRepository {
       input.comparisonResult.summary.identical,
       input.comparisonResult.summary.total,
       input.comparisonResult.summary.different,
+      input.dryRunResult === undefined
+        ? null
+        : apexCoverageSummary(input.dryRunResult)?.minimumPercentage ?? null,
       timestamp,
       input.id);
       if (result.changes !== 1) {
@@ -693,7 +740,7 @@ export class DeploymentJobRepository {
         different: input.comparisonResult.summary.different,
       }, timestamp);
     });
-    this.notify(await this.getRequired(input.id));
+    await this.notifyById(input.id);
   }
 
   public async recoverInterruptedJobs(): Promise<number> {
@@ -739,13 +786,13 @@ export class DeploymentJobRepository {
       throw new SfudError('INVALID_ARGUMENT', '조회 개수는 1부터 200 사이여야 합니다.');
     }
     return (await this.database.all<DeploymentJobRow[]>(`
-      SELECT id, kind, status, source, target_alias, manifest_path, scope, metadata_type,
-        payload_checksum, run_directory, salesforce_deployment_id, dry_run_job_id, created_by,
-        error_code, error_message, created_at, updated_at, started_at, completed_at, is_prepared,
-        remote_status, persistence_warning,
-        summary_added, summary_removed, summary_modified, summary_identical, summary_total, summary_different
+      SELECT ${DEPLOYMENT_JOB_SUMMARY_COLUMNS}
       FROM deployment_jobs ORDER BY created_at DESC, id DESC LIMIT ?
     `, limit)).map(mapDeploymentJob);
+  }
+
+  private async notifyById(id: string): Promise<DeploymentJob> {
+    return this.notify(await this.getRequiredSummary(id));
   }
 
   private notify(job: DeploymentJob): DeploymentJob {
@@ -845,6 +892,7 @@ function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
       ? {}
       : { deploymentArtifactPath: row.deployment_artifact_path }),
     ...(comparisonSummary === undefined ? {} : { comparisonSummary }),
+    ...(row.test_coverage === null ? {} : { testCoverage: row.test_coverage }),
     ...(comparisonResult === undefined ? {} : { comparisonResult }),
     ...(row.test_plan_json == null ? {} : { testPlan: JSON.parse(row.test_plan_json) as ApexTestPlan }),
     ...(row.dry_run_result_json == null ? {} : { dryRunResult: JSON.parse(row.dry_run_result_json) as unknown }),

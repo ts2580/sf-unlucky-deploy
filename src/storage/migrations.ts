@@ -379,6 +379,14 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE deployment_jobs ADD COLUMN deployment_artifact_path TEXT;
     `,
   },
+  {
+    version: 17,
+    name: 'deployment_test_coverage_summary',
+    sql: `
+      ALTER TABLE deployment_jobs ADD COLUMN test_coverage REAL
+      CHECK (test_coverage IS NULL OR (test_coverage >= 0 AND test_coverage <= 100));
+    `,
+  },
 ];
 
 export async function applyMigrations(

@@ -43,8 +43,8 @@ export class DeploymentService {
     void this.coordinator.runDeployment(job.id, async (signal) => {
       const persistenceWarnings: string[] = [];
       try {
-        const current = await this.jobs.getRequired(job.id);
-        const dryRun = await this.jobs.getRequired(requiredString(current.dryRunJobId, 'dry-run 작업'));
+        const current = await this.jobs.getRequiredSummary(job.id);
+        const dryRun = await this.jobs.getRequiredSummary(requiredString(current.dryRunJobId, 'dry-run 작업'));
         const packageRoot = await this.resolvePreparedPackageRoot(dryRun);
         const actualChecksum = await sha256Directory(packageRoot);
         if (actualChecksum !== current.payloadChecksum) {

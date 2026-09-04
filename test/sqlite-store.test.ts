@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -46,7 +46,7 @@ describe('SQLite 저장소', () => {
     expect(await store.database.get('PRAGMA journal_mode')).toEqual({ journal_mode: 'wal' });
     expect(await store.database.get('PRAGMA busy_timeout')).toEqual({ timeout: 5_000 });
     expect(await store.database.get('SELECT COUNT(*) count FROM schema_migrations'))
-      .toEqual({ count: 16 });
+      .toEqual({ count: 17 });
     if (process.platform !== 'win32') {
       expect((await stat(path.dirname(databasePath))).mode & 0o777).toBe(0o700);
       expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -127,6 +127,13 @@ describe('SQLite 저장소', () => {
     expect(deploymentStorage).toMatchObject({ comparisonJson: null, dryRunJson: null });
     expect(deploymentStorage?.comparisonPath).toMatch(/comparison\.json\.gz$/u);
     expect(deploymentStorage?.dryRunPath).toMatch(/dry-run\.json\.gz$/u);
+
+    await writeFile(deploymentStorage!.comparisonPath, 'invalid compressed artifact');
+    await expect(deploymentJobs.getSummary(dryRun.id)).resolves.toEqual(expect.objectContaining({
+      id: dryRun.id,
+      comparisonSummary: comparisonResult.summary,
+    }));
+    await expect(deploymentJobs.getRequired(dryRun.id)).rejects.toThrow();
 
     const comparisonJobs = new ComparisonJobRepository(
       store.database,
