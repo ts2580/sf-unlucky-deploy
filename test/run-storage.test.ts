@@ -17,6 +17,26 @@ afterEach(async () => {
 });
 
 describe('run storage policy', () => {
+  it('동시에 정리해도 사라진 경로를 건너뛰며 보호된 payload를 삭제하지 않는다', async () => {
+    const root = await temporaryRoot();
+    const protectedRun = await runDirectory(root, 'active', 80, 1_000);
+    for (let i = 0; i < 15; i += 1) await runDirectory(root, `expired-${i}`, 80, 1_000);
+    const policy = { retentionMs: 5_000, maxBytes: 1, minFreeBytes: 1 };
+    await Promise.all(Array.from({ length: 8 }, () => prepareRunStorage(
+      root, policy, () => 10_000, async () => new Set([protectedRun]),
+    )));
+    await expect(access(path.join(protectedRun, 'artifact.bin'))).resolves.toBeUndefined();
+  });
+
+  it('보호 목록 조회가 실패하면 삭제를 시작하지 않는다', async () => {
+    const root = await temporaryRoot();
+    const active = await runDirectory(root, 'active', 80, 1_000);
+    await expect(prepareRunStorage(root, { retentionMs: 1, maxBytes: 1, minFreeBytes: 1 }, () => 10_000,
+      async () => { throw new Error('database offline'); },
+    )).rejects.toThrow('database offline');
+    await expect(access(active)).resolves.toBeUndefined();
+  });
+
   it('보존 기간이 지난 실행과 quota를 넘긴 오래된 실행부터 정리한다', async () => {
     const root = await temporaryRoot();
     const expired = await runDirectory(root, 'expired', 80, 1_000);

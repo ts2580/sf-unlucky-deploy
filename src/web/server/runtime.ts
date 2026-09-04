@@ -5,7 +5,6 @@ import { openSqliteStore, type SqliteStore } from '../../storage/sqlite-store.js
 import { UserRepository } from '../../storage/user-repository.js';
 import { AuthService } from '../../auth/auth-service.js';
 import { randomBytes } from 'node:crypto';
-import path from 'node:path';
 import { ProcessSfClient, type SfClient } from '../../salesforce/sf-client.js';
 import { ComparisonJobRepository } from '../../compare/comparison-job-repository.js';
 import { ComparisonService } from '../../compare/comparison-service.js';
@@ -14,7 +13,7 @@ import { DryRunService } from '../../deploy/dry-run-service.js';
 import { DeploymentService } from '../../deploy/deployment-service.js';
 import { WorkflowEventHub } from './workflow-events.js';
 import { UserSettingsRepository } from '../../storage/user-settings-repository.js';
-import { prepareRunStorage } from '../../storage/run-storage.js';
+import { RuntimeRunStorage } from '../../storage/runtime-run-storage.js';
 
 export interface WebRuntime {
   store: SqliteStore;
@@ -82,11 +81,15 @@ export async function createWebRuntime(
   );
   const recoveredComparisonCount = await comparisonJobs.recoverInterrupted();
   const comparisonQueue = new SingleJobQueue();
-  const runsDirectory = path.join(
-    path.dirname(databasePath === ':memory:' ? path.join(cwd, '.sfud', 'sfud.db') : databasePath),
-    'runs',
-  );
-  await prepareRunStorage(runsDirectory);
+  let runStorage: RuntimeRunStorage;
+  try {
+    runStorage = await RuntimeRunStorage.create(databasePath, store.database);
+  } catch (error) {
+    await workspace.close();
+    await store.close();
+    throw error;
+  }
+  const runsDirectory = runStorage.directory;
   const deploymentCoordinator = new DeploymentCoordinator(deploymentJobs, deploymentQueue);
   let shutdownRequest: Promise<void> | undefined;
   const runtime: WebRuntime = {
@@ -143,13 +146,19 @@ export async function createWebRuntime(
             throw new Error('실행 중인 작업이 종료 제한시간 안에 중단되지 않았습니다. 저장소를 닫지 않습니다.');
           }
         }
+        await deploymentCoordinator.flushCompletions();
         await deploymentJobs.recoverInterruptedJobs();
         await comparisonJobs.recoverInterrupted();
         await workspace.close();
+        await runStorage.close();
         await store.close();
-      })();
+      })().catch((error: unknown) => {
+        shutdownRequest = undefined;
+        throw error;
+      });
       return shutdownRequest;
     },
   };
+  runStorage.start();
   return runtime;
 }

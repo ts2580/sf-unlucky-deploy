@@ -390,6 +390,48 @@ describe('dry-run API', () => {
     }
   });
 
+  it('실제 배포 완료 상태 저장 실패를 재확인 가능하게 남기고 재제출 없이 복구한다', async () => {
+    const fixture = await createFixture(new DryRunSfClient());
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ sources: Array<{ id: string; kind: string }> }>();
+      const jobs = fixture.server.sfudRuntime.deploymentJobs;
+      const transition = jobs.transition.bind(jobs);
+      let failCompletion = true;
+      vi.spyOn(jobs, 'transition').mockImplementation(async (id, status, details) => {
+        if (status === 'SUCCEEDED' && failCompletion) throw new Error('database locked');
+        return transition(id, status, details);
+      });
+      const created = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/direct',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'direct-completion-failure' },
+        payload: {
+          scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+          sourceId: workspace.sources.find((source) => source.kind === 'local')!.id,
+          targetOrgId: 'org:target', testLevel: 'NoTestRun', tests: [],
+          targetConfirmation: 'target', confirmation: '실제 배포',
+        },
+      });
+      expect(created.statusCode).toBe(202);
+      const id = created.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+      expect(await jobs.getRequiredSummary(id)).toMatchObject({
+        status: 'RECONCILE_REQUIRED', remoteStatus: 'SUCCEEDED', salesforceDeploymentId: '0Af-deploy',
+      });
+      failCompletion = false;
+      const reconciled = await fixture.server.inject({
+        method: 'POST', url: `/api/v1/deployment-jobs/${id}/reconcile`,
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+      });
+      expect(reconciled.statusCode).toBe(200);
+      expect(reconciled.json()).toMatchObject({ job: { status: 'SUCCEEDED' } });
+      await fixture.server.sfudRuntime.deploymentCoordinator.flushCompletions();
+      expect(fixture.client.calls.filter((call) => call.args[1] === 'deploy' && call.args[2] === 'start')).toHaveLength(1);
+    } finally { vi.restoreAllMocks(); await fixture.close(); }
+  });
+
   it('원격 성공 뒤 상세 artifact 저장이 실패해도 작업을 FAILED로 바꾸지 않는다', async () => {
     const fixture = await createFixture(new DryRunSfClient());
     try {

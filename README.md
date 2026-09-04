@@ -395,6 +395,11 @@ mtime과 이전 프로세스 생존 여부를 확인해 stale upload만 정리�
 gzip artifact로 분리하며 최근 작업 목록은 별도 summary column만 조회한다. 기본 run 보존 기간은
 7일, 전체 상한은 5GB, 새 snapshot 시작에 필요한 최소 여유 공간은 512MB다. 각각
 `SFUD_RUN_RETENTION_HOURS`, `SFUD_RUN_MAX_BYTES`, `SFUD_RUN_MIN_FREE_BYTES`로 조정할 수 있다.
+웹 작업 실행 기록 정리는 서버 시작 시와 실행 중 1분마다 수행한다. 실행 중·재확인 대기 작업, 승인
+유효시간 내 dry-run, 대기·진행 중 배포가 참조하는 원본 payload와 공유 `selected-manifests`
+입력 디렉터리, DB가 추적하지 않는 CLI 실행 폴더는 삭제하지 않는다. 따라서 5GB는 정리 목표이며 보호된 자료가 많으면 이를
+초과할 수 있다. 메모리 DB를 사용하는 테스트 서버는 인스턴스마다 별도 임시 파일 저장소를
+사용하고 종료 시 해당 저장소만 제거한다.
 SQLite에는 다음 설정을 적용한다.
 
 ```text
@@ -510,6 +515,11 @@ deploy:  QUEUED → DEPLOYING → SUCCEEDED | FAILED | RECONCILE_REQUIRED
 ```
 
 실제 배포 승인은 성공한 dry-run, 동일한 payload SHA-256, 동일한 target org, `DEPLOYER` 또는 `ADMIN` 역할과 `실제 배포` 확인 문구를 모두 요구한다. Salesforce access token과 auth URL은 SQLite에도 저장하지 않는다.
+
+Salesforce 성공 후 마지막 완료 상태 저장이 실패하면 원격 결과와 배포 ID를 보존하고
+`RECONCILE_REQUIRED` 전환을 시도한다. 이후 1초마다 DB 저장만 재시도하며 Salesforce 작업을
+재제출하지 않는다. DB 전체 장애 중에는 확인된 결과를 메모리에 유지하고, 저장이 복구되기
+전까지 정상 종료 시 DB를 닫지 않는다. 저장 지연으로 dry-run 승인 유효시간이 늘어나지는 않는다.
 
 ## 개발 명령
 
