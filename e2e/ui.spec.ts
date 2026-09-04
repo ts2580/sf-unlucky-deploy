@@ -48,23 +48,37 @@ test('큰 화면의 작업 공간을 활용하고 좁은 화면에서는 패널�
   await mockResponsiveWorkspace(page);
   await login(page, '/deploy');
   await expect(page.getByRole('combobox', { name: 'Salesforce metadata type' })).toHaveValue('ApexClass');
+  await expect(page.getByText('검색한 메타데이터를 배포 대상으로 선택합니다.')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: '소스와 타겟', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '실행 현황', exact: true })).toHaveCount(0);
+  await expect(page.locator('.content > .page-stack > :first-child')).toHaveAttribute('aria-labelledby', 'workflow-status-heading');
+  const approval = page.getByRole('region', { name: 'Target 바로 배포' });
+  await expect(approval).toContainText('NoTestRun 배포 · 프로덕션 org에서 거부될 수 있습니다.');
+  await expect(approval).toContainText('선택한 Target에 실제 반영됩니다. 브라우저를 닫아도 배포는 계속됩니다.');
+  await expect(page.getByText('TARGET ONLY는 선택할 수 없습니다.')).toBeVisible();
   for (const width of [2560, 2200, 2199, 1920, 1536, 1280, 1201, 1200, 1024, 980, 768, 701, 700, 430, 390, 360, 320]) {
     await page.setViewportSize({ width, height: width < 700 ? 844 : 1440 });
     const metrics = await page.evaluate(() => {
       const box = (selector: string) => {
         const rect = document.querySelector(selector)!.getBoundingClientRect();
-        return { x: rect.x, y: rect.y, width: rect.width, right: rect.right, bottom: rect.bottom };
+        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, right: rect.right, bottom: rect.bottom };
       };
       return {
         overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
         body: box('.app-body'), content: box('.content'), workspace: box('.deploy-workspace'),
         source: box('.deploy-source-panel'), search: box('.deploy-search-panel'),
         summary: box('.deploy-summary'), button: box('.comparison-run-button'),
-        options: box('.comparison-controls-row .option-grid'),
+        options: box('.comparison-controls-row .option-toggle:nth-child(2)'),
+        status: box('.workflow-status-panel'), steps: box('.deployment-steps'),
       };
     });
     expect(metrics.overflow, `${width}px 가로 넘침`).toBe(false);
     expect(metrics.button.right).toBeLessThan(metrics.search.right);
+    expect(Math.abs(metrics.button.width - metrics.options.width), `${width}px 버튼 너비`).toBeLessThan(1);
+    expect(Math.abs(metrics.button.height - metrics.options.height), `${width}px 버튼 높이`).toBeLessThan(1);
+    expect(metrics.status.bottom).toBeLessThanOrEqual(metrics.steps.y);
+    expect(metrics.status.bottom).toBeLessThanOrEqual(metrics.source.y);
+    expect(metrics.status.bottom).toBeLessThanOrEqual(metrics.summary.y);
     if (width > 1200) {
       expect(metrics.content.width / metrics.body.width, `${width}px 본문 사용 비율`).toBeGreaterThan(.9);
       expect(metrics.content.x - metrics.body.x).toBeLessThanOrEqual(49);
@@ -134,7 +148,8 @@ test('320~430px 모바일에서 주요 화면과 컨트롤이 화면 안에 표�
 
 test('메뉴마다 독립 URL과 화면을 제공한다', async ({ page }) => {
   await login(page, '/compare');
-  await expect(page.getByRole('heading', { name: '검색한 메타데이터를 배포 대상으로 선택합니다.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '작업 현황', exact: true })).toBeVisible();
+  await expect(page.getByText('검색한 메타데이터를 배포 대상으로 선택합니다.')).toHaveCount(0);
   await expect(page.getByRole('link', { name: '비교 및 배포', exact: true })).toHaveAttribute('aria-current', 'page');
   await expect(page.getByText(/metadata type을 바꿔가며 필요한 컴포넌트를 선택하고/u)).toHaveCount(0);
   await expect(page.getByText('desired source를 기준으로 target org에 적용할 차이를 계산합니다.')).toHaveCount(0);
@@ -369,7 +384,7 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   expect(mobileCurrentTypeToggleBox!.y + mobileCurrentTypeToggleBox!.height).toBeLessThan(mobileIdenticalToggleBox!.y);
   expect(mobileIdenticalToggleBox!.y + mobileIdenticalToggleBox!.height).toBeLessThan(mobileComparisonButtonBox!.y);
   expect(mobileComparisonButtonBox!.y + mobileComparisonButtonBox!.height).toBeLessThan(mobileApexTestOptionsBox!.y);
-  const workflowStatus = page.getByRole('region', { name: '실행 현황' });
+  const workflowStatus = page.getByRole('region', { name: '작업 현황' });
   await expect(workflowStatus).toBeVisible();
   await expect(workflowStatus.getByText('실시간 연결')).toBeVisible();
   await expect(workflowStatus.getByText(/SSE 연결이 끊기면/u)).toHaveCount(0);
@@ -686,7 +701,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await apexTests.getByRole('checkbox', { name: 'Hello_Test' }).check();
   await expect(page.getByLabel('테스트 클래스 직접 입력')).toHaveValue('Hello_Test');
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeEnabled();
-  await expect(page.getByText('코드 커버리지 75% 이상일 때만 배포합니다.')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Target 바로 배포' })).toContainText('선택한 테스트 통과 · 커버리지 75% 이상 필요.');
   await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
   await expect(page.getByRole('button', { name: '배포 요청 중……' })).toBeVisible({ timeout: 300 });
   await expect(page.getByLabel('실제 배포 현황')).toContainText('요청 제출 중');
@@ -713,6 +728,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   expect(dryRunStatusBox!.y + dryRunStatusBox!.height).toBeLessThanOrEqual(dryRunButtonBox!.y);
   await expect(page.getByText('Salesforce check-only 실행 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Salesforce dry-run 성공' })).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByRole('region', { name: 'Target 바로 배포' })).toContainText('Dry-run을 통과한 동일 payload를 배포합니다.');
   await expect(page.getByLabel('Dry-run 현황')).toContainText('Dry-run 성공 · 배포 가능 · 소요시간 1시간 2분 8초');
   const result = page.getByLabel('Salesforce dry-run 성공');
   await expect(result.getByText('RunSpecifiedTests', { exact: true })).toBeVisible();

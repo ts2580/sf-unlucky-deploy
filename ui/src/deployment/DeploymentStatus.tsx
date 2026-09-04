@@ -45,7 +45,7 @@ export function WorkflowStatusPanel({
   return (
     <section className="workflow-status-panel" aria-labelledby="workflow-status-heading" aria-live="polite">
       <div className="workflow-status-head">
-        <div><span className="card-icon icon-blue"><Icon name="activity" /></span><span><h2 id="workflow-status-heading">실행 현황</h2></span></div>
+        <div><span className="card-icon icon-blue"><Icon name="activity" /></span><span><h2 id="workflow-status-heading">작업 현황</h2></span></div>
         <span className={`live-status live-status-${liveStatus}`}><i />{connectionLabel}</span>
       </div>
       <div className="workflow-status-grid">
