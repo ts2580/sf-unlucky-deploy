@@ -594,6 +594,12 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeVisible();
   await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeVisible();
   await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeEnabled();
+  const deploymentSummary = page.getByRole('complementary', { name: '배포 대상' });
+  await expect(deploymentSummary).toContainText('자동 선택 · source 테스트 탐색');
+  await page.getByLabel('테스트 수준').selectOption('RunLocalTests');
+  await expect(deploymentSummary).toContainText('RunLocalTests · Salesforce 구성 테스트');
+  await expect(page.getByRole('region', { name: 'Target 바로 배포' })).toContainText('RunLocalTests로 Salesforce 테스트를 실행');
+  await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeEnabled();
   await expect(page.getByRole('region', { name: 'Target 바로 배포' }).getByRole('textbox')).toHaveCount(0);
   const apexTests = page.getByRole('region', { name: 'Apex 테스트 클래스 선택' });
   await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toBeVisible();
@@ -610,9 +616,12 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await page.getByLabel('테스트 클래스 검색').fill('');
   await page.getByLabel('테스트 수준').selectOption('RunSpecifiedTests');
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeDisabled();
+  await expect(deploymentSummary).toContainText('RunSpecifiedTests · 0개 · 75%');
   await apexTests.getByRole('checkbox', { name: 'Hello_Test' }).check();
   await expect(page.getByLabel('테스트 클래스 직접 입력')).toHaveValue('Hello_Test');
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeEnabled();
   await expect(page.getByText('코드 커버리지 75% 이상일 때만 배포합니다.')).toBeVisible();
   await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
   await expect(page.getByRole('button', { name: '배포 요청 중……' })).toBeVisible({ timeout: 300 });
