@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -7,9 +7,15 @@ const root = process.cwd();
 const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'sfud-package-smoke-'));
 
 try {
-  const suppliedTarball = process.argv[2];
+  const arguments_ = process.argv.slice(2);
+  const useExistingBuild = arguments_.includes('--use-existing-build');
+  const positionalArguments = arguments_.filter((argument) => argument !== '--use-existing-build');
+  if (positionalArguments.length > 1) {
+    throw new Error('package smoke에는 tarball 경로를 하나만 지정할 수 있습니다.');
+  }
+  const [suppliedTarball] = positionalArguments;
   const tarball = suppliedTarball === undefined
-    ? await createTarball(temporaryDirectory)
+    ? await createTarball(temporaryDirectory, useExistingBuild)
     : path.resolve(root, suppliedTarball);
   const listing = await run('tar', ['-tf', tarball], root);
   if (!listing.split(/\r?\n/u).includes('package/npm-shrinkwrap.json')) {
@@ -37,8 +43,15 @@ try {
   await rm(temporaryDirectory, { recursive: true, force: true });
 }
 
-async function createTarball(destination) {
-  await run('npm', ['run', 'build'], root);
+async function createTarball(destination, useExistingBuild) {
+  if (useExistingBuild) {
+    await Promise.all([
+      access(path.join(root, 'dist', 'cli.js')),
+      access(path.join(root, 'dist', 'ui', 'index.html')),
+    ]);
+  } else {
+    await run('npm', ['run', 'build'], root);
+  }
   const pack = JSON.parse(await runNpm([
     'pack', '--json', '--ignore-scripts', '--pack-destination', destination,
   ]));

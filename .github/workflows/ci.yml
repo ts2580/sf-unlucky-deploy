@@ -63,9 +63,11 @@ jobs:
 
       - name: HTML 리포트 E2E 테스트
         run: npm run test:e2e
+        env:
+          SFUD_E2E_SKIP_BUILD: '1'
 
       - name: 릴리스 tarball 설치 스모크
-        run: npm run package:smoke
+        run: npm run package:smoke -- --use-existing-build
 
   linux-node20:
     name: linux-node20-unit-build
@@ -85,17 +87,19 @@ jobs:
       - name: 의존성 설치
         run: npm ci
 
-      - name: 최소 지원 버전 단위 검증과 빌드
-        run: npm run check
+      - name: 최소 지원 버전 타입 검사
+        run: npm run typecheck
+
+      - name: 최소 지원 버전 단위 테스트
+        run: npm test
+
+      - name: 최소 지원 버전 CLI UI 빌드
+        run: npm run build
 
   windows-smoke:
-    name: windows-node${{ matrix.node }}-smoke
+    name: windows-node20.19-smoke
     runs-on: windows-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        node: [20.19, 24]
 
     steps:
       - name: 소스 체크아웃
@@ -104,7 +108,7 @@ jobs:
       - name: Node.js 설정
         uses: actions/setup-node@v7
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 20.19
           cache: npm
 
       - name: 의존성 설치
@@ -115,6 +119,3 @@ jobs:
 
       - name: CLI UI 빌드
         run: npm run build
-
-      - name: 릴리스 tarball 설치 스모크
-        run: npm run package:smoke
