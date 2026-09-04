@@ -150,6 +150,45 @@ test('설정에서 내 단말기의 DX 프로젝트를 임시 소스로 업로�
   await expect(page.getByText('새 프로젝트 소스가 필요한가요?')).toHaveCount(0);
 });
 
+test('metadata type 조회 전 상태를 오류로 표시하지 않는다', async ({ page }) => {
+  await page.route('**/api/v1/workspace', async (route) => route.fulfill({ json: {
+    orgs: [],
+    projects: [],
+    sources: [
+      { id: 'org:left', kind: 'org', label: 'left', detail: 'Left Org · Developer' },
+      { id: 'org:right', kind: 'org', label: 'right', detail: 'Right Org · Sandbox' },
+    ],
+  } }));
+  let releaseMetadataTypes!: () => void;
+  const metadataTypesPending = new Promise<void>((resolve) => {
+    releaseMetadataTypes = resolve;
+  });
+  await page.route('**/api/v1/metadata-types**', async (route) => {
+    await metadataTypesPending;
+    await route.fulfill({ json: {
+      metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }],
+    } });
+  });
+
+  await login(page, '/deploy');
+  const scopeCombobox = page.getByRole('combobox', { name: 'Salesforce metadata type' });
+  const loadingHint = page.getByText('Salesforce metadata type을 불러오는 중입니다.');
+  await expect(loadingHint).toBeVisible();
+  await expect(loadingHint).not.toHaveClass(/field-hint-error/u);
+  await expect(scopeCombobox).toBeDisabled();
+  await expect(scopeCombobox).not.toHaveAttribute('aria-invalid', 'true');
+
+  releaseMetadataTypes();
+  await expect(scopeCombobox).toHaveValue('ApexClass');
+  await expect(scopeCombobox).toBeEnabled();
+  await expect(scopeCombobox).not.toHaveAttribute('aria-invalid', 'true');
+
+  await scopeCombobox.fill('UnknownType');
+  await expect(scopeCombobox).toHaveAttribute('aria-invalid', 'true');
+  await expect(page.getByText('목록에 있는 Salesforce metadata type을 선택하세요.'))
+    .toHaveClass(/field-hint-error/u);
+});
+
 test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', async ({ page }) => {
   await page.route('**/api/v1/workspace', async (route) => route.fulfill({
     json: {
