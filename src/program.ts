@@ -13,7 +13,7 @@ import {
   startWebUi,
 } from './web/server/start.js';
 
-export const CLI_VERSION = '0.2.0';
+export const CLI_VERSION = '0.3.0';
 
 export interface ProgramDependencies extends CommandDependencies, DeployCommandDependencies {}
 
