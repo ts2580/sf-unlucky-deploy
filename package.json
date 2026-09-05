@@ -1,6 +1,6 @@
 {
   "name": "sf-unlucky-deploy",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Salesforce 메타데이터를 비교하고 안전하게 검증·배포하는 CLI",
   "private": true,
   "packageManager": "npm@11.7.0",

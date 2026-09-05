@@ -106,7 +106,7 @@ GitHub Release에서 버전별 `.tgz`와 `SHA256SUMS`를 내려받아 설치할 
 
 ```bash
 sha256sum --check SHA256SUMS
-npm install --global --allow-scripts=sqlite3 ./sf-unlucky-deploy-0.2.0.tgz
+npm install --global --allow-scripts=sqlite3 ./sf-unlucky-deploy-0.3.0.tgz
 sfud --version
 ```
 
