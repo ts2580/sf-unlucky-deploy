@@ -3,6 +3,50 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$PROJECT_ROOT/.env"
+
+load_sfud_env() {
+  local env_file="$1"
+  local env_dump
+  local env_entry
+  local env_key
+  local env_value
+
+  env_dump="$(mktemp)"
+  if ! node -e '
+    const { readFileSync } = require("node:fs");
+    const { parseEnv } = require("node:util");
+    const values = parseEnv(readFileSync(process.argv[1], "utf8"));
+    for (const key of Object.keys(values).sort()) {
+      if (/^SFUD_[A-Z0-9_]+$/.test(key)) {
+        process.stdout.write(`${key}=${values[key]}\0`);
+      }
+    }
+  ' "$env_file" > "$env_dump"; then
+    rm -f -- "$env_dump"
+    echo ".env 파일을 읽지 못했습니다: $env_file" >&2
+    exit 2
+  fi
+
+  while IFS= read -r -d '' env_entry; do
+    env_key="${env_entry%%=*}"
+    env_value="${env_entry#*=}"
+    if [[ ! -v "$env_key" ]]; then
+      printf -v "$env_key" '%s' "$env_value"
+      export "$env_key"
+    fi
+  done < "$env_dump"
+  rm -f -- "$env_dump"
+}
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "sfud UI를 시작하려면 Node.js가 필요합니다." >&2
+  exit 1
+fi
+if [[ -f "$ENV_FILE" ]]; then
+  load_sfud_env "$ENV_FILE"
+fi
+
 UI_HOST="${SFUD_UI_HOST:-127.0.0.1}"
 UI_PORT="${SFUD_UI_PORT:-27546}"
 SHUTDOWN_TIMEOUT_SECONDS="${SFUD_SHUTDOWN_TIMEOUT_SECONDS:-5}"

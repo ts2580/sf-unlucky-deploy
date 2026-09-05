@@ -54,12 +54,13 @@ describe('비교 API', () => {
       expect(workspace.statusCode).toBe(200);
       expect(workspace.json()).toMatchObject({
         orgs: [
-          { alias: 'left', connected: true },
-          { alias: 'right', connected: true },
+          { alias: 'left', connected: true, username: 'left@example.com', maskedOrgId: '00D00…001' },
+          { alias: 'right', connected: true, username: 'right@example.com', maskedOrgId: '00D00…002' },
         ],
         projects: [{ displayName: 'project', manifests: ['manifest/package.xml'] }],
       });
       expect(workspace.body).not.toContain('access-token-secret');
+      expect(workspace.body).not.toContain('00D000000000001');
       expect(workspace.body).not.toContain(projectPath);
       const projectId = workspace.json<{ projects: Array<{ id: string }> }>().projects[0]!.id;
       const metadataTypes = await server.inject({
@@ -80,7 +81,12 @@ describe('비교 API', () => {
         url: '/api/v1/apex-test-classes?sourceId=org%3Aleft', headers: { cookie },
       });
       expect(orgTests.statusCode).toBe(200);
-      expect(orgTests.json()).toEqual({ testClasses: ['Account_Test', 'Order_test'] });
+      expect(orgTests.json()).toEqual({ testClasses: [
+        { name: 'Account_Test', matchesConfiguredSuffix: true },
+        { name: 'Order_test', matchesConfiguredSuffix: true },
+        { name: 'AccountSpec', matchesConfiguredSuffix: false },
+        { name: 'Helper', matchesConfiguredSuffix: false },
+      ] });
       expect(sfClient.calls).toContainEqual(expect.arrayContaining([
         'data', 'query', '--use-tooling-api', '--target-org', 'left', '--api-version', '64.0',
       ]));
@@ -88,7 +94,11 @@ describe('비교 API', () => {
         url: `/api/v1/apex-test-classes?sourceId=project%3A${projectId}`, headers: { cookie },
       });
       expect(localTests.statusCode).toBe(200);
-      expect(localTests.json()).toEqual({ testClasses: ['Local_Test'] });
+      expect(localTests.json()).toEqual({ testClasses: [
+        { name: 'Local_Test', matchesConfiguredSuffix: true },
+        { name: 'Helper', matchesConfiguredSuffix: false },
+        { name: 'LocalSpec', matchesConfiguredSuffix: false },
+      ] });
       expect((await server.inject({
         method: 'PUT', url: '/api/v1/settings',
         headers: { cookie, 'x-sfud-csrf': csrfToken },
@@ -96,10 +106,19 @@ describe('비교 API', () => {
       })).statusCode).toBe(200);
       expect((await server.inject({
         url: '/api/v1/apex-test-classes?sourceId=org%3Aleft', headers: { cookie },
-      })).json()).toEqual({ testClasses: ['AccountSpec'] });
+      })).json()).toEqual({ testClasses: [
+        { name: 'AccountSpec', matchesConfiguredSuffix: true },
+        { name: 'Account_Test', matchesConfiguredSuffix: false },
+        { name: 'Helper', matchesConfiguredSuffix: false },
+        { name: 'Order_test', matchesConfiguredSuffix: false },
+      ] });
       expect((await server.inject({
         url: `/api/v1/apex-test-classes?sourceId=project%3A${projectId}`, headers: { cookie },
-      })).json()).toEqual({ testClasses: ['LocalSpec'] });
+      })).json()).toEqual({ testClasses: [
+        { name: 'LocalSpec', matchesConfiguredSuffix: true },
+        { name: 'Helper', matchesConfiguredSuffix: false },
+        { name: 'Local_Test', matchesConfiguredSuffix: false },
+      ] });
       const comparisonPayload = {
         projectId,
         manifest: 'manifest/package.xml',
@@ -143,6 +162,19 @@ describe('비교 API', () => {
         },
       });
       expect(completed.body).not.toContain(projectPath);
+      const componentPage = await server.inject({
+        url: `/api/v1/comparisons/${jobId}/components?page=1&pageSize=1`,
+        headers: { cookie },
+      });
+      expect(componentPage.statusCode).toBe(200);
+      expect(componentPage.json()).toMatchObject({
+        page: 1, pageSize: 1, total: 1, totalPages: 1,
+        components: [{ type: 'ApexClass', status: 'MODIFIED' }],
+      });
+      expect((await server.inject({
+        url: `/api/v1/comparisons/${jobId}/components?pageSize=101`,
+        headers: { cookie },
+      })).statusCode).toBe(400);
       expect(await server.sfudRuntime.store.database.get(
         "SELECT COUNT(*) count FROM audit_events WHERE event_type = 'COMPARISON_SUCCEEDED'",
       )).toEqual({ count: 1 });
@@ -186,6 +218,128 @@ describe('비교 API', () => {
       expect(sfClient.calls.filter((args) =>
         args[0] === 'project' && args[1] === 'generate' && args[2] === 'manifest'))
         .toHaveLength(2);
+
+      const callsBeforeSourceOnly = sfClient.calls.length;
+      const sourceOnlyCreated = await server.inject({
+        method: 'POST',
+        url: '/api/v1/comparisons',
+        headers: { cookie, 'x-sfud-csrf': csrfToken },
+        payload: {
+          scope: 'all',
+          metadataType: 'ApexClass',
+          rightSourceId: 'org:right',
+          sourceOnly: true,
+        },
+      });
+      expect(sourceOnlyCreated.statusCode).toBe(202);
+      const sourceOnlyJobId = sourceOnlyCreated.json<{ job: { id: string } }>().job.id;
+      await server.sfudRuntime.comparisonQueue.onIdle();
+      const sourceOnlyCompleted = await server.inject({
+        url: `/api/v1/comparisons/${sourceOnlyJobId}`,
+        headers: { cookie },
+      });
+      expect(sourceOnlyCompleted.json()).toMatchObject({
+        job: {
+          mode: 'source',
+          status: 'SUCCEEDED',
+          left: { id: 'org:right' },
+          right: { id: 'org:right' },
+          result: { summary: { added: 1, total: 1 } },
+        },
+      });
+      const sourceOnlyCalls = sfClient.calls.slice(callsBeforeSourceOnly);
+      expect(sourceOnlyCalls.filter((args) =>
+        args[0] === 'project' && args[1] === 'generate' && args[2] === 'manifest'))
+        .toHaveLength(1);
+      expect(sourceOnlyCalls.filter((args) =>
+        args[0] === 'project' && args[1] === 'retrieve' && args[2] === 'start'))
+        .toEqual([expect.arrayContaining(['--target-org', 'right'])]);
+    } finally {
+      await server.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('연결된 org 없이 두 로컬 프로젝트의 metadata type을 합치고 비교한다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-local-comparison-api-'));
+    const left = path.join(root, 'left');
+    const right = path.join(root, 'right');
+    for (const [projectPath, body] of [[left, 'left'], [right, 'right']] as const) {
+      await writeFixtureFiles(projectPath, {
+        'sfdx-project.json': JSON.stringify({
+          packageDirectories: [{ path: 'force-app', default: true }],
+          sourceApiVersion: '67.0',
+        }),
+        'force-app/main/default/classes/Shared.cls': `public class Shared { String side = '${body}'; }`,
+        'force-app/main/default/classes/Shared.cls-meta.xml': '<ApexClass><status>Active</status></ApexClass>',
+      });
+    }
+    const sfClient = new LocalOnlyComparisonSfClient();
+    const server = await createWebServer({
+      host: '127.0.0.1',
+      port: 27_546,
+      assetsDirectory: '/definitely/missing/sfud-ui',
+      databasePath: path.join(root, 'data', 'sfud.db'),
+      projectPaths: [left, right],
+      bootstrapToken: 'local-comparison-bootstrap-token',
+      sfClient,
+    });
+
+    try {
+      const bootstrap = await server.inject({
+        method: 'POST',
+        url: '/api/v1/auth/bootstrap',
+        payload: {
+          bootstrapToken: 'local-comparison-bootstrap-token',
+          email: 'local@example.com',
+          displayName: '로컬 비교 관리자',
+          password: 'local comparison password',
+        },
+      });
+      const cookie = (bootstrap.headers['set-cookie'] as string[])
+        .map((value) => value.split(';')[0]).join('; ');
+      const csrfToken = bootstrap.json<{ csrfToken: string }>().csrfToken;
+      const workspace = (await server.inject({ url: '/api/v1/workspace', headers: { cookie } }))
+        .json<{ orgs: unknown[]; projects: Array<{ id: string }> }>();
+      expect(workspace.orgs).toEqual([]);
+      expect(workspace.projects).toHaveLength(2);
+      const [leftProject, rightProject] = workspace.projects;
+
+      const metadataTypes = await server.inject({
+        url: `/api/v1/metadata-types?sourceIds=${encodeURIComponent(`project:${leftProject!.id},project:${rightProject!.id}`)}`,
+        headers: { cookie },
+      });
+      expect(metadataTypes.statusCode).toBe(200);
+      expect(metadataTypes.json()).toEqual({
+        metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }],
+      });
+      expect(sfClient.calls.some((args) =>
+        args[0] === 'org' && args[1] === 'list' && args[2] === 'metadata-types')).toBe(false);
+
+      const created = await server.inject({
+        method: 'POST',
+        url: '/api/v1/comparisons',
+        headers: { cookie, 'x-sfud-csrf': csrfToken },
+        payload: {
+          scope: 'all',
+          metadataType: 'ApexClass',
+          leftSourceId: `project:${leftProject!.id}`,
+          rightSourceId: `project:${rightProject!.id}`,
+        },
+      });
+      expect(created.statusCode).toBe(202);
+      const jobId = created.json<{ job: { id: string } }>().job.id;
+      await server.sfudRuntime.comparisonQueue.onIdle();
+      const completed = await server.inject({
+        url: `/api/v1/comparisons/${jobId}`,
+        headers: { cookie },
+      });
+      expect(completed.json()).toMatchObject({
+        job: {
+          status: 'SUCCEEDED',
+          result: { summary: { modified: 1, different: 1 } },
+        },
+      });
     } finally {
       await server.close();
       await rm(root, { recursive: true, force: true });
@@ -225,8 +379,16 @@ class ComparisonSfClient implements SfClient {
         status: 0,
         result: {
           nonScratchOrgs: [
-            { alias: 'left', name: 'Left Org', orgEdition: 'Developer', connectedStatus: 'Connected', accessToken: 'access-token-secret' },
-            { alias: 'right', name: 'Right Org', orgEdition: 'Sandbox', connectedStatus: 'Connected' },
+            {
+              alias: 'left', username: 'left@example.com', orgId: '00D000000000001',
+              instanceUrl: 'https://left.example.my.salesforce.com', name: 'Left Org',
+              orgEdition: 'Developer', connectedStatus: 'Connected', accessToken: 'access-token-secret',
+            },
+            {
+              alias: 'right', username: 'right@example.com', orgId: '00D000000000002',
+              instanceUrl: 'https://right.example.my.salesforce.com', name: 'Right Org',
+              orgEdition: 'Sandbox', connectedStatus: 'Connected',
+            },
           ],
         },
       };
@@ -259,6 +421,39 @@ class ComparisonSfClient implements SfClient {
       'classes/Hello.cls-meta.xml': '<?xml version="1.0"?><ApexClass><status>Active</status></ApexClass>',
     });
     return { status: 0 };
+  }
+}
+
+class LocalOnlyComparisonSfClient implements SfClient {
+  public readonly calls: string[][] = [];
+
+  public async runJson(args: readonly string[], options: SfRunOptions): Promise<unknown> {
+    this.calls.push([...args]);
+    if (args[0] === 'org' && args[1] === 'list') {
+      return { status: 0, result: { nonScratchOrgs: [] } };
+    }
+    if (args[0] === 'project' && args[1] === 'generate' && args[2] === 'manifest') {
+      const outputDirectory = flagValue(args, '--output-dir');
+      const name = flagValue(args, '--name');
+      await mkdir(outputDirectory, { recursive: true });
+      await writeFile(path.join(outputDirectory, name), `<?xml version="1.0" encoding="UTF-8"?>
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+  <types><members>Shared</members><name>ApexClass</name></types>
+  <version>67.0</version>
+</Package>`);
+      return { status: 0 };
+    }
+    if (args[0] === 'project' && args[1] === 'convert' && args[2] === 'source') {
+      const outputDirectory = path.join(flagValue(args, '--output-dir'), flagValue(args, '--package-name'));
+      const sourceBody = options.cwd.endsWith(`${path.sep}left`) ? 'left' : 'right';
+      await writeFixtureFiles(outputDirectory, {
+        'package.xml': '<Package/>',
+        'classes/Shared.cls': `public class Shared { String side = '${sourceBody}'; }`,
+        'classes/Shared.cls-meta.xml': '<ApexClass><status>Active</status></ApexClass>',
+      });
+      return { status: 0 };
+    }
+    throw new Error(`예상하지 못한 sf 호출: ${args.join(' ')}`);
   }
 }
 

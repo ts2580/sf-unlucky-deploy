@@ -25,6 +25,7 @@ export interface SnapshotOptions {
   commandTimeoutMs?: number;
   metadataTypes?: MetadataTypeDescriptor[];
   empty?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface MetadataSnapshot {
@@ -47,12 +48,12 @@ export async function createSnapshot(options: SnapshotOptions): Promise<Metadata
   await ensureEmptyDirectory(options.outputDir);
 
   const rawDir = path.join(options.outputDir, 'raw');
-  await mkdir(rawDir, { recursive: true });
+  await mkdir(rawDir, { recursive: true, mode: 0o700 });
 
   let packageRoot: string;
   if (options.empty === true) {
     packageRoot = path.join(rawDir, 'sfud');
-    await mkdir(packageRoot, { recursive: true });
+    await mkdir(packageRoot, { recursive: true, mode: 0o700 });
     await copyFile(manifestPath, path.join(packageRoot, 'package.xml'));
   } else if (options.source.kind === 'org') {
     await options.sfClient.runJson(
@@ -74,6 +75,7 @@ export async function createSnapshot(options: SnapshotOptions): Promise<Metadata
       {
         cwd: options.commandProjectPath,
         ...(options.commandTimeoutMs === undefined ? {} : { timeoutMs: options.commandTimeoutMs }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       },
     );
     packageRoot = await findPackageRoot(rawDir);
@@ -93,6 +95,7 @@ export async function createSnapshot(options: SnapshotOptions): Promise<Metadata
       {
         cwd: options.source.projectPath,
         ...(options.commandTimeoutMs === undefined ? {} : { timeoutMs: options.commandTimeoutMs }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       },
     );
     packageRoot = await findPackageRoot(rawDir);

@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Database } from 'sqlite';
-
+import type { DatabaseExecutor } from './database-executor.js';
 import { runInImmediateTransaction } from './transaction.js';
 
 export type UserRole = 'VIEWER' | 'OPERATOR' | 'DEPLOYER' | 'ADMIN';
@@ -34,7 +33,7 @@ interface UserRow {
 
 export class UserRepository {
   public constructor(
-    private readonly database: Database,
+    private readonly database: DatabaseExecutor,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly createId: () => string = randomUUID,
   ) {}
@@ -51,12 +50,12 @@ export class UserRepository {
 
     const id = this.createId();
     const timestamp = this.now();
-    await runInImmediateTransaction(this.database, async () => {
-      await this.database.run(`
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      await transaction.run(`
         INSERT INTO users (id, email, display_name, role, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
       `, id, email, displayName, input.role, timestamp, timestamp);
-      await this.database.run(`
+      await transaction.run(`
         INSERT INTO audit_events (actor_user_id, event_type, entity_type, entity_id, detail_json, created_at)
         VALUES (?, 'USER_CREATED', 'USER', ?, ?, ?)
       `, id, id, JSON.stringify({ email, role: input.role }), timestamp);

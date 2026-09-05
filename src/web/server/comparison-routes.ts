@@ -4,6 +4,7 @@ import type { ComparisonJob } from '../../compare/comparison-job-repository.js';
 import { redactSensitiveText } from '../../salesforce/sf-client.js';
 import { hasTestClassSuffix } from '../../deploy/test-plan.js';
 import { requireAuthenticatedSession } from './auth-routes.js';
+import { maskOrgId } from './workspace-service.js';
 
 interface CreateComparisonBody {
   projectId?: string;
@@ -14,6 +15,7 @@ interface CreateComparisonBody {
   strict?: boolean;
   showIdentical?: boolean;
   metadataType?: string;
+  sourceOnly?: boolean;
 }
 
 interface MetadataTypesQuery {
@@ -22,6 +24,16 @@ interface MetadataTypesQuery {
 
 interface ApexTestClassesQuery {
   sourceId?: string;
+}
+
+interface ApexTestClassCandidate {
+  name: string;
+  matchesConfiguredSuffix: boolean;
+}
+
+interface ComponentPageQuery {
+  page?: string;
+  pageSize?: string;
 }
 
 export async function registerComparisonRoutes(app: FastifyInstance): Promise<void> {
@@ -35,7 +47,15 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
         Promise.resolve(app.sfudRuntime.workspace.listUploadedProjects(session.user.id)),
       ]);
       return reply.send({
-        orgs,
+        orgs: orgs.map((org) => ({
+          id: org.id,
+          alias: org.alias,
+          label: org.label,
+          connected: org.connected,
+          ...(org.edition === undefined ? {} : { edition: org.edition }),
+          ...(org.username === undefined ? {} : { username: org.username }),
+          ...(org.orgId === undefined ? {} : { maskedOrgId: maskOrgId(org.orgId) }),
+        })),
         projects,
         uploads,
         sources: [
@@ -45,6 +65,8 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
             location: 'org' as const,
             label: org.alias,
             detail: [org.label, org.edition].filter(Boolean).join(' · '),
+            ...(org.username === undefined ? {} : { username: org.username }),
+            ...(org.orgId === undefined ? {} : { maskedOrgId: maskOrgId(org.orgId) }),
           })),
           ...projects.map((project) => ({
             id: `project:${project.id}`,
@@ -92,8 +114,14 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     try {
       const sourceId = requiredString(request.query.sourceId, '배포 소스');
       const settings = await app.sfudRuntime.settings.get(session.user.id);
-      const testClasses = (await app.sfudRuntime.workspace.listApexTestClasses(sourceId, session.user.id))
-        .filter((className) => hasTestClassSuffix(className, settings.testClassSuffix));
+      const testClasses: ApexTestClassCandidate[] = (
+        await app.sfudRuntime.workspace.listApexTestClasses(sourceId, session.user.id)
+      ).map((name) => ({
+        name,
+        matchesConfiguredSuffix: hasTestClassSuffix(name, settings.testClassSuffix),
+      })).sort((left, right) =>
+        Number(right.matchesConfiguredSuffix) - Number(left.matchesConfiguredSuffix)
+          || left.name.localeCompare(right.name));
       return reply.send({ testClasses });
     } catch (error) {
       return reply.code(400).send({ error: {
@@ -111,6 +139,8 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     if (session === undefined) return;
     try {
       const scope = comparisonScope(request.body?.scope);
+      const sourceOnly = request.body?.sourceOnly === true;
+      const rightSourceId = requiredString(request.body?.rightSourceId, 'SOURCE 소스');
       const job = await app.sfudRuntime.comparisons.create({
         ...(scope === 'manifest'
           ? { projectId: requiredString(request.body?.projectId, 'manifest 프로젝트') }
@@ -120,8 +150,11 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
         ...(request.body?.metadataType === undefined
           ? {}
           : { metadataType: requiredMetadataType(request.body.metadataType) }),
-        leftSourceId: requiredString(request.body?.leftSourceId, 'LEFT 소스'),
-        rightSourceId: requiredString(request.body?.rightSourceId, 'RIGHT 소스'),
+        leftSourceId: sourceOnly
+          ? rightSourceId
+          : requiredString(request.body?.leftSourceId, 'LEFT 소스'),
+        rightSourceId,
+        sourceOnly,
         strict: request.body?.strict === true,
         showIdentical: request.body?.showIdentical === true,
         createdBy: session.user.id,
@@ -138,7 +171,7 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
   app.get('/api/v1/comparisons', async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
-    const jobs = await app.sfudRuntime.comparisonJobs.listRecent();
+    const jobs = await app.sfudRuntime.comparisonJobs.listRecentSummary();
     return reply.send({ jobs: jobs.map((job) => publicJob(app, job, false)) });
   });
 
@@ -151,6 +184,41 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     }
     return reply.send({ job: publicJob(app, job, true) });
   });
+
+  app.get<{ Params: { id: string }; Querystring: ComponentPageQuery }>(
+    '/api/v1/comparisons/:id/components',
+    async (request, reply) => {
+      const session = await requireAuthenticatedSession(app, request, reply);
+      if (session === undefined) return;
+      try {
+        const page = positiveInteger(request.query.page, 1, 1_000_000, '페이지');
+        const pageSize = positiveInteger(request.query.pageSize, 50, 100, '페이지 크기');
+        const job = await app.sfudRuntime.comparisonJobs.get(request.params.id);
+        if (job === undefined) {
+          return reply.code(404).send({ error: {
+            code: 'COMPARISON_NOT_FOUND', message: '비교 작업을 찾을 수 없습니다.',
+          } });
+        }
+        const components = (job.result?.components ?? [])
+          .filter((component) => job.showIdentical || component.status !== 'IDENTICAL');
+        const total = components.length;
+        const totalPages = Math.max(1, Math.ceil(total / pageSize));
+        const start = (page - 1) * pageSize;
+        return reply.send({
+          components: components.slice(start, start + pageSize),
+          page,
+          pageSize,
+          total,
+          totalPages,
+        });
+      } catch (error) {
+        return reply.code(400).send({ error: {
+          code: 'INVALID_COMPONENT_PAGE',
+          message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
+        } });
+      }
+    },
+  );
 }
 
 function publicJob(app: FastifyInstance, job: ComparisonJob, includeResult: boolean) {
@@ -166,6 +234,7 @@ function publicJob(app: FastifyInstance, job: ComparisonJob, includeResult: bool
   } : undefined;
   return {
     id: job.id,
+    mode: job.leftSource === job.rightSource ? 'source' : 'compare',
     status: job.status,
     projectId: app.sfudRuntime.workspace.publicSource(`local:${job.projectPath}`).id.replace(/^project:/u, ''),
     scope: job.scope === 'ALL' ? 'all' : 'manifest',
@@ -177,7 +246,7 @@ function publicJob(app: FastifyInstance, job: ComparisonJob, includeResult: bool
     right,
     strict: job.strict,
     showIdentical: job.showIdentical,
-    ...(job.result === undefined ? {} : { summary: job.result.summary }),
+    ...(job.summary === undefined ? {} : { summary: job.summary }),
     ...(result === undefined ? {} : { result }),
     ...(job.errorCode === undefined ? {} : { errorCode: job.errorCode }),
     ...(job.errorMessage === undefined ? {} : { errorMessage: job.errorMessage }),
@@ -204,4 +273,19 @@ function requiredMetadataType(value: unknown): string {
     throw new Error('Salesforce metadata type이 올바르지 않습니다.');
   }
   return value;
+}
+
+function positiveInteger(
+  value: string | undefined,
+  fallback: number,
+  maximum: number,
+  label: string,
+): number {
+  if (value === undefined) return fallback;
+  if (!/^\d+$/u.test(value)) throw new Error(`${label}가 올바르지 않습니다.`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
+    throw new Error(`${label}는 1부터 ${maximum} 사이여야 합니다.`);
+  }
+  return parsed;
 }

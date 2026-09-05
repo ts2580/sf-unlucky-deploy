@@ -37,7 +37,7 @@ export async function verifyPassword(password: string, digest: string): Promise<
   }
 }
 
-export function assertPassword(password: string): void {
+function assertPassword(password: string): void {
   if (password.length < 12 || password.length > 128) {
     throw new Error('비밀번호는 12자 이상 128자 이하여야 합니다.');
   }

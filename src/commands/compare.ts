@@ -10,10 +10,12 @@ import { ProcessSfClient, type SfClient } from '../salesforce/sf-client.js';
 import { parseSourceSpec } from '../sources/source-spec.js';
 import { createSnapshot } from '../sources/snapshot.js';
 import { createRunContext, writeRunMetadata } from './run-context.js';
+import { salesforceWaitCommandTimeoutMs } from '../core/deadline.js';
 
 export interface CompareCommandOptions {
   left: string;
   right: string;
+  sourceOnly?: boolean;
   manifest?: string;
   allMetadata?: boolean;
   metadataType?: string;
@@ -31,6 +33,7 @@ export interface CommandDependencies {
   cwd?: string;
   sfClient?: SfClient;
   stdout?: (value: string) => void;
+  signal?: AbortSignal;
 }
 
 export interface CompareCommandResult {
@@ -52,11 +55,12 @@ export async function runCompareCommand(
     const context = await createRunContext(cwd, options.reportDir, 'compare');
     const generatedManifest = options.allMetadata === true || options.metadataType !== undefined
       ? await generateDeployableManifest({
-        sources: [leftSource, rightSource],
+        sources: options.sourceOnly === true ? [rightSource] : [leftSource, rightSource],
         ...(options.metadataType === undefined ? {} : { metadataTypes: [options.metadataType] }),
         outputDirectory: path.join(context.rootDirectory, 'generated-manifest'),
         commandProjectPath,
         sfClient,
+        ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
       })
       : undefined;
     const manifestPath = generatedManifest?.manifestPath
@@ -66,14 +70,16 @@ export async function runCompareCommand(
     if (!Number.isInteger(snapshotWaitMinutes) || snapshotWaitMinutes < 1) {
       throw new SfudError('INVALID_ARGUMENT', '--wait는 1 이상의 정수여야 합니다.');
     }
-    const snapshotCommandTimeoutMs = (snapshotWaitMinutes + 1) * 60 * 1000;
+    const snapshotCommandTimeoutMs = salesforceWaitCommandTimeoutMs(snapshotWaitMinutes);
     await writeRunMetadata(context, 'compare', leftSource, rightSource.displayName, manifestPath);
 
     const [leftSnapshot, rightSnapshot] = await Promise.all([
       createSnapshot({
-        source: leftSource,
+        source: options.sourceOnly === true ? rightSource : leftSource,
         manifestPath,
-        ...(sourceManifests === undefined ? {} : {
+        ...(options.sourceOnly === true
+          ? {}
+          : sourceManifests === undefined ? {} : {
           retrievalManifestPath: sourceManifests[0]!.manifestPath,
         }),
         outputDir: context.leftSnapshotDirectory,
@@ -81,21 +87,23 @@ export async function runCompareCommand(
         sfClient,
         waitMinutes: snapshotWaitMinutes,
         commandTimeoutMs: snapshotCommandTimeoutMs,
-        ...(sourceManifests?.[0]?.empty === true ? { empty: true } : {}),
+        ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
+        ...(options.sourceOnly === true || sourceManifests?.[0]?.empty === true ? { empty: true } : {}),
         ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
       }),
       createSnapshot({
         source: rightSource,
         manifestPath,
         ...(sourceManifests === undefined ? {} : {
-          retrievalManifestPath: sourceManifests[1]!.manifestPath,
+          retrievalManifestPath: sourceManifests[options.sourceOnly === true ? 0 : 1]!.manifestPath,
         }),
         outputDir: context.rightSnapshotDirectory,
         commandProjectPath,
         sfClient,
         waitMinutes: snapshotWaitMinutes,
         commandTimeoutMs: snapshotCommandTimeoutMs,
-        ...(sourceManifests?.[1]?.empty === true ? { empty: true } : {}),
+        ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
+        ...(sourceManifests?.[options.sourceOnly === true ? 0 : 1]?.empty === true ? { empty: true } : {}),
         ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
       }),
     ]);

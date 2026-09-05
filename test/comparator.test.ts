@@ -1,10 +1,10 @@
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { compareSnapshots } from '../src/metadata/comparator.js';
+import { compareSnapshots, MAX_DIFF_INPUT_BYTES } from '../src/metadata/comparator.js';
 import type { SourceSpec } from '../src/sources/source-spec.js';
 import type { MetadataSnapshot } from '../src/sources/snapshot.js';
 import { removeDirectoriesAfterTest, writeFixtureFiles } from './support/files.js';
@@ -88,8 +88,47 @@ describe('metadata comparator', () => {
     });
 
     expect(defaultResult.summary.identical).toBe(1);
+    expect(defaultResult.components[0]?.files[0]).toMatchObject({
+      status: 'IDENTICAL',
+      rawContentChanged: true,
+      xmlSemanticStatus: 'EQUAL',
+      xmlComparisonPolicy: 'REGISTERED',
+    });
     expect(strictResult.summary.modified).toBe(1);
+    expect(strictResult.components[0]?.files[0]).toMatchObject({
+      rawContentChanged: true,
+      xmlSemanticStatus: 'EQUAL',
+      xmlComparisonPolicy: 'REGISTERED',
+    });
     expect(strictResult.components[0]?.files[0]?.unifiedDiff).toContain('Profile beta');
+  });
+
+  it('미등록 metadata type의 XML 차이는 generic 정책 사용을 경고한다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-generic-xml-'));
+    temporaryDirectories.push(root);
+    const leftRoot = path.join(root, 'left');
+    const rightRoot = path.join(root, 'right');
+    await Promise.all([mkdir(leftRoot), mkdir(rightRoot)]);
+    await Promise.all([
+      writeFixtureFiles(leftRoot, {
+        'package.xml': '<Package/>',
+        'flows/Order.flow': '<?xml version="1.0"?><Flow><label>이전</label></Flow>',
+      }),
+      writeFixtureFiles(rightRoot, {
+        'package.xml': '<Package/>',
+        'flows/Order.flow': '<?xml version="1.0"?><Flow><label>이후</label></Flow>',
+      }),
+    ]);
+
+    const result = await compareSnapshots(snapshot(leftRoot, 'left'), snapshot(rightRoot, 'right'));
+
+    expect(result.components[0]?.files[0]).toMatchObject({
+      xmlSemanticStatus: 'DIFFERENT',
+      xmlComparisonPolicy: 'GENERIC',
+      rawContentChanged: true,
+    });
+    expect(result.warnings).toContainEqual(expect.stringContaining('generic 비교'));
+    expect(result.warnings).toContainEqual(expect.stringContaining('Flow'));
   });
 
   it('제한 병렬 비교에서도 컴포넌트 순서와 동일 XML 결과를 결정적으로 유지한다', async () => {
@@ -136,6 +175,34 @@ describe('metadata comparator', () => {
         expect.objectContaining({ status: 'IDENTICAL', xmlChanges: [] }),
       ]),
     );
+  });
+
+  it('대형 텍스트 파일은 전체 diff를 만들지 않고 checksum과 생략 경고를 남긴다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-large-diff-'));
+    temporaryDirectories.push(root);
+    const leftRoot = path.join(root, 'left');
+    const rightRoot = path.join(root, 'right');
+    await Promise.all([mkdir(leftRoot), mkdir(rightRoot)]);
+    const metadata = '<?xml version="1.0"?><ApexClass><status>Active</status></ApexClass>';
+    await Promise.all([
+      writeFixtureFiles(leftRoot, {
+        'package.xml': '<Package/>',
+        'classes/Large.cls': `// left\n${'a'.repeat(MAX_DIFF_INPUT_BYTES)}`,
+        'classes/Large.cls-meta.xml': metadata,
+      }),
+      writeFixtureFiles(rightRoot, {
+        'package.xml': '<Package/>',
+        'classes/Large.cls': `// right\n${'b'.repeat(MAX_DIFF_INPUT_BYTES)}`,
+        'classes/Large.cls-meta.xml': metadata,
+      }),
+    ]);
+
+    const result = await compareSnapshots(snapshot(leftRoot, 'left'), snapshot(rightRoot, 'right'));
+    const file = result.components[0]?.files.find((entry) => entry.path.endsWith('Large.cls'));
+
+    expect(file).toMatchObject({ status: 'MODIFIED', kind: 'text', diffTruncated: true });
+    expect(file?.unifiedDiff).toBeUndefined();
+    expect(result.warnings).toContainEqual(expect.stringContaining('상세 diff 일부를 생략'));
   });
 });
 

@@ -12,6 +12,7 @@ import type {
 const SESSION_COOKIE = 'sfud_session';
 const CSRF_COOKIE = 'sfud_csrf';
 const SESSION_MAX_AGE_SECONDS = 12 * 60 * 60;
+const configuredPublicOrigins = new WeakMap<FastifyInstance, string>();
 
 interface BootstrapBody {
   bootstrapToken?: string;
@@ -25,8 +26,18 @@ interface LoginBody {
   password?: string;
 }
 
-export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
-  const limiter = new LoginAttemptLimiter();
+export interface AuthRouteSecurityOptions {
+  publicOrigin?: string;
+}
+
+export async function registerAuthRoutes(
+  app: FastifyInstance,
+  options: AuthRouteSecurityOptions = {},
+): Promise<void> {
+  if (options.publicOrigin !== undefined) configuredPublicOrigins.set(app, options.publicOrigin);
+  const ipLimiter = new FailedAttemptLimiter(5, 15 * 60 * 1_000);
+  const accountLimiter = new FailedAttemptLimiter(5, 30 * 60 * 1_000);
+  const bootstrapLimiter = new FailedAttemptLimiter(5, 30 * 60 * 1_000);
 
   app.get('/api/v1/auth/status', async (request): Promise<AuthStatusResponse> => {
     const user = await app.sfudRuntime.auth.authenticate(readCookie(request, SESSION_COOKIE));
@@ -38,8 +49,11 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post<{ Body: BootstrapBody }>('/api/v1/auth/bootstrap', async (request, reply) => {
-    if (!hasAllowedOrigin(request)) {
+    if (!hasAllowedOrigin(request, options.publicOrigin)) {
       return sendError(reply, 403, 'ORIGIN_DENIED', '허용되지 않은 요청 출처입니다.');
+    }
+    if (!bootstrapLimiter.allowed(request.ip)) {
+      return sendError(reply, 429, 'TOO_MANY_ATTEMPTS', '초기 설정 시도가 너무 많습니다. 잠시 후 다시 시도하세요.');
     }
     try {
       const session = await app.sfudRuntime.auth.bootstrapAdmin({
@@ -51,18 +65,18 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       setAuthCookies(request, reply, session.sessionToken, session.csrfToken);
       return reply.code(201).send(toSessionResponse(session));
     } catch (error) {
+      bootstrapLimiter.recordFailure(request.ip);
       return sendAuthError(reply, error);
     }
   });
 
   app.post<{ Body: LoginBody }>('/api/v1/auth/login', async (request, reply) => {
-    if (!hasAllowedOrigin(request)) {
+    if (!hasAllowedOrigin(request, options.publicOrigin)) {
       return sendError(reply, 403, 'ORIGIN_DENIED', '허용되지 않은 요청 출처입니다.');
     }
     const email = typeof request.body?.email === 'string' ? request.body.email : '';
     const accountKey = email.trim().toLowerCase().slice(0, 254);
-    const keys = [`ip:${request.ip}`, `account:${accountKey}`];
-    if (!limiter.consume(keys)) {
+    if (!ipLimiter.allowed(request.ip) || !accountLimiter.allowed(accountKey)) {
       return sendError(reply, 429, 'TOO_MANY_ATTEMPTS', '로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요.');
     }
     try {
@@ -70,10 +84,12 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         requiredString(email, '이메일'),
         requiredString(request.body?.password, '비밀번호'),
       );
-      limiter.clear(keys);
+      accountLimiter.clear(accountKey);
       setAuthCookies(request, reply, session.sessionToken, session.csrfToken);
       return reply.send(toSessionResponse(session));
     } catch (error) {
+      ipLimiter.recordFailure(request.ip);
+      accountLimiter.recordFailure(accountKey);
       return sendAuthError(reply, error);
     }
   });
@@ -94,7 +110,7 @@ export async function requireAuthenticatedSession(
   reply: FastifyReply,
   options: { csrf?: boolean; roles?: UserRole[] } = {},
 ): Promise<{ user: SfudUser } | undefined> {
-  if (options.csrf === true && !hasAllowedOrigin(request)) {
+  if (options.csrf === true && !hasAllowedOrigin(request, configuredPublicOrigins.get(app))) {
     sendError(reply, 403, 'ORIGIN_DENIED', '허용되지 않은 요청 출처입니다.');
     return undefined;
   }
@@ -140,7 +156,13 @@ function readCookie(request: FastifyRequest, name: string): string | undefined {
   const cookies = request.headers.cookie?.split(';') ?? [];
   for (const cookie of cookies) {
     const [key, ...value] = cookie.trim().split('=');
-    if (key === name) return decodeURIComponent(value.join('='));
+    if (key === name) {
+      try {
+        return decodeURIComponent(value.join('='));
+      } catch {
+        return undefined;
+      }
+    }
   }
   return undefined;
 }
@@ -150,19 +172,20 @@ function readHeader(request: FastifyRequest, name: string): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
-function hasAllowedOrigin(request: FastifyRequest): boolean {
+function hasAllowedOrigin(request: FastifyRequest, publicOrigin?: string): boolean {
   const origin = request.headers.origin;
   if (origin === undefined) return true;
   try {
-    return new URL(origin).host === request.headers.host;
+    const expectedOrigin = publicOrigin
+      ?? `${request.protocol}://${request.headers.host ?? request.hostname}`;
+    return new URL(origin).origin === expectedOrigin;
   } catch {
     return false;
   }
 }
 
 function isSecureRequest(request: FastifyRequest): boolean {
-  const forwarded = readHeader(request, 'x-forwarded-proto');
-  return request.protocol === 'https' || forwarded?.split(',')[0]?.trim() === 'https';
+  return request.protocol === 'https';
 }
 
 function requiredString(value: unknown, label: string): string {
@@ -194,33 +217,33 @@ function sendError(reply: FastifyReply, status: number, code: string, message: s
   return reply.code(status).send({ error: { code, message } } satisfies ApiErrorResponse);
 }
 
-class LoginAttemptLimiter {
+class FailedAttemptLimiter {
   private readonly entries = new Map<string, { count: number; resetAt: number }>();
-  private static readonly MAX_ATTEMPTS = 5;
-  private static readonly WINDOW_MS = 15 * 60 * 1_000;
   private static readonly MAX_ENTRIES = 10_000;
 
-  public consume(keys: string[], now = Date.now()): boolean {
-    this.pruneExpired(now);
-    const uniqueKeys = [...new Set(keys)];
-    const newKeyCount = uniqueKeys.filter((key) => !this.entries.has(key)).length;
-    if (this.entries.size + newKeyCount > LoginAttemptLimiter.MAX_ENTRIES) return false;
-    if (uniqueKeys.some((key) => {
-      const entry = this.entries.get(key);
-      return entry !== undefined && entry.count >= LoginAttemptLimiter.MAX_ATTEMPTS;
-    })) return false;
+  public constructor(
+    private readonly maximumAttempts: number,
+    private readonly windowMs: number,
+  ) {}
 
-    for (const key of uniqueKeys) {
-      const entry = this.entries.get(key);
-      this.entries.set(key, entry === undefined
-        ? { count: 1, resetAt: now + LoginAttemptLimiter.WINDOW_MS }
-        : { ...entry, count: entry.count + 1 });
-    }
-    return true;
+  public allowed(key: string, now = Date.now()): boolean {
+    this.pruneExpired(now);
+    const entry = this.entries.get(key);
+    if (entry !== undefined) return entry.count < this.maximumAttempts;
+    return this.entries.size < FailedAttemptLimiter.MAX_ENTRIES;
   }
 
-  public clear(keys: string[]): void {
-    for (const key of keys) this.entries.delete(key);
+  public recordFailure(key: string, now = Date.now()): void {
+    this.pruneExpired(now);
+    const entry = this.entries.get(key);
+    if (entry === undefined && this.entries.size >= FailedAttemptLimiter.MAX_ENTRIES) return;
+    this.entries.set(key, entry === undefined
+      ? { count: 1, resetAt: now + this.windowMs }
+      : { ...entry, count: entry.count + 1 });
+  }
+
+  public clear(key: string): void {
+    this.entries.delete(key);
   }
 
   private pruneExpired(now: number): void {

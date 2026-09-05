@@ -1,5 +1,7 @@
 import { XMLParser } from 'fast-xml-parser';
 
+import { findXmlCollectionPolicy, hasXmlSemanticPolicy } from './xml-semantics.js';
+
 export type XmlChangeKind = 'ADDED' | 'REMOVED' | 'MODIFIED' | 'REORDERED';
 
 export interface XmlChange {
@@ -33,10 +35,18 @@ const parser = new XMLParser({
   trimValues: false,
 });
 
-export function compareXml(leftXml: string, rightXml: string): XmlChange[] {
+export interface CompareXmlOptions {
+  metadataType?: string;
+}
+
+export function compareXml(
+  leftXml: string,
+  rightXml: string,
+  options: CompareXmlOptions = {},
+): XmlChange[] {
   const left = removeFormattingWhitespace(parser.parse(leftXml) as unknown);
   const right = removeFormattingWhitespace(parser.parse(rightXml) as unknown);
-  return diffValue(left, right, '');
+  return diffValue(left, right, '', options.metadataType);
 }
 
 function removeFormattingWhitespace(value: unknown): unknown {
@@ -57,7 +67,12 @@ function removeFormattingWhitespace(value: unknown): unknown {
   return normalized;
 }
 
-function diffValue(left: unknown, right: unknown, currentPath: string): XmlChange[] {
+function diffValue(
+  left: unknown,
+  right: unknown,
+  currentPath: string,
+  metadataType: string | undefined,
+): XmlChange[] {
   if (Object.is(left, right)) {
     return [];
   }
@@ -70,7 +85,7 @@ function diffValue(left: unknown, right: unknown, currentPath: string): XmlChang
   }
 
   if (Array.isArray(left) && Array.isArray(right)) {
-    return diffArray(left, right, currentPath);
+    return diffArray(left, right, currentPath, metadataType);
   }
 
   if (isRecord(left) && isRecord(right)) {
@@ -86,7 +101,8 @@ function diffValue(left: unknown, right: unknown, currentPath: string): XmlChang
     const keys = [...new Set([...Object.keys(left), ...Object.keys(right)])].sort((a, b) =>
       a.localeCompare(b),
     );
-    return keys.flatMap((key) => diffValue(left[key], right[key], appendPath(objectPath, key)));
+    return keys.flatMap((key) =>
+      diffValue(left[key], right[key], appendPath(objectPath, key), metadataType));
   }
 
   return [
@@ -99,9 +115,18 @@ function diffValue(left: unknown, right: unknown, currentPath: string): XmlChang
   ];
 }
 
-function diffArray(left: unknown[], right: unknown[], currentPath: string): XmlChange[] {
-  const leftIdentities = left.map(findIdentity);
-  const rightIdentities = right.map(findIdentity);
+function diffArray(
+  left: unknown[],
+  right: unknown[],
+  currentPath: string,
+  metadataType: string | undefined,
+): XmlChange[] {
+  const collectionPolicy = findXmlCollectionPolicy(metadataType, currentPath);
+  const identityKeys = collectionPolicy?.identityKeys
+    ?? (hasXmlSemanticPolicy(metadataType) ? [] : IDENTITY_KEYS);
+  const ordered = collectionPolicy?.ordered ?? true;
+  const leftIdentities = left.map((value) => findIdentity(value, identityKeys));
+  const rightIdentities = right.map((value) => findIdentity(value, identityKeys));
   const canMatchByIdentity =
     leftIdentities.every((identity) => identity !== undefined) &&
     rightIdentities.every((identity) => identity !== undefined) &&
@@ -112,7 +137,7 @@ function diffArray(left: unknown[], right: unknown[], currentPath: string): XmlC
     const changes: XmlChange[] = [];
     const length = Math.max(left.length, right.length);
     for (let index = 0; index < length; index += 1) {
-      changes.push(...diffValue(left[index], right[index], `${currentPath}[${index}]`));
+      changes.push(...diffValue(left[index], right[index], `${currentPath}[${index}]`, metadataType));
     }
     return changes;
   }
@@ -125,6 +150,7 @@ function diffArray(left: unknown[], right: unknown[], currentPath: string): XmlC
   const changes: XmlChange[] = [];
 
   if (
+    ordered &&
     leftIdentities.length === rightIdentities.length &&
     leftIdentities.every((identity) => rightByIdentity.has(identity!)) &&
     leftIdentities.some((identity, index) => identity !== rightIdentities[index])
@@ -143,6 +169,7 @@ function diffArray(left: unknown[], right: unknown[], currentPath: string): XmlC
         leftByIdentity.get(identity),
         rightByIdentity.get(identity),
         `${currentPath}[${identity}]`,
+        metadataType,
       ),
     );
   }
@@ -150,19 +177,24 @@ function diffArray(left: unknown[], right: unknown[], currentPath: string): XmlC
   return changes;
 }
 
-function findIdentity(value: unknown): string | undefined {
+function findIdentity(
+  value: unknown,
+  identityKeys: readonly string[] = IDENTITY_KEYS,
+): string | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
 
-  for (const key of IDENTITY_KEYS) {
+  const values: string[] = [];
+  for (const key of identityKeys) {
     const candidate = value[key];
     if (typeof candidate === 'string' || typeof candidate === 'number' || typeof candidate === 'boolean') {
-      return `${key}=${String(candidate)}`;
+      values.push(`${key}=${String(candidate)}`);
+      if (identityKeys === IDENTITY_KEYS) return values[0];
     }
   }
 
-  return undefined;
+  return values.length === 0 ? undefined : values.join('|');
 }
 
 function appendPath(currentPath: string, key: string): string {

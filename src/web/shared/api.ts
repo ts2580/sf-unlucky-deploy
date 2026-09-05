@@ -2,6 +2,9 @@ export interface HealthResponse {
   status: 'ok';
   service: 'sfud-ui';
   version: string;
+}
+
+export interface DiagnosticsResponse extends HealthResponse {
   host: string;
   port: number;
   storage: {

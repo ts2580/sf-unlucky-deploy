@@ -5,15 +5,15 @@ import { openSqliteStore, type SqliteStore } from '../../storage/sqlite-store.js
 import { UserRepository } from '../../storage/user-repository.js';
 import { AuthService } from '../../auth/auth-service.js';
 import { randomBytes } from 'node:crypto';
-import path from 'node:path';
 import { ProcessSfClient, type SfClient } from '../../salesforce/sf-client.js';
 import { ComparisonJobRepository } from '../../compare/comparison-job-repository.js';
 import { ComparisonService } from '../../compare/comparison-service.js';
-import { WorkspaceService } from './workspace-service.js';
+import { WorkspaceService, type WorkspaceServiceOptions } from './workspace-service.js';
 import { DryRunService } from '../../deploy/dry-run-service.js';
 import { DeploymentService } from '../../deploy/deployment-service.js';
 import { WorkflowEventHub } from './workflow-events.js';
 import { UserSettingsRepository } from '../../storage/user-settings-repository.js';
+import { RuntimeRunStorage } from '../../storage/runtime-run-storage.js';
 
 export interface WebRuntime {
   store: SqliteStore;
@@ -32,6 +32,7 @@ export interface WebRuntime {
   workflowEvents: WorkflowEventHub;
   recoveredJobCount: number;
   recoveredComparisonCount: number;
+  shutdown(graceMs?: number): Promise<void>;
 }
 
 export async function createWebRuntime(
@@ -40,6 +41,7 @@ export async function createWebRuntime(
   projectPaths: string[] = [],
   cwd = process.cwd(),
   sfClient: SfClient = new ProcessSfClient(),
+  workspaceOptions: WorkspaceServiceOptions = {},
 ): Promise<WebRuntime> {
   const store = await openSqliteStore({ databasePath });
   const workflowEvents = new WorkflowEventHub();
@@ -64,7 +66,7 @@ export async function createWebRuntime(
       ? bootstrapToken ?? process.env.SFUD_BOOTSTRAP_TOKEN ?? randomBytes(18).toString('base64url')
       : undefined,
   );
-  const workspace = await WorkspaceService.create(sfClient, cwd, projectPaths);
+  const workspace = await WorkspaceService.create(sfClient, cwd, projectPaths, workspaceOptions);
   const comparisonJobs = new ComparisonJobRepository(
     store.database,
     undefined,
@@ -79,12 +81,18 @@ export async function createWebRuntime(
   );
   const recoveredComparisonCount = await comparisonJobs.recoverInterrupted();
   const comparisonQueue = new SingleJobQueue();
-  const runsDirectory = path.join(
-    path.dirname(databasePath === ':memory:' ? path.join(cwd, '.sfud', 'sfud.db') : databasePath),
-    'runs',
-  );
+  let runStorage: RuntimeRunStorage;
+  try {
+    runStorage = await RuntimeRunStorage.create(databasePath, store.database);
+  } catch (error) {
+    await workspace.close();
+    await store.close();
+    throw error;
+  }
+  const runsDirectory = runStorage.directory;
   const deploymentCoordinator = new DeploymentCoordinator(deploymentJobs, deploymentQueue);
-  return {
+  let shutdownRequest: Promise<void> | undefined;
+  const runtime: WebRuntime = {
     store,
     users: new UserRepository(store.database),
     settings: new UserSettingsRepository(store.database),
@@ -118,5 +126,39 @@ export async function createWebRuntime(
     workflowEvents,
     recoveredJobCount,
     recoveredComparisonCount,
+    shutdown(graceMs = 10_000): Promise<void> {
+      if (shutdownRequest !== undefined) return shutdownRequest;
+      deploymentQueue.stopAccepting();
+      comparisonQueue.stopAccepting();
+      shutdownRequest = (async () => {
+        const drained = await Promise.all([
+          deploymentQueue.waitForIdle(graceMs),
+          comparisonQueue.waitForIdle(graceMs),
+        ]);
+        if (drained.some((value) => !value)) {
+          deploymentQueue.abort();
+          comparisonQueue.abort();
+          const aborted = await Promise.all([
+            deploymentQueue.waitForIdle(5_000),
+            comparisonQueue.waitForIdle(5_000),
+          ]);
+          if (aborted.some((value) => !value)) {
+            throw new Error('실행 중인 작업이 종료 제한시간 안에 중단되지 않았습니다. 저장소를 닫지 않습니다.');
+          }
+        }
+        await deploymentCoordinator.flushCompletions();
+        await deploymentJobs.recoverInterruptedJobs();
+        await comparisonJobs.recoverInterrupted();
+        await workspace.close();
+        await runStorage.close();
+        await store.close();
+      })().catch((error: unknown) => {
+        shutdownRequest = undefined;
+        throw error;
+      });
+      return shutdownRequest;
+    },
   };
+  runStorage.start();
+  return runtime;
 }

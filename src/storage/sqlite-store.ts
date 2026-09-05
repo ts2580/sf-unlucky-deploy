@@ -1,10 +1,11 @@
 import { chmod, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
-import { open, type Database } from 'sqlite';
+import { open } from 'sqlite';
 import sqlite3 from 'sqlite3';
 
 import { applyMigrations } from './migrations.js';
+import { DatabaseExecutor } from './database-executor.js';
 
 export interface SqliteStoreOptions {
   databasePath: string;
@@ -13,7 +14,7 @@ export interface SqliteStoreOptions {
 }
 
 export interface SqliteStore {
-  database: Database;
+  database: DatabaseExecutor;
   databasePath: string;
   close(): Promise<void>;
 }
@@ -29,15 +30,15 @@ export async function openSqliteStore(options: SqliteStoreOptions): Promise<Sqli
     await chmod(directory, 0o700);
   }
 
-  const database = await open({
+  const rawDatabase = await open({
     filename: databasePath,
     driver: sqlite3.Database,
   });
   try {
-    await database.exec('PRAGMA foreign_keys = ON');
-    await database.exec(`PRAGMA busy_timeout = ${options.busyTimeoutMs ?? 5_000}`);
-    await database.exec('PRAGMA journal_mode = WAL');
-    await applyMigrations(database, options.now ?? (() => new Date().toISOString()));
+    await rawDatabase.exec('PRAGMA foreign_keys = ON');
+    await rawDatabase.exec(`PRAGMA busy_timeout = ${options.busyTimeoutMs ?? 5_000}`);
+    await rawDatabase.exec('PRAGMA journal_mode = WAL');
+    await applyMigrations(rawDatabase, options.now ?? (() => new Date().toISOString()));
 
     if (databasePath !== ':memory:') {
       await Promise.all([
@@ -47,10 +48,11 @@ export async function openSqliteStore(options: SqliteStoreOptions): Promise<Sqli
       ].map(async (filePath) => chmodIfExists(filePath, 0o600)));
     }
   } catch (error) {
-    await database.close();
+    await rawDatabase.close();
     throw error;
   }
 
+  const database = new DatabaseExecutor(rawDatabase);
   return {
     database,
     databasePath,

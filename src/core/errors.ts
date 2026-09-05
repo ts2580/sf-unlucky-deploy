@@ -4,6 +4,8 @@ export type SfudErrorCode =
   | 'FILESYSTEM_ERROR'
   | 'SF_COMMAND_FAILED'
   | 'SF_COMMAND_TIMEOUT'
+  | 'SF_COMMAND_ABORTED'
+  | 'SF_OUTPUT_TOO_LARGE'
   | 'SF_EXTERNAL_STATE_UNKNOWN'
   | 'SF_RESPONSE_INVALID'
   | 'SNAPSHOT_FAILED'
@@ -13,6 +15,8 @@ export type SfudErrorCode =
   | 'REMOTE_BIND_DENIED'
   | 'STORAGE_ERROR'
   | 'INVALID_JOB_STATE'
+  | 'IDEMPOTENCY_CONFLICT'
+  | 'ORG_IDENTITY_CHANGED'
   | 'APPROVAL_DENIED';
 
 export class SfudError extends Error {

@@ -1,5 +1,5 @@
 import { createWriteStream } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -8,6 +8,7 @@ import type { FastifyInstance } from 'fastify';
 
 import { redactSensitiveText } from '../../salesforce/sf-client.js';
 import { requireAuthenticatedSession } from './auth-routes.js';
+import { UploadQuotaError } from './workspace-service.js';
 
 const MAX_FILE_COUNT = 2_000;
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
@@ -29,7 +30,7 @@ export async function registerProjectUploadRoutes(app: FastifyInstance): Promise
       } });
     }
 
-    const upload = await app.sfudRuntime.workspace.beginProjectUpload();
+    const upload = await app.sfudRuntime.workspace.beginProjectUpload(session.user.id);
     let fileCount = 0;
     let totalBytes = 0;
     let label: string | undefined;
@@ -56,13 +57,18 @@ export async function registerProjectUploadRoutes(app: FastifyInstance): Promise
         }
         fileCount += 1;
         const relativePath = safeUploadPath(part.filename);
-        const targetPath = path.join(upload.directory, ...relativePath.split('/'));
-        await mkdir(path.dirname(targetPath), { recursive: true, mode: 0o700 });
+        const targetPath = await resolveUploadTarget(upload.directory, relativePath);
         const counter = new Transform({
           transform(chunk: Buffer, _encoding, callback) {
             totalBytes += chunk.length;
             if (totalBytes > MAX_TOTAL_SIZE_BYTES) {
               callback(new UploadLimitError('업로드 프로젝트 전체 크기는 100MB 이하여야 합니다.'));
+              return;
+            }
+            try {
+              app.sfudRuntime.workspace.recordProjectUploadBytes(upload.id, chunk.length);
+            } catch (error) {
+              callback(error as Error);
               return;
             }
             callback(null, chunk);
@@ -90,11 +96,14 @@ export async function registerProjectUploadRoutes(app: FastifyInstance): Promise
     } catch (error) {
       await app.sfudRuntime.workspace.discardProjectUpload(upload.id);
       const tooLarge = error instanceof UploadLimitError
+        || error instanceof UploadQuotaError
         || error instanceof app.multipartErrors.RequestFileTooLargeError
         || error instanceof app.multipartErrors.FilesLimitError
         || error instanceof app.multipartErrors.PartsLimitError;
       return reply.code(tooLarge ? 413 : 400).send({ error: {
-        code: tooLarge ? 'PROJECT_UPLOAD_TOO_LARGE' : 'INVALID_PROJECT_UPLOAD',
+        code: error instanceof UploadQuotaError
+          ? 'PROJECT_UPLOAD_QUOTA_EXCEEDED'
+          : tooLarge ? 'PROJECT_UPLOAD_TOO_LARGE' : 'INVALID_PROJECT_UPLOAD',
         message: redactSensitiveText(error instanceof Error ? error.message : String(error))
           .replaceAll(upload.directory, '[임시 업로드]'),
       } });
@@ -130,14 +139,37 @@ function safeUploadPath(filename: string): string {
   }
   const segments = normalized.split('/');
   if (segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..'
-    || FORBIDDEN_DIRECTORIES.has(segment))) {
+    || FORBIDDEN_DIRECTORIES.has(segment.toLowerCase()))) {
     throw new Error('업로드할 수 없는 디렉토리가 포함되어 있습니다.');
+  }
+  if (segments.some((segment) => segment.includes(':') || /[. ]$/u.test(segment)
+    || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(segment))) {
+    throw new Error('Windows에서 안전하지 않은 파일 경로는 업로드할 수 없습니다.');
   }
   const basename = segments.at(-1)!.toLowerCase();
   if (basename === '.env' || basename.startsWith('.env.') || FORBIDDEN_EXTENSIONS.has(path.extname(basename))) {
     throw new Error('비밀 정보일 수 있는 파일은 업로드할 수 없습니다.');
   }
   return normalized;
+}
+
+async function resolveUploadTarget(uploadDirectory: string, relativePath: string): Promise<string> {
+  const root = await realpath(uploadDirectory);
+  const requestedPath = path.join(root, ...relativePath.split('/'));
+  await mkdir(path.dirname(requestedPath), { recursive: true, mode: 0o700 });
+  const parent = await realpath(path.dirname(requestedPath));
+  if (!isInsideOrEqual(root, parent)) throw new Error('업로드 파일 경로가 임시 저장소 밖을 가리킵니다.');
+  const targetPath = path.join(parent, path.basename(requestedPath));
+  if (!isInsideOrEqual(root, targetPath) || targetPath === root) {
+    throw new Error('업로드 파일 경로가 임시 저장소 밖을 가리킵니다.');
+  }
+  return targetPath;
+}
+
+function isInsideOrEqual(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === ''
+    || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 class UploadLimitError extends Error {}

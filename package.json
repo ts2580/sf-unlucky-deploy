@@ -1,29 +1,36 @@
 {
   "name": "sf-unlucky-deploy",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Salesforce 메타데이터를 비교하고 안전하게 검증·배포하는 CLI",
   "private": true,
+  "packageManager": "npm@11.7.0",
   "type": "module",
   "bin": {
     "sfud": "dist/cli.js"
   },
   "files": [
     "dist/",
-    "README.md"
+    "README.md",
+    "npm-shrinkwrap.json"
   ],
   "scripts": {
     "build": "npm run build:cli && npm run build:ui",
     "build:cli": "tsc --project tsconfig.build.json && node scripts/make-cli-executable.mjs",
     "build:ui": "vite build --config ui/vite.config.ts",
-    "check": "npm run typecheck && vitest run && npm run build",
+    "check": "npm run typecheck && npm run quality && vitest run && npm run build",
+    "dead-code": "knip --include exports,files",
     "dev": "tsx src/cli.ts",
     "dev:ui": "vite --config ui/vite.config.ts",
+    "lint": "eslint scripts/**/*.mjs *.config.mjs",
+    "package:smoke": "node scripts/package-smoke.mjs",
     "prepack": "npm run build",
     "release:check": "node scripts/check-release-version.mjs",
     "test": "vitest run",
     "test:e2e": "node scripts/run-playwright.mjs",
+    "test:platform": "vitest run test/sf-client.test.ts test/source-spec.test.ts test/project-upload-api.test.ts test/sqlite-store.test.ts",
     "test:watch": "vitest",
     "typecheck": "tsc --project tsconfig.json && tsc --project tsconfig.ui.json && tsc --project tsconfig.e2e.json",
+    "quality": "npm run lint && npm run dead-code",
     "verify": "npm run check && npm run test:e2e"
   },
   "engines": {
@@ -32,6 +39,7 @@
   "dependencies": {
     "@fastify/multipart": "^10.1.1",
     "@fastify/static": "^10.1.3",
+    "@sinclair/typebox": "^0.34.52",
     "commander": "^15.0.0",
     "diff": "^9.0.0",
     "fast-xml-parser": "^5.11.0",
@@ -43,12 +51,15 @@
     "sqlite3": "^6.0.1"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.62.1",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.2.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.1.0",
+    "eslint": "^10.9.1",
+    "knip": "^6.34.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2",
@@ -56,6 +67,7 @@
     "vitest": "^4.1.11"
   },
   "allowScripts": {
+    "esbuild@0.28.2": true,
     "sqlite3@6.0.1": true
   }
 }

@@ -59,7 +59,7 @@ export async function selectApexTestPlan(
   return { level: requestedLevel, tests: [], selection: 'configured' };
 }
 
-export async function discoverSuffixTests(packageRoot: string, testClassSuffix = '_Test'): Promise<string[]> {
+async function discoverSuffixTests(packageRoot: string, testClassSuffix = '_Test'): Promise<string[]> {
   return (await listFiles(packageRoot))
     .filter((relativePath) => {
       const normalizedPath = relativePath.toLocaleLowerCase();

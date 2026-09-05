@@ -8,9 +8,9 @@ import Fastify, { type FastifyInstance } from 'fastify';
 
 import { CLI_VERSION } from '../../program.js';
 import { resolveDatabasePath } from '../../storage/sqlite-store.js';
-import type { HealthResponse } from '../shared/api.js';
+import type { DiagnosticsResponse, HealthResponse } from '../shared/api.js';
 import { createWebRuntime, type WebRuntime } from './runtime.js';
-import { registerAuthRoutes } from './auth-routes.js';
+import { registerAuthRoutes, requireAuthenticatedSession } from './auth-routes.js';
 import { registerAdminRoutes } from './admin-routes.js';
 import { registerComparisonRoutes } from './comparison-routes.js';
 import { registerDeploymentRoutes } from './deployment-routes.js';
@@ -35,10 +35,19 @@ export interface WebServerOptions {
   bootstrapToken?: string;
   projectPaths?: string[];
   sfClient?: SfClient;
+  trustedProxies?: string[];
+  publicOrigin?: string;
+  userUploadQuotaBytes?: number;
+  serverUploadQuotaBytes?: number;
 }
 
 export async function createWebServer(options: WebServerOptions): Promise<FastifyInstance> {
-  const app = Fastify({ logger: options.logger ?? false });
+  const trustedProxies = options.trustedProxies ?? [];
+  const publicOrigin = normalizePublicOrigin(options.publicOrigin);
+  const app = Fastify({
+    logger: options.logger ?? false,
+    ...(trustedProxies.length === 0 ? {} : { trustProxy: trustedProxies }),
+  });
   const assetsDirectory = options.assetsDirectory ?? resolveDefaultAssetsDirectory();
   const databasePath = options.databasePath
     ?? resolveDatabasePath(process.cwd(), options.dataDirectory);
@@ -48,11 +57,32 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     options.projectPaths,
     process.cwd(),
     options.sfClient,
+    {
+      ...(options.userUploadQuotaBytes === undefined
+        ? {}
+        : { userUploadQuotaBytes: options.userUploadQuotaBytes }),
+      ...(options.serverUploadQuotaBytes === undefined
+        ? {}
+        : { serverUploadQuotaBytes: options.serverUploadQuotaBytes }),
+    },
   );
   app.decorate('sfudRuntime', runtime);
   app.addHook('onClose', async () => {
-    await runtime.workspace.close();
-    await runtime.store.close();
+    await runtime.shutdown();
+  });
+  app.addHook('onRequest', async (request, reply) => {
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('x-frame-options', 'DENY');
+    reply.header('referrer-policy', 'no-referrer');
+    reply.header('permissions-policy', 'camera=(), microphone=(), geolocation=()');
+    reply.header(
+      'content-security-policy',
+      "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'",
+    );
+    if (request.protocol === 'https') {
+      reply.header('strict-transport-security', 'max-age=31536000; includeSubDomains');
+    }
+    if (request.url.startsWith('/api/')) reply.header('cache-control', 'no-store');
   });
 
   await app.register(fastifyMultipart, {
@@ -70,6 +100,15 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     status: 'ok',
     service: 'sfud-ui',
     version: CLI_VERSION,
+  }));
+
+  app.get('/api/v1/diagnostics', async (request, reply): Promise<DiagnosticsResponse | undefined> => {
+    const session = await requireAuthenticatedSession(app, request, reply);
+    if (session === undefined) return;
+    return {
+      status: 'ok',
+      service: 'sfud-ui',
+      version: CLI_VERSION,
     host: options.host,
     port: options.port,
     storage: {
@@ -80,9 +119,10 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     comparisonQueue: runtime.comparisonQueue.status(),
     recoveredJobCount: runtime.recoveredJobCount,
     recoveredComparisonCount: runtime.recoveredComparisonCount,
-  }));
+    };
+  });
 
-  await registerAuthRoutes(app);
+  await registerAuthRoutes(app, publicOrigin === undefined ? {} : { publicOrigin });
   await registerAdminRoutes(app);
   await registerProjectUploadRoutes(app);
   await registerSettingsRoutes(app);
@@ -104,6 +144,20 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
   }
 
   return app;
+}
+
+function normalizePublicOrigin(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const parsed = new URL(value);
+  if (
+    !['http:', 'https:'].includes(parsed.protocol)
+    || parsed.username.length > 0
+    || parsed.password.length > 0
+    || parsed.pathname !== '/'
+    || parsed.search.length > 0
+    || parsed.hash.length > 0
+  ) throw new Error('publicOrigin은 경로가 없는 http(s) origin이어야 합니다.');
+  return parsed.origin;
 }
 
 export function resolveDefaultAssetsDirectory(moduleUrl = import.meta.url): string {

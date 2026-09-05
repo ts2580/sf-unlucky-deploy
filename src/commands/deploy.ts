@@ -1,6 +1,7 @@
 import path from 'node:path';
 
 import { SfudError } from '../core/errors.js';
+import { salesforceWaitCommandTimeoutMs } from '../core/deadline.js';
 import { sha256Directory, writeJson } from '../core/files.js';
 import { withRequestWorkspace } from '../core/request-workspace.js';
 import {
@@ -51,7 +52,15 @@ export interface DeployCommandDependencies {
   sfClient?: SfClient;
   stdout?: (value: string) => void;
   requestWorkspacePath?: string;
+  beforeDeploymentSubmit?: (phase: 'DRY_RUN' | 'DEPLOY') => Promise<void> | void;
+  onDeploymentSubmitted?: (deploymentId: string, phase: 'DRY_RUN' | 'DEPLOY') => Promise<void> | void;
   onDeploymentProgress?: (progress: SalesforceDeploymentProgress) => Promise<void> | void;
+  onDeploymentPersistenceError?: (
+    stage: 'submission' | 'progress',
+    error: unknown,
+    phase: 'DRY_RUN' | 'DEPLOY',
+  ) => Promise<void> | void;
+  signal?: AbortSignal;
 }
 
 export interface DeployCommandResult {
@@ -63,6 +72,7 @@ export interface DeployCommandResult {
   deployResult?: unknown;
   executed: boolean;
   testPlan: ApexTestPlan;
+  persistenceWarnings?: string[];
 }
 
 export async function runDeployCommand(
@@ -81,6 +91,8 @@ export async function runDeployCommand(
   const source = parseSourceSpec(options.from, cwd);
   const targetAlias = normalizeTargetAlias(options.to);
   const targetSource = parseSourceSpec(`org:${targetAlias}`, cwd);
+  const snapshotWaitMinutes = options.wait ?? 60;
+  const snapshotCommandTimeoutMs = salesforceWaitCommandTimeoutMs(snapshotWaitMinutes);
   const context = await createRunContext(cwd, options.reportDir, 'deploy');
   const generatedManifest = options.allMetadata === true || options.metadataType !== undefined
     ? await generateDeployableManifest({
@@ -89,6 +101,7 @@ export async function runDeployCommand(
       outputDirectory: path.join(context.rootDirectory, 'generated-manifest'),
       commandProjectPath,
       sfClient,
+      ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
     })
     : undefined;
   const manifestPath = generatedManifest?.manifestPath
@@ -107,6 +120,8 @@ export async function runDeployCommand(
       commandProjectPath,
       sfClient,
       waitMinutes: options.wait ?? 60,
+      commandTimeoutMs: snapshotCommandTimeoutMs,
+      ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
       ...(sourceManifests?.[0]?.empty === true ? { empty: true } : {}),
       ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
     }),
@@ -120,6 +135,8 @@ export async function runDeployCommand(
       commandProjectPath,
       sfClient,
       waitMinutes: options.wait ?? 60,
+      commandTimeoutMs: snapshotCommandTimeoutMs,
+      ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
       ...(sourceManifests?.[1]?.empty === true ? { empty: true } : {}),
       ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
     }),
@@ -142,6 +159,8 @@ export async function runDeployCommand(
       commandProjectPath,
       sfClient,
       waitMinutes: options.wait ?? 60,
+      commandTimeoutMs: snapshotCommandTimeoutMs,
+      ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
       metadataTypes: generatedManifest.metadataTypes,
       ...(generatedManifest.sourceManifests[1]!.empty ? { empty: true } : {}),
     });
@@ -167,8 +186,9 @@ export async function runDeployCommand(
   }
 
   await assertPayloadUnchanged(deploymentSnapshot.packageRoot, deploymentSnapshot.payloadSha256);
-  const deployArgs = buildDeployArgs(options, deploymentSnapshot.packageRoot, targetAlias, testPlan);
+  const deployArgs = buildDeployArgs(deploymentSnapshot.packageRoot, targetAlias, testPlan);
   const payloadEmpty = generatedManifest?.sourceManifests[1]?.empty === true;
+  const persistenceWarnings: string[] = [];
   const dryRunResult = options.skipDryRun === true
     ? undefined
     : payloadEmpty
@@ -180,10 +200,18 @@ export async function runDeployCommand(
         commandProjectPath,
         options.wait,
         'DRY_RUN',
+        dependencies.beforeDeploymentSubmit,
+        dependencies.onDeploymentSubmitted,
         dependencies.onDeploymentProgress,
+        dependencies.onDeploymentPersistenceError,
+        dependencies.signal,
       ));
   if (dryRunResult !== undefined) {
-    await writeJson(path.join(context.logsDirectory, 'dry-run.json'), dryRunResult);
+    try {
+      await writeJson(path.join(context.logsDirectory, 'dry-run.json'), dryRunResult);
+    } catch (error) {
+      persistenceWarnings.push(artifactWarning('dry-run', error));
+    }
   }
   if (options.minimumCoverage !== undefined) {
     requireMinimumApexCoverage(dryRunResult, options.minimumCoverage);
@@ -201,9 +229,17 @@ export async function runDeployCommand(
         commandProjectPath,
         options.wait,
         'DEPLOY',
+        dependencies.beforeDeploymentSubmit,
+        dependencies.onDeploymentSubmitted,
         dependencies.onDeploymentProgress,
+        dependencies.onDeploymentPersistenceError,
+        dependencies.signal,
       ));
-    await writeJson(path.join(context.logsDirectory, 'deploy.json'), deployResult);
+    try {
+      await writeJson(path.join(context.logsDirectory, 'deploy.json'), deployResult);
+    } catch (error) {
+      persistenceWarnings.push(artifactWarning('deploy', error));
+    }
   }
 
   const result: DeployCommandResult = {
@@ -215,6 +251,7 @@ export async function runDeployCommand(
     ...(deployResult === undefined ? {} : { deployResult }),
     executed: options.execute ?? false,
     testPlan,
+    ...(persistenceWarnings.length === 0 ? {} : { persistenceWarnings }),
   };
   if (!options.json) {
     stdout(options.execute
@@ -223,6 +260,11 @@ export async function runDeployCommand(
   }
   emitJsonIfRequested(options.json, stdout, result);
   return result;
+}
+
+function artifactWarning(phase: 'dry-run' | 'deploy', error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return `${phase} Salesforce 결과 파일 저장 실패: ${message}`;
 }
 
 function emptyDeploymentResult(checkOnly: boolean): unknown {
@@ -244,7 +286,15 @@ async function runDeploymentRequest(
   cwd: string,
   waitMinutes = 60,
   phase: 'DRY_RUN' | 'DEPLOY',
+  beforeSubmit?: (phase: 'DRY_RUN' | 'DEPLOY') => Promise<void> | void,
+  onSubmitted?: (deploymentId: string, phase: 'DRY_RUN' | 'DEPLOY') => Promise<void> | void,
   onProgress?: (progress: SalesforceDeploymentProgress) => Promise<void> | void,
+  onPersistenceError?: (
+    stage: 'submission' | 'progress',
+    error: unknown,
+    phase: 'DRY_RUN' | 'DEPLOY',
+  ) => Promise<void> | void,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   return await runAsyncSalesforceDeployment({
     sfClient,
@@ -253,12 +303,23 @@ async function runDeploymentRequest(
     cwd,
     waitMinutes,
     phase,
+    ...(beforeSubmit === undefined ? {} : {
+      beforeSubmit: async () => { await beforeSubmit(phase); },
+    }),
+    ...(onSubmitted === undefined ? {} : {
+      onSubmitted: async (deploymentId: string) => { await onSubmitted(deploymentId, phase); },
+    }),
     ...(onProgress === undefined ? {} : { onProgress }),
+    ...(onPersistenceError === undefined ? {} : {
+      onPersistenceError: async (stage: 'submission' | 'progress', error: unknown) => {
+        await onPersistenceError(stage, error, phase);
+      },
+    }),
+    ...(signal === undefined ? {} : { signal }),
   });
 }
 
 function buildDeployArgs(
-  options: DeployCommandOptions,
   metadataDirectory: string,
   targetAlias: string,
   testPlan: ApexTestPlan,

@@ -303,6 +303,99 @@ const MIGRATIONS: Migration[] = [
       ) STRICT;
     `,
   },
+  {
+    version: 12,
+    name: 'deployment_remote_state',
+    sql: `
+      ALTER TABLE deployment_jobs
+      ADD COLUMN remote_status TEXT NOT NULL DEFAULT 'NOT_SUBMITTED'
+      CHECK (remote_status IN ('NOT_SUBMITTED', 'SUBMITTED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'UNKNOWN'));
+      ALTER TABLE deployment_jobs ADD COLUMN persistence_warning TEXT;
+    `,
+  },
+  {
+    version: 13,
+    name: 'direct_deployment_idempotency',
+    sql: `
+      ALTER TABLE deployment_jobs ADD COLUMN client_request_id TEXT;
+      ALTER TABLE deployment_jobs ADD COLUMN request_hash TEXT;
+      CREATE UNIQUE INDEX idx_deployment_jobs_direct_request
+      ON deployment_jobs(created_by, client_request_id)
+      WHERE kind = 'DEPLOY' AND dry_run_job_id IS NULL AND client_request_id IS NOT NULL;
+    `,
+  },
+  {
+    version: 14,
+    name: 'deployment_org_identity',
+    sql: `
+      ALTER TABLE deployment_jobs ADD COLUMN source_org_identity_json TEXT;
+      ALTER TABLE deployment_jobs ADD COLUMN target_org_identity_json TEXT;
+    `,
+  },
+  {
+    version: 15,
+    name: 'job_summary_columns',
+    sql: `
+      ALTER TABLE comparison_jobs ADD COLUMN summary_added INTEGER;
+      ALTER TABLE comparison_jobs ADD COLUMN summary_removed INTEGER;
+      ALTER TABLE comparison_jobs ADD COLUMN summary_modified INTEGER;
+      ALTER TABLE comparison_jobs ADD COLUMN summary_identical INTEGER;
+      ALTER TABLE comparison_jobs ADD COLUMN summary_total INTEGER;
+      ALTER TABLE comparison_jobs ADD COLUMN summary_different INTEGER;
+
+      UPDATE comparison_jobs SET
+        summary_added = CAST(json_extract(result_json, '$.summary.added') AS INTEGER),
+        summary_removed = CAST(json_extract(result_json, '$.summary.removed') AS INTEGER),
+        summary_modified = CAST(json_extract(result_json, '$.summary.modified') AS INTEGER),
+        summary_identical = CAST(json_extract(result_json, '$.summary.identical') AS INTEGER),
+        summary_total = CAST(json_extract(result_json, '$.summary.total') AS INTEGER),
+        summary_different = CAST(json_extract(result_json, '$.summary.different') AS INTEGER)
+      WHERE result_json IS NOT NULL AND json_valid(result_json);
+
+      ALTER TABLE deployment_jobs ADD COLUMN summary_added INTEGER;
+      ALTER TABLE deployment_jobs ADD COLUMN summary_removed INTEGER;
+      ALTER TABLE deployment_jobs ADD COLUMN summary_modified INTEGER;
+      ALTER TABLE deployment_jobs ADD COLUMN summary_identical INTEGER;
+      ALTER TABLE deployment_jobs ADD COLUMN summary_total INTEGER;
+      ALTER TABLE deployment_jobs ADD COLUMN summary_different INTEGER;
+
+      UPDATE deployment_jobs SET
+        summary_added = CAST(json_extract(comparison_result_json, '$.summary.added') AS INTEGER),
+        summary_removed = CAST(json_extract(comparison_result_json, '$.summary.removed') AS INTEGER),
+        summary_modified = CAST(json_extract(comparison_result_json, '$.summary.modified') AS INTEGER),
+        summary_identical = CAST(json_extract(comparison_result_json, '$.summary.identical') AS INTEGER),
+        summary_total = CAST(json_extract(comparison_result_json, '$.summary.total') AS INTEGER),
+        summary_different = CAST(json_extract(comparison_result_json, '$.summary.different') AS INTEGER)
+      WHERE comparison_result_json IS NOT NULL AND json_valid(comparison_result_json);
+    `,
+  },
+  {
+    version: 16,
+    name: 'compressed_job_artifacts',
+    sql: `
+      ALTER TABLE comparison_jobs ADD COLUMN result_artifact_path TEXT;
+      ALTER TABLE deployment_jobs ADD COLUMN comparison_artifact_path TEXT;
+      ALTER TABLE deployment_jobs ADD COLUMN dry_run_artifact_path TEXT;
+      ALTER TABLE deployment_jobs ADD COLUMN deployment_artifact_path TEXT;
+    `,
+  },
+  {
+    version: 17,
+    name: 'deployment_test_coverage_summary',
+    sql: `
+      ALTER TABLE deployment_jobs ADD COLUMN test_coverage REAL
+      CHECK (test_coverage IS NULL OR (test_coverage >= 0 AND test_coverage <= 100));
+    `,
+  },
+  {
+    version: 18,
+    name: 'dry_run_idempotency',
+    sql: `
+      CREATE UNIQUE INDEX idx_deployment_jobs_dry_run_request
+      ON deployment_jobs(created_by, client_request_id)
+      WHERE kind = 'DRY_RUN' AND client_request_id IS NOT NULL;
+    `,
+  },
 ];
 
 export async function applyMigrations(

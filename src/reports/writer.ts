@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { writeJson } from '../core/files.js';
@@ -19,7 +19,8 @@ export async function writeComparisonReports(
   result: ComparisonResult,
   reportDirectory: string,
 ): Promise<ReportPaths> {
-  await mkdir(reportDirectory, { recursive: true });
+  await mkdir(reportDirectory, { recursive: true, mode: 0o700 });
+  await chmod(reportDirectory, 0o700);
   const paths: ReportPaths = {
     directory: reportDirectory,
     markdown: path.join(reportDirectory, 'summary.md'),
@@ -30,10 +31,10 @@ export async function writeComparisonReports(
   };
 
   await Promise.all([
-    writeFile(paths.markdown, renderMarkdownReport(result), 'utf8'),
+    writeSecureText(paths.markdown, renderMarkdownReport(result)),
     writeJson(paths.json, result),
-    writeFile(paths.diff, renderContentDiff(result), 'utf8'),
-    writeFile(paths.html, renderHtmlReport(result), 'utf8'),
+    writeSecureText(paths.diff, renderContentDiff(result)),
+    writeSecureText(paths.html, renderHtmlReport(result)),
     writeJson(paths.checksums, {
       manifestSha256: result.left.manifestSha256,
       leftPayloadSha256: result.left.payloadSha256,
@@ -44,8 +45,22 @@ export async function writeComparisonReports(
   return paths;
 }
 
+async function writeSecureText(filePath: string, contents: string): Promise<void> {
+  await writeFile(filePath, contents, { encoding: 'utf8', mode: 0o600 });
+  await chmod(filePath, 0o600);
+}
+
 function renderContentDiff(result: ComparisonResult): string {
   const lines: string[] = [];
+  for (const component of result.components) {
+    for (const file of component.files) {
+      if (file.rawContentChanged === true && file.xmlSemanticStatus === 'EQUAL') {
+        const policy = file.xmlComparisonPolicy === 'REGISTERED' ? 'metadata type 등록' : 'generic';
+        lines.push(`# XML SEMANTIC EQUAL ${component.type}:${component.fullName}`);
+        lines.push(`## RAW SHA-256 DIFFERENT ${file.path} (${policy} 정책)`, '');
+      }
+    }
+  }
   for (const component of result.components.filter((candidate) => candidate.status !== 'IDENTICAL')) {
     lines.push(`# ${component.status} ${component.type}:${component.fullName}`);
     for (const file of component.files.filter((candidate) => candidate.status !== 'IDENTICAL')) {

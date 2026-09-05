@@ -14,6 +14,7 @@ export interface CreateComparisonInput {
   manifest?: string;
   leftSourceId: string;
   rightSourceId: string;
+  sourceOnly?: boolean;
   strict: boolean;
   showIdentical: boolean;
   createdBy: string;
@@ -29,15 +30,16 @@ export class ComparisonService {
   ) {}
 
   public async create(input: CreateComparisonInput): Promise<ComparisonJob> {
+    this.queue.assertAccepting();
     const scope = input.scope ?? 'manifest';
-    const [leftSource, rightSource] = await Promise.all([
-      this.workspace.resolveSource(input.leftSourceId, input.createdBy),
-      this.workspace.resolveSource(input.rightSourceId, input.createdBy),
-    ]);
+    const rightSource = await this.workspace.resolveSource(input.rightSourceId, input.createdBy);
+    const leftSource = input.sourceOnly === true
+      ? rightSource
+      : await this.workspace.resolveSource(input.leftSourceId, input.createdBy);
     const project = scope === 'all'
-      ? this.workspace.projectForSources([leftSource, rightSource])
+      ? this.workspace.projectForSources(input.sourceOnly === true ? [rightSource] : [leftSource, rightSource])
       : await this.workspace.resolveProject(requiredProjectId(input.projectId));
-    if (leftSource === rightSource) throw new Error('서로 다른 비교 소스를 선택하세요.');
+    if (input.sourceOnly !== true && leftSource === rightSource) throw new Error('서로 다른 비교 소스를 선택하세요.');
     if (scope !== 'all' && input.metadataType !== undefined) {
       throw new Error('Salesforce metadata type은 전체 metadata 비교에서만 선택할 수 있습니다.');
     }
@@ -46,7 +48,7 @@ export class ComparisonService {
     }
     if (input.metadataType !== undefined) {
       const availableTypes = await this.workspace.listMetadataTypes([
-        input.leftSourceId,
+        ...(input.sourceOnly === true ? [] : [input.leftSourceId]),
         input.rightSourceId,
       ], input.createdBy);
       if (!availableTypes.some((entry) => entry.name === input.metadataType)) {
@@ -60,11 +62,12 @@ export class ComparisonService {
         requiredManifest(input.manifest),
       )).path;
     const releaseSources = this.workspace.pinSources(
-      [input.leftSourceId, input.rightSourceId],
+      input.sourceOnly === true ? [input.rightSourceId] : [input.leftSourceId, input.rightSourceId],
       input.createdBy,
     );
     let job: ComparisonJob;
     try {
+      this.queue.assertAccepting();
       job = await this.repository.create({
         scope: scope === 'all' ? 'ALL' : 'MANIFEST',
         ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
@@ -80,9 +83,9 @@ export class ComparisonService {
       releaseSources();
       throw error;
     }
-    void this.queue.enqueue(job.id, async () => {
+    void this.queue.enqueue(job.id, async (signal) => {
       try {
-        await this.execute(job.id);
+        await this.execute(job.id, signal);
       } finally {
         releaseSources();
       }
@@ -90,7 +93,7 @@ export class ComparisonService {
     return job;
   }
 
-  private async execute(jobId: string): Promise<void> {
+  private async execute(jobId: string, signal: AbortSignal): Promise<void> {
     await this.repository.markRunning(jobId);
     const job = await this.repository.getRequired(jobId);
     try {
@@ -106,11 +109,13 @@ export class ComparisonService {
         reportDir: path.join(this.runsDirectory, job.id),
         strict: job.strict,
         showIdentical: job.showIdentical,
+        sourceOnly: job.leftSource === job.rightSource,
         color: false,
       }, {
         cwd: job.projectPath,
         sfClient: this.sfClient,
         stdout: () => undefined,
+        signal,
       });
       await this.repository.markSucceeded(job.id, result.comparison, result.runDirectory);
     } catch (error) {

@@ -4,11 +4,16 @@ import path from 'node:path';
 import { XMLParser } from 'fast-xml-parser';
 
 import { SfudError } from '../core/errors.js';
-import { listFiles, pathExists, writeJson } from '../core/files.js';
+import { pathExists, writeJson } from '../core/files.js';
 import { readProjectApiVersion } from '../core/request-workspace.js';
 import type { SfClient } from '../salesforce/sf-client.js';
 import type { SourceSpec } from '../sources/source-spec.js';
 import type { MetadataTypeDescriptor } from './component-resolver.js';
+import {
+  discoverLocalMetadataTypes,
+  mergeMetadataTypeDescriptors,
+  resolveLocalPackageDirectories,
+} from './local-metadata.js';
 
 interface DeployableManifestOptions {
   sources: readonly SourceSpec[];
@@ -16,15 +21,12 @@ interface DeployableManifestOptions {
   outputDirectory: string;
   commandProjectPath: string;
   sfClient: SfClient;
+  signal?: AbortSignal;
 }
 
 interface ParsedManifest {
   version?: string;
   types: Map<string, Set<string>>;
-}
-
-interface ProjectConfiguration {
-  packageDirectories?: Array<{ path?: unknown }>;
 }
 
 export interface GeneratedDeployableManifest {
@@ -45,7 +47,7 @@ export async function generateDeployableManifest(
   }
 
   const sourceDirectory = path.join(options.outputDirectory, 'sources');
-  await mkdir(sourceDirectory, { recursive: true });
+  await mkdir(sourceDirectory, { recursive: true, mode: 0o700 });
   const apiVersion = await readProjectApiVersion(options.commandProjectPath);
   const generated = await Promise.all(options.sources.map(async (source, index) => {
     const name = `${String(index + 1).padStart(2, '0')}-${source.kind}.xml`;
@@ -70,6 +72,7 @@ export async function generateDeployableManifest(
       await options.sfClient.runJson(args, {
         cwd: options.commandProjectPath,
         timeoutMs: options.metadataTypes === undefined ? 35 * 60 * 1000 : 5 * 60 * 1000,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
       metadataTypes = parseMetadataTypes(await options.sfClient.runJson([
         'org',
@@ -79,17 +82,22 @@ export async function generateDeployableManifest(
         source.alias,
         '--api-version',
         apiVersion,
-      ], { cwd: options.commandProjectPath, timeoutMs: 60_000 }));
+      ], {
+        cwd: options.commandProjectPath,
+        timeoutMs: 60_000,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      }));
     } else {
-      const sourceDirectories = await readPackageDirectories(source.projectPath);
+      const sourceDirectories = await resolveLocalPackageDirectories(source.projectPath);
       for (const sourcePath of sourceDirectories) {
         args.push('--source-dir', sourcePath);
       }
       await options.sfClient.runJson(args, {
         cwd: source.projectPath,
         timeoutMs: options.metadataTypes === undefined ? 35 * 60 * 1000 : 5 * 60 * 1000,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
-      metadataTypes = await discoverLocalMetadataTypes(sourceDirectories);
+      metadataTypes = await discoverLocalMetadataTypes(source.projectPath);
     }
 
     const generatedPath = path.join(sourceDirectory, name);
@@ -105,7 +113,7 @@ export async function generateDeployableManifest(
   const manifests = await Promise.all(generated.map(({ generatedPath }) => parseManifest(generatedPath)));
   const merged = filterManifestTypes(mergeManifests(manifests), options.metadataTypes);
   const outputPath = path.join(options.outputDirectory, 'package.xml');
-  const metadataTypes = mergeMetadataTypes(generated.flatMap((entry) => entry.metadataTypes));
+  const metadataTypes = mergeMetadataTypeDescriptors(generated.flatMap((entry) => entry.metadataTypes));
   const sourceManifests = generated.map(({ generatedPath }, index) => ({
     manifestPath: generatedPath,
     parsed: filterManifestTypes(manifests[index]!, options.metadataTypes),
@@ -149,79 +157,6 @@ function parseMetadataTypes(value: unknown): MetadataTypeDescriptor[] {
       ...(typeof entry.suffix === 'string' ? { suffix: entry.suffix } : {}),
     }];
   });
-}
-
-function mergeMetadataTypes(values: readonly MetadataTypeDescriptor[]): MetadataTypeDescriptor[] {
-  const unique = new Map<string, MetadataTypeDescriptor>();
-  for (const value of values) {
-    unique.set(`${value.directoryName}:${value.xmlName}:${value.suffix ?? ''}`, value);
-  }
-  return [...unique.values()].sort((left, right) =>
-    left.directoryName.localeCompare(right.directoryName)
-      || left.xmlName.localeCompare(right.xmlName)
-      || (left.suffix ?? '').localeCompare(right.suffix ?? ''));
-}
-
-async function readPackageDirectories(projectPath: string): Promise<string[]> {
-  const configurationPath = path.join(projectPath, 'sfdx-project.json');
-  const configuration = await readProjectConfiguration(configurationPath);
-  const directories = configuration.packageDirectories
-    ?.map((entry) => typeof entry.path === 'string' ? entry.path.trim() : '')
-    .filter((entry) => entry.length > 0) ?? [];
-  if (directories.length === 0) {
-    throw new SfudError(
-      'INVALID_SOURCE',
-      `packageDirectories가 없는 Salesforce DX 프로젝트입니다: ${projectPath}`,
-    );
-  }
-  return directories.map((entry) => path.resolve(projectPath, entry));
-}
-
-async function discoverLocalMetadataTypes(
-  sourceDirectories: readonly string[],
-): Promise<MetadataTypeDescriptor[]> {
-  const descriptors: MetadataTypeDescriptor[] = [];
-  for (const sourceDirectory of sourceDirectories) {
-    for (const relativePath of await listFiles(sourceDirectory)) {
-      if (!relativePath.endsWith('-meta.xml')) continue;
-      const metadataPath = stripStandardSourcePrefix(relativePath);
-      const directoryName = metadataPath.split('/')[0];
-      if (directoryName === undefined || directoryName.length === 0) continue;
-      const xmlName = extractRootElement(await readFile(path.join(sourceDirectory, relativePath), 'utf8'));
-      if (xmlName === undefined) continue;
-      const sourcePath = metadataPath.slice(0, -'-meta.xml'.length);
-      const extension = path.posix.extname(sourcePath);
-      descriptors.push({
-        directoryName,
-        xmlName,
-        ...(extension.length <= 1 ? {} : { suffix: extension.slice(1) }),
-      });
-    }
-  }
-  return mergeMetadataTypes(descriptors);
-}
-
-function stripStandardSourcePrefix(relativePath: string): string {
-  const parts = relativePath.split('/');
-  return parts[0] === 'main' && parts[1] === 'default'
-    ? parts.slice(2).join('/')
-    : relativePath;
-}
-
-function extractRootElement(xml: string): string | undefined {
-  return xml.match(/<(?![?!/])(?:[A-Za-z_][\w.-]*:)?([A-Za-z_][\w.-]*)[\s>]/u)?.[1];
-}
-
-async function readProjectConfiguration(configurationPath: string): Promise<ProjectConfiguration> {
-  try {
-    return JSON.parse(await readFile(configurationPath, 'utf8')) as ProjectConfiguration;
-  } catch (error) {
-    throw new SfudError(
-      'INVALID_SOURCE',
-      `sfdx-project.json을 읽을 수 없습니다: ${configurationPath}`,
-      { cause: error },
-    );
-  }
 }
 
 async function parseManifest(manifestPath: string): Promise<ParsedManifest> {

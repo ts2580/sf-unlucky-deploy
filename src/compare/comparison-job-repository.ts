@@ -1,8 +1,11 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Database } from 'sqlite';
-
-import type { ComparisonResult } from '../metadata/comparator.js';
+import type { ComparisonResult, ComparisonSummary } from '../metadata/comparator.js';
+import type { DatabaseExecutor, DatabaseHandle } from '../storage/database-executor.js';
+import {
+  readCompressedJsonArtifact,
+  writeCompressedJsonArtifact,
+} from '../storage/json-artifact.js';
 import { runInImmediateTransaction } from '../storage/transaction.js';
 
 export type ComparisonJobStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
@@ -21,6 +24,8 @@ export interface ComparisonJob {
   showIdentical: boolean;
   createdBy: string;
   runDirectory?: string;
+  resultArtifactPath?: string;
+  summary?: ComparisonSummary;
   result?: ComparisonResult;
   errorCode?: string;
   errorMessage?: string;
@@ -55,7 +60,14 @@ interface ComparisonJobRow {
   show_identical: number;
   created_by: string;
   run_directory: string | null;
-  result_json: string | null;
+  result_json?: string | null;
+  result_artifact_path?: string | null;
+  summary_added: number | null;
+  summary_removed: number | null;
+  summary_modified: number | null;
+  summary_identical: number | null;
+  summary_total: number | null;
+  summary_different: number | null;
   error_code: string | null;
   error_message: string | null;
   created_at: string;
@@ -66,7 +78,7 @@ interface ComparisonJobRow {
 
 export class ComparisonJobRepository {
   public constructor(
-    private readonly database: Database,
+    private readonly database: DatabaseExecutor,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly createId: () => string = randomUUID,
     private readonly onChanged?: (job: ComparisonJob) => void,
@@ -75,8 +87,8 @@ export class ComparisonJobRepository {
   public async create(input: CreateComparisonJobInput): Promise<ComparisonJob> {
     const id = this.createId();
     const timestamp = this.now();
-    await runInImmediateTransaction(this.database, async () => {
-      await this.database.run(`
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      await transaction.run(`
         INSERT INTO comparison_jobs (
           id, status, scope, metadata_type, project_path, manifest_path, left_source, right_source,
           strict, show_identical, created_by, created_at, updated_at
@@ -84,7 +96,7 @@ export class ComparisonJobRepository {
       `, id, input.scope ?? 'MANIFEST', input.metadataType ?? null,
       input.projectPath, input.manifestPath, input.leftSource, input.rightSource,
       input.strict ? 1 : 0, input.showIdentical ? 1 : 0, input.createdBy, timestamp, timestamp);
-      await this.writeAudit(input.createdBy, 'COMPARISON_QUEUED', id, {
+      await this.writeAudit(transaction, input.createdBy, 'COMPARISON_QUEUED', id, {
         left: input.leftSource,
         right: input.rightSource,
       }, timestamp);
@@ -94,7 +106,7 @@ export class ComparisonJobRepository {
 
   public async get(id: string): Promise<ComparisonJob | undefined> {
     const row = await this.database.get<ComparisonJobRow>('SELECT * FROM comparison_jobs WHERE id = ?', id);
-    return row === undefined ? undefined : mapRow(row);
+    return row === undefined ? undefined : await hydrateResult(mapRow(row));
   }
 
   public async getRequired(id: string): Promise<ComparisonJob> {
@@ -115,15 +127,27 @@ export class ComparisonJobRepository {
 
   public async markSucceeded(id: string, resultValue: ComparisonResult, runDirectory: string): Promise<void> {
     const timestamp = this.now();
-    await runInImmediateTransaction(this.database, async () => {
-      const result = await this.database.run(`
+    const resultArtifactPath = await writeCompressedJsonArtifact(
+      runDirectory,
+      'comparison.json.gz',
+      resultValue,
+    );
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const result = await transaction.run(`
         UPDATE comparison_jobs
-        SET status = 'SUCCEEDED', result_json = ?, run_directory = ?, updated_at = ?, completed_at = ?
+        SET status = 'SUCCEEDED', result_json = NULL, result_artifact_path = ?, run_directory = ?,
+            summary_added = ?, summary_removed = ?, summary_modified = ?,
+            summary_identical = ?, summary_total = ?, summary_different = ?,
+            updated_at = ?, completed_at = ?
         WHERE id = ? AND status = 'RUNNING'
-      `, JSON.stringify(resultValue), runDirectory, timestamp, timestamp, id);
+      `,
+      resultArtifactPath, runDirectory,
+      resultValue.summary.added, resultValue.summary.removed, resultValue.summary.modified,
+      resultValue.summary.identical, resultValue.summary.total, resultValue.summary.different,
+      timestamp, timestamp, id);
       if (result.changes !== 1) throw new Error(`완료할 수 없는 비교 작업입니다: ${id}`);
-      const job = await this.getRequired(id);
-      await this.writeAudit(job.createdBy, 'COMPARISON_SUCCEEDED', id, { ...resultValue.summary }, timestamp);
+      const job = await getRequired(transaction, id);
+      await this.writeAudit(transaction, job.createdBy, 'COMPARISON_SUCCEEDED', id, { ...resultValue.summary }, timestamp);
     });
     this.notify(await this.getRequired(id));
   }
@@ -131,16 +155,16 @@ export class ComparisonJobRepository {
   public async markFailed(id: string, code: string, message: string): Promise<void> {
     const timestamp = this.now();
     let changed = false;
-    await runInImmediateTransaction(this.database, async () => {
-      const result = await this.database.run(`
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const result = await transaction.run(`
         UPDATE comparison_jobs
         SET status = 'FAILED', error_code = ?, error_message = ?, updated_at = ?, completed_at = ?
         WHERE id = ? AND status IN ('QUEUED', 'RUNNING')
       `, code, message, timestamp, timestamp, id);
       if (result.changes !== 1) return;
       changed = true;
-      const job = await this.getRequired(id);
-      await this.writeAudit(job.createdBy, 'COMPARISON_FAILED', id, { code }, timestamp);
+      const job = await getRequired(transaction, id);
+      await this.writeAudit(transaction, job.createdBy, 'COMPARISON_FAILED', id, { code }, timestamp);
     });
     if (changed) this.notify(await this.getRequired(id));
   }
@@ -158,8 +182,19 @@ export class ComparisonJobRepository {
   }
 
   public async listRecent(limit = 30): Promise<ComparisonJob[]> {
-    return (await this.database.all<ComparisonJobRow[]>(`
+    const jobs = (await this.database.all<ComparisonJobRow[]>(`
       SELECT * FROM comparison_jobs ORDER BY created_at DESC, id DESC LIMIT ?
+    `, Math.min(Math.max(limit, 1), 100))).map(mapRow);
+    return await Promise.all(jobs.map(hydrateResult));
+  }
+
+  public async listRecentSummary(limit = 30): Promise<ComparisonJob[]> {
+    return (await this.database.all<ComparisonJobRow[]>(`
+      SELECT id, status, scope, metadata_type, project_path, manifest_path, left_source, right_source,
+        strict, show_identical, created_by, run_directory,
+        summary_added, summary_removed, summary_modified, summary_identical, summary_total, summary_different,
+        error_code, error_message, created_at, updated_at, started_at, completed_at
+      FROM comparison_jobs ORDER BY created_at DESC, id DESC LIMIT ?
     `, Math.min(Math.max(limit, 1), 100))).map(mapRow);
   }
 
@@ -169,20 +204,31 @@ export class ComparisonJobRepository {
   }
 
   private async writeAudit(
+    database: DatabaseHandle,
     actorUserId: string,
     eventType: string,
     entityId: string,
     detail: Record<string, unknown>,
     timestamp: string,
   ): Promise<void> {
-    await this.database.run(`
+    await database.run(`
       INSERT INTO audit_events (actor_user_id, event_type, entity_type, entity_id, detail_json, created_at)
       VALUES (?, ?, 'COMPARISON_JOB', ?, ?, ?)
     `, actorUserId, eventType, entityId, JSON.stringify(detail), timestamp);
   }
 }
 
+async function getRequired(database: DatabaseHandle, id: string): Promise<ComparisonJob> {
+  const row = await database.get<ComparisonJobRow>('SELECT * FROM comparison_jobs WHERE id = ?', id);
+  if (row === undefined) throw new Error(`비교 작업을 찾을 수 없습니다: ${id}`);
+  return mapRow(row);
+}
+
 function mapRow(row: ComparisonJobRow): ComparisonJob {
+  const result = row.result_json == null
+    ? undefined
+    : JSON.parse(row.result_json) as ComparisonResult;
+  const summary = summaryFromRow(row) ?? result?.summary;
   return {
     id: row.id,
     status: row.status,
@@ -196,12 +242,47 @@ function mapRow(row: ComparisonJobRow): ComparisonJob {
     showIdentical: row.show_identical === 1,
     createdBy: row.created_by,
     ...(row.run_directory === null ? {} : { runDirectory: row.run_directory }),
-    ...(row.result_json === null ? {} : { result: JSON.parse(row.result_json) as ComparisonResult }),
+    ...(row.result_artifact_path == null ? {} : { resultArtifactPath: row.result_artifact_path }),
+    ...(summary === undefined ? {} : { summary }),
+    ...(result === undefined ? {} : { result }),
     ...(row.error_code === null ? {} : { errorCode: row.error_code }),
     ...(row.error_message === null ? {} : { errorMessage: row.error_message }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.started_at === null ? {} : { startedAt: row.started_at }),
     ...(row.completed_at === null ? {} : { completedAt: row.completed_at }),
+  };
+}
+
+async function hydrateResult(job: ComparisonJob): Promise<ComparisonJob> {
+  if (
+    job.result !== undefined
+    || job.resultArtifactPath === undefined
+    || job.runDirectory === undefined
+  ) return job;
+  const result = await readCompressedJsonArtifact<ComparisonResult>(
+    job.runDirectory,
+    job.resultArtifactPath,
+  );
+  return { ...job, result, summary: job.summary ?? result.summary };
+}
+
+function summaryFromRow(row: ComparisonJobRow): ComparisonSummary | undefined {
+  const values = [
+    row.summary_added,
+    row.summary_removed,
+    row.summary_modified,
+    row.summary_identical,
+    row.summary_total,
+    row.summary_different,
+  ];
+  if (values.some((value) => typeof value !== 'number')) return undefined;
+  return {
+    added: row.summary_added!,
+    removed: row.summary_removed!,
+    modified: row.summary_modified!,
+    identical: row.summary_identical!,
+    total: row.summary_total!,
+    different: row.summary_different!,
   };
 }
