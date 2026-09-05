@@ -506,7 +506,7 @@ function SettingsPage({
           <form className="settings-form" onSubmit={(event) => void saveSettings(event)}>
             <label><span>테스트 클래스 접미사</span><input value={testClassSuffix} onChange={(event) => setTestClassSuffix(event.target.value)} placeholder="_Test" disabled={!canEditSettings || settingsLoading || settingsSaving} maxLength={40} aria-describedby="test-class-suffix-help" /></label>
             <button className={`button button-primary${settingsSaving ? ' button-busy' : ''}`} type="submit" disabled={!canEditSettings || settingsLoading || settingsSaving || testClassSuffix.trim().length === 0}><Icon name={settingsSaving ? 'refresh' : 'check'} />{settingsSaving ? '저장 중……' : '접미사 저장'}</button>
-            <p id="test-class-suffix-help"><Icon name="shield" />예: <code>_Test</code>를 지정하면 <code>AccountService_Test.cls</code>를 자동 선택합니다. 영문자, 숫자, 밑줄만 사용할 수 있습니다.</p>
+            <p id="test-class-suffix-help"><Icon name="shield" /><span>예: <code>_Test</code>를 지정하면 <code>AccountService_Test.cls</code>를 자동 선택합니다. 영문자, 숫자, 밑줄만 사용할 수 있습니다.</span></p>
           </form>
           {settingsMessage && <p className="upload-message" role="status">{settingsMessage}</p>}
           {settingsError && <p className="upload-message settings-error" role="alert">{settingsError}</p>}

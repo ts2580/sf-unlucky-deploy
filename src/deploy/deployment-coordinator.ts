@@ -2,15 +2,9 @@ import { SfudError } from '../core/errors.js';
 import {
   DeploymentJobRepository,
   type DeploymentJob,
-  type RemoteDeploymentStatus,
 } from './deployment-job-repository.js';
 import { SingleJobQueue } from './single-job-queue.js';
-
-export interface SalesforceJobResult {
-  deploymentId?: string;
-  remoteStatus?: RemoteDeploymentStatus;
-  persistenceWarning?: string;
-}
+import { DeploymentCompletion, type SalesforceJobResult } from './deployment-completion.js';
 
 export class ReconciliationRequiredError extends Error {
   public readonly deploymentId: string | undefined;
@@ -23,10 +17,18 @@ export class ReconciliationRequiredError extends Error {
 }
 
 export class DeploymentCoordinator {
+  private readonly completion: DeploymentCompletion;
+
   public constructor(
     private readonly jobs: DeploymentJobRepository,
     private readonly queue: SingleJobQueue,
-  ) {}
+  ) {
+    this.completion = new DeploymentCompletion(jobs);
+  }
+
+  public async flushCompletions(): Promise<void> {
+    await this.completion.flush();
+  }
 
   public runDryRun(
     jobId: string,
@@ -41,7 +43,7 @@ export class DeploymentCoordinator {
         await this.recordFailure(jobId, error);
         throw error;
       }
-      return await this.jobs.transition(jobId, 'APPROVAL_PENDING', successDetails(result));
+      return await this.completion.complete(jobId, 'APPROVAL_PENDING', result);
     });
   }
 
@@ -58,7 +60,7 @@ export class DeploymentCoordinator {
         await this.recordFailure(jobId, error);
         throw error;
       }
-      return await this.jobs.transition(jobId, 'SUCCEEDED', successDetails(result));
+      return await this.completion.complete(jobId, 'SUCCEEDED', result);
     });
   }
 
@@ -89,14 +91,4 @@ export class DeploymentCoordinator {
         : {}),
     });
   }
-}
-
-function successDetails(result: SalesforceJobResult) {
-  return {
-    ...(result.deploymentId === undefined
-      ? {}
-      : { salesforceDeploymentId: result.deploymentId }),
-    remoteStatus: result.remoteStatus ?? (result.deploymentId === undefined ? 'NOT_SUBMITTED' : 'SUCCEEDED'),
-    ...(result.persistenceWarning === undefined ? {} : { persistenceWarning: result.persistenceWarning }),
-  } satisfies Parameters<DeploymentJobRepository['transition']>[2];
 }

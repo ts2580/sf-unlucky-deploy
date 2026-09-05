@@ -44,24 +44,134 @@ test('대시보드 shell과 핵심 안전 안내를 렌더링한다', async ({ p
   await expect(page.getByText('UI 27546')).toBeVisible();
 });
 
-test('390px 모바일 화면에서 body 수평 overflow가 없다', async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
+test('큰 화면의 작업 공간을 활용하고 좁은 화면에서는 패널을 쌓는다', async ({ page }, testInfo) => {
+  await mockResponsiveWorkspace(page);
+  await login(page, '/deploy');
+  await expect(page.getByRole('combobox', { name: 'Salesforce metadata type' })).toHaveValue('ApexClass');
+  await expect(page.getByText('검색한 메타데이터를 배포 대상으로 선택합니다.')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: '소스와 타겟', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '실행 현황', exact: true })).toHaveCount(0);
+  await expect(page.locator('.content > .page-stack > :first-child')).toHaveAttribute('aria-labelledby', 'workflow-status-heading');
+  const approval = page.getByRole('region', { name: 'Target 바로 배포' });
+  await expect(approval).toContainText('Source 테스트 자동 선택 후 검증·배포합니다.');
+  await page.getByLabel('테스트 수준').selectOption('NoTestRun');
+  await expect(approval).toContainText('NoTestRun 배포 · 프로덕션 org에서 거부될 수 있습니다.');
+  await page.getByLabel('테스트 수준').selectOption('auto');
+  await expect(approval).toContainText('선택한 Target에 실제 반영됩니다. 브라우저를 닫아도 배포는 계속됩니다.');
+  await expect(page.getByText('TARGET ONLY는 선택할 수 없습니다.')).toBeVisible();
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const baseFonts = await page.evaluate(() => {
+    const fontSize = (selector: string) => parseFloat(getComputedStyle(document.querySelector(selector)!).fontSize);
+    return {
+      heading: fontSize('#deploy-source-heading'), button: fontSize('.comparison-run-button'),
+      option: fontSize('.option-toggle strong'), description: fontSize('.option-toggle small'),
+    };
+  });
+  for (const width of [2560, 2200, 2199, 1920, 1536, 1280, 1201, 1200, 1024, 980, 768, 701, 700, 430, 390, 360, 320]) {
+    await page.setViewportSize({ width, height: width < 700 ? 844 : 1440 });
+    const metrics = await page.evaluate(() => {
+      const box = (selector: string) => {
+        const rect = document.querySelector(selector)!.getBoundingClientRect();
+        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, right: rect.right, bottom: rect.bottom };
+      };
+      const fontSize = (selector: string) => parseFloat(getComputedStyle(document.querySelector(selector)!).fontSize);
+      return {
+        overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+        body: box('.app-body'), content: box('.content'), workspace: box('.deploy-workspace'),
+        source: box('.deploy-source-panel'), search: box('.deploy-search-panel'),
+        summary: box('.deploy-summary'), button: box('.comparison-run-button'),
+        options: box('.comparison-controls-row .option-toggle:nth-child(2)'),
+        status: box('.workflow-status-panel'), steps: box('.deployment-steps'),
+        fonts: {
+          root: fontSize('html'), heading: fontSize('#deploy-source-heading'),
+          button: fontSize('.comparison-run-button'), option: fontSize('.option-toggle strong'),
+          description: fontSize('.option-toggle small'),
+        },
+      };
+    });
+    const expectedRootSize = width >= 2200 ? 19 : width >= 1920 ? 18 : 16;
+    expect(metrics.fonts.root, `${width}px 기본 글자 크기`).toBe(expectedRootSize);
+    for (const key of ['heading', 'button', 'option', 'description'] as const) {
+      expect(metrics.fonts[key], `${width}px ${key} 글자 배율`).toBeCloseTo(baseFonts[key] * expectedRootSize / 16, 2);
+    }
+    expect(metrics.overflow, `${width}px 가로 넘침`).toBe(false);
+    expect(metrics.button.right).toBeLessThan(metrics.search.right);
+    expect(Math.abs(metrics.button.width - metrics.options.width), `${width}px 버튼 너비`).toBeLessThan(1);
+    expect(Math.abs(metrics.button.height - metrics.options.height), `${width}px 버튼 높이`).toBeLessThan(1);
+    expect(metrics.status.bottom).toBeLessThanOrEqual(metrics.steps.y);
+    expect(metrics.status.bottom).toBeLessThanOrEqual(metrics.source.y);
+    expect(metrics.status.bottom).toBeLessThanOrEqual(metrics.summary.y);
+    if (width > 1200) {
+      expect(metrics.content.width / metrics.body.width, `${width}px 본문 사용 비율`).toBeGreaterThan(.9);
+      expect(metrics.content.x - metrics.body.x).toBeLessThanOrEqual(49);
+      expect(metrics.body.right - metrics.content.right).toBeLessThanOrEqual(49);
+      expect(metrics.summary.x).toBeGreaterThanOrEqual(metrics.workspace.right);
+    } else {
+      expect(metrics.summary.y).toBeGreaterThanOrEqual(metrics.workspace.bottom);
+    }
+    if (width >= 2200) {
+      expect(Math.abs(metrics.source.y - metrics.search.y)).toBeLessThan(2);
+      expect(metrics.search.x).toBeGreaterThanOrEqual(metrics.source.right);
+      expect(metrics.summary.width).toBeGreaterThanOrEqual(350);
+    } else {
+      expect(metrics.search.y).toBeGreaterThanOrEqual(metrics.source.bottom);
+    }
+    if (width > 700) {
+      expect(Math.abs(metrics.options.y - metrics.button.y)).toBeLessThan(2);
+    } else {
+      expect(metrics.button.y).toBeGreaterThanOrEqual(metrics.options.bottom);
+    }
+    if ([2560, 1920, 390, 320].includes(width)) {
+      await page.screenshot({ path: testInfo.outputPath(`deploy-${width}.png`), fullPage: true });
+    }
+  }
+});
+
+test('320~430px 모바일에서 주요 화면과 컨트롤이 화면 안에 표시된다', async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await mockResponsiveWorkspace(page);
   await login(page);
-
-  const hasHorizontalOverflow = await page.evaluate(
-    () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
-  );
-
-  expect(hasHorizontalOverflow).toBe(false);
-  await expect(page.getByRole('link', { name: /비교 및 배포 시작/u })).toBeVisible();
-  await expect(page.getByRole('navigation', { name: '주요 메뉴' })).toBeVisible();
-  await expect(page.getByRole('link', { name: '실행 기록', exact: true })).toBeVisible();
-  await expect(page.getByRole('link', { name: '설정', exact: true })).toBeVisible();
+  for (const width of [320, 360, 390, 430]) {
+    await page.setViewportSize({ width, height: 844 });
+    for (const route of ['/', '/deploy', '/runs', '/settings', '/admin']) {
+      await page.goto(`http://127.0.0.1:27546${route}`);
+      await expect(page.getByRole('button', { name: '로그아웃' })).toBeVisible();
+      if (route === '/deploy') {
+        await expect(page.getByRole('combobox', { name: 'Salesforce metadata type' })).toHaveValue('ApexClass');
+      }
+      if (route === '/settings') {
+        await expect(page.locator('.connection-card')).toContainText('2개 org 사용 가능');
+        const help = await page.locator('#test-class-suffix-help').boundingBox();
+        const helpText = await page.locator('#test-class-suffix-help > span').boundingBox();
+        expect(helpText!.width, `${width}px 안내문 본문 너비`).toBeGreaterThan(help!.width * .85);
+      }
+      if (route === '/admin') await expect(page.locator('.admin-user-row').first()).toBeVisible();
+      const metrics = await page.evaluate(() => {
+        const viewport = document.documentElement.clientWidth;
+        return {
+          overflow: document.documentElement.scrollWidth > viewport,
+          clippedControls: [...document.querySelectorAll('button, input, select, a')]
+            .filter((element) => {
+              const rect = element.getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0 && (rect.x < -1 || rect.right > viewport + 1);
+            }).map((element) => element.getAttribute('aria-label') ?? element.textContent),
+        };
+      });
+      expect(metrics.overflow, `${width}px ${route} 가로 넘침`).toBe(false);
+      expect(metrics.clippedControls, `${width}px ${route} 컨트롤 잘림`).toEqual([]);
+      await expect(page.getByRole('navigation', { name: '주요 메뉴' })).toBeVisible();
+      await expect(page.getByRole('link', { name: '실행 기록', exact: true })).toBeVisible();
+      await expect(page.getByRole('link', { name: '설정', exact: true })).toBeVisible();
+    }
+  }
+  expect(pageErrors).toEqual([]);
 });
 
 test('메뉴마다 독립 URL과 화면을 제공한다', async ({ page }) => {
   await login(page, '/compare');
-  await expect(page.getByRole('heading', { name: '검색한 메타데이터를 배포 대상으로 선택합니다.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '작업 현황', exact: true })).toBeVisible();
+  await expect(page.getByText('검색한 메타데이터를 배포 대상으로 선택합니다.')).toHaveCount(0);
   await expect(page.getByRole('link', { name: '비교 및 배포', exact: true })).toHaveAttribute('aria-current', 'page');
   await expect(page.getByText(/metadata type을 바꿔가며 필요한 컴포넌트를 선택하고/u)).toHaveCount(0);
   await expect(page.getByText('desired source를 기준으로 target org에 적용할 차이를 계산합니다.')).toHaveCount(0);
@@ -296,7 +406,7 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   expect(mobileCurrentTypeToggleBox!.y + mobileCurrentTypeToggleBox!.height).toBeLessThan(mobileIdenticalToggleBox!.y);
   expect(mobileIdenticalToggleBox!.y + mobileIdenticalToggleBox!.height).toBeLessThan(mobileComparisonButtonBox!.y);
   expect(mobileComparisonButtonBox!.y + mobileComparisonButtonBox!.height).toBeLessThan(mobileApexTestOptionsBox!.y);
-  const workflowStatus = page.getByRole('region', { name: '실행 현황' });
+  const workflowStatus = page.getByRole('region', { name: '작업 현황' });
   await expect(workflowStatus).toBeVisible();
   await expect(workflowStatus.getByText('실시간 연결')).toBeVisible();
   await expect(workflowStatus.getByText(/SSE 연결이 끊기면/u)).toHaveCount(0);
@@ -598,7 +708,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(deploymentSummary).toContainText('자동 선택 · source 테스트 탐색');
   await page.getByLabel('테스트 수준').selectOption('RunLocalTests');
   await expect(deploymentSummary).toContainText('RunLocalTests · Salesforce 구성 테스트');
-  await expect(page.getByRole('region', { name: 'Target 바로 배포' })).toContainText('RunLocalTests로 Salesforce 테스트를 실행');
+  await expect(page.getByRole('region', { name: 'Target 바로 배포' })).toContainText('RunLocalTests · Salesforce 테스트 후 배포합니다.');
   await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeEnabled();
   await expect(page.getByRole('region', { name: 'Target 바로 배포' }).getByRole('textbox')).toHaveCount(0);
   const apexTests = page.getByRole('region', { name: 'Apex 테스트 클래스 선택' });
@@ -621,8 +731,8 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await apexTests.getByRole('checkbox', { name: 'Hello_Test' }).check();
   await expect(page.getByLabel('테스트 클래스 직접 입력')).toHaveValue('Hello_Test');
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeEnabled();
+  await expect(page.getByRole('region', { name: 'Target 바로 배포' })).toContainText('선택한 테스트 통과 · 커버리지 75% 이상 필요.');
   await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeEnabled();
-  await expect(page.getByText('코드 커버리지 75% 이상일 때만 배포합니다.')).toBeVisible();
   await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
   await expect(page.getByRole('button', { name: '배포 요청 중……' })).toBeVisible({ timeout: 300 });
   await expect(page.getByLabel('실제 배포 현황')).toContainText('요청 제출 중');
@@ -649,6 +759,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   expect(dryRunStatusBox!.y + dryRunStatusBox!.height).toBeLessThanOrEqual(dryRunButtonBox!.y);
   await expect(page.getByText('Salesforce check-only 실행 중')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Salesforce dry-run 성공' })).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByRole('region', { name: 'Target 바로 배포' })).toContainText('Dry-run을 통과한 동일 payload를 배포합니다.');
   await expect(page.getByLabel('Dry-run 현황')).toContainText('Dry-run 성공 · 배포 가능 · 소요시간 1시간 2분 8초');
   const result = page.getByLabel('Salesforce dry-run 성공');
   await expect(result.getByText('RunSpecifiedTests', { exact: true })).toBeVisible();
@@ -710,6 +821,25 @@ async function login(page: Page, path = '/') {
   await page.getByLabel('비밀번호').fill(password);
   await page.getByRole('button', { name: '로그인' }).click();
   await expect(page.getByRole('button', { name: '로그아웃' })).toBeVisible();
+}
+
+async function mockResponsiveWorkspace(page: Page) {
+  const sources = ['target', 'source'].map((alias) => ({
+    id: `org:${alias}`, kind: 'org', label: alias,
+    detail: `${alias} · Developer`,
+    username: `mobile.layout.${alias}.longaccountnameforresponsiveverification@example.test`,
+    maskedOrgId: '00D***********1234',
+  }));
+  await page.route('**/api/v1/workspace', async (route) => route.fulfill({ json: {
+    orgs: sources.map((source) => ({ ...source, alias: source.label, connected: true })),
+    projects: [], uploads: [], sources,
+  } }));
+  await page.route('**/api/v1/metadata-types**', async (route) => route.fulfill({ json: {
+    metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }],
+  } }));
+  await page.route('**/api/v1/apex-test-classes**', async (route) => route.fulfill({ json: {
+    testClasses: [],
+  } }));
 }
 
 function comparisonFixture(status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED'): ComparisonFixture {

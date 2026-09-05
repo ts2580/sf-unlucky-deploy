@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
+import { useWorkflowUpdates } from './useWorkflowUpdates';
+
 import type {
   CreateDirectDeploymentRequest,
   CreateDryRunRequest,
@@ -8,17 +10,14 @@ import type {
 import { ApiClientTimeoutError, apiRequest } from '../api-client';
 import type { ApiUser } from '../auth/api';
 import {
-  getComparisonJob,
   startComparison,
   type ComparisonComponent,
   type ComparisonJobResponse,
 } from '../comparison/api';
 import { ComparisonResultPanel, WorkspaceSourceSelect } from '../comparison/ComparisonResult';
 import { Icon } from '../components/Icon';
-import { PageIntro } from '../components/PageIntro';
 import {
   executeApprovedDeployment,
-  getDeploymentJob,
   reconcileDeploymentJob,
   startDirectDeployment,
   startDryRun as requestDryRun,
@@ -28,7 +27,6 @@ import {
   DryRunResultPanel,
   SubmissionProgress,
   WorkflowStatusPanel,
-  type LiveStatus,
 } from './DeploymentStatus';
 
 type DryRunJobResponse = DeploymentJobResponse;
@@ -66,14 +64,6 @@ interface DeploymentCartItem {
   fullName: string;
 }
 
-interface WorkflowEventMessage {
-  resource: 'comparison' | 'deployment';
-  jobId: string;
-  kind: string;
-  status: string;
-  updatedAt: string;
-}
-
 function defaultMetadataType(metadataTypes: MetadataTypeOption[]): string {
   return metadataTypes.find((metadataType) => metadataType.name === 'ApexClass')?.name
     ?? metadataTypes[0]?.name
@@ -91,17 +81,17 @@ function directTestSummary(testLevel: string, testCount: number): string {
 
 function directDeploymentDescription(testLevel: string, testCount: number): string {
   if (testLevel === 'NoTestRun') {
-    return '테스트 없이 NoTestRun으로 바로 배포합니다. 프로덕션 org에서는 Salesforce가 거부할 수 있습니다.';
+    return 'NoTestRun 배포 · 프로덕션 org에서 거부될 수 있습니다.';
   }
   if (testLevel === 'RunSpecifiedTests') {
     return testCount > 0
-      ? '선택한 테스트를 먼저 검증하고 코드 커버리지 75% 이상일 때만 배포합니다.'
-      : 'RunSpecifiedTests를 실행하려면 테스트 클래스를 하나 이상 선택해야 합니다.';
+      ? '선택한 테스트 통과 · 커버리지 75% 이상 필요.'
+      : '테스트 클래스를 하나 이상 선택하세요.';
   }
   if (testLevel === 'auto') {
-    return 'desired source에서 테스트를 자동 선택해 검증한 뒤 배포합니다.';
+    return 'Source 테스트 자동 선택 후 검증·배포합니다.';
   }
-  return `${testLevel}로 Salesforce 테스트를 실행한 뒤 배포합니다.`;
+  return `${testLevel} · Salesforce 테스트 후 배포합니다.`;
 }
 
 export function DeploymentPage({ user }: { user: ApiUser }) {
@@ -130,7 +120,6 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const [apexTestClassesLoading, setApexTestClassesLoading] = useState(false);
   const [apexTestClassesError, setApexTestClassesError] = useState('');
   const [testInputFocused, setTestInputFocused] = useState(false);
-  const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
   const comparisonRequestControllerRef = useRef<AbortController | null>(null);
   const dryRunRequestControllerRef = useRef<AbortController | null>(null);
   const deploymentRequestControllerRef = useRef<AbortController | null>(null);
@@ -150,14 +139,14 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const dryRunSelectionKey = [sourceId, targetOrgId, cartSelectionKey, testLevel, tests].join('\u0000');
   const workflowSelectionKeyRef = useRef(workflowSelectionKey);
   const dryRunSelectionKeyRef = useRef(dryRunSelectionKey);
-  const comparisonJobRef = useRef(comparisonJob);
-  const dryRunJobRef = useRef(dryRunJob);
-  const deploymentJobRef = useRef(deploymentJob);
   workflowSelectionKeyRef.current = workflowSelectionKey;
   dryRunSelectionKeyRef.current = dryRunSelectionKey;
-  comparisonJobRef.current = comparisonJob;
-  dryRunJobRef.current = dryRunJob;
-  deploymentJobRef.current = deploymentJob;
+  const liveStatus = useWorkflowUpdates({
+    comparisonJob, dryRunJob, deploymentJob,
+    setComparisonJob, setDryRunJob, setDeploymentJob,
+    workflowSelectionKey, dryRunSelectionKey,
+    comparisonJobSelectionKeyRef, dryRunJobSelectionKeyRef, setError,
+  });
   const canRun = ['OPERATOR', 'DEPLOYER', 'ADMIN'].includes(user.role);
   const hasApexDeployment = deploymentCart.some((item) => item.type === 'ApexClass');
 
@@ -280,139 +269,6 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       .finally(() => { if (!controller.signal.aborted) setApexTestClassesLoading(false); });
     return () => controller.abort();
   }, [hasApexDeployment, sourceId, testInputFocused]);
-
-  useEffect(() => {
-    const events = new EventSource('/api/v1/workflow/events');
-    setLiveStatus('connecting');
-    events.onopen = () => setLiveStatus('connected');
-    events.onerror = () => setLiveStatus('reconnecting');
-    const handleWorkflowEvent = (rawEvent: Event) => {
-      if (!(rawEvent instanceof MessageEvent) || typeof rawEvent.data !== 'string') return;
-      let event: WorkflowEventMessage;
-      try {
-        event = JSON.parse(rawEvent.data) as WorkflowEventMessage;
-      } catch {
-        return;
-      }
-
-      if (event.resource === 'comparison' && comparisonJobRef.current?.id === event.jobId) {
-        const selectionKey = comparisonJobSelectionKeyRef.current;
-        if (selectionKey === null || selectionKey !== workflowSelectionKeyRef.current) return;
-        void getComparisonJob(event.jobId)
-          .then((data) => {
-            if (
-              comparisonJobRef.current?.id === event.jobId
-              && comparisonJobSelectionKeyRef.current === selectionKey
-              && workflowSelectionKeyRef.current === selectionKey
-            ) setComparisonJob(data.job);
-          })
-          .catch(() => undefined);
-        return;
-      }
-
-      if (event.resource !== 'deployment') return;
-      if (dryRunJobRef.current?.id === event.jobId) {
-        const selectionKey = dryRunJobSelectionKeyRef.current;
-        if (selectionKey === null || selectionKey !== dryRunSelectionKeyRef.current) return;
-        void getDeploymentJob(event.jobId)
-          .then((data) => {
-            if (
-              dryRunJobRef.current?.id === event.jobId
-              && dryRunJobSelectionKeyRef.current === selectionKey
-              && dryRunSelectionKeyRef.current === selectionKey
-            ) setDryRunJob(data.job);
-          })
-          .catch(() => undefined);
-      }
-      if (deploymentJobRef.current?.id === event.jobId) {
-        void getDeploymentJob(event.jobId)
-          .then((data) => {
-            if (deploymentJobRef.current?.id === event.jobId) {
-              setDeploymentJob(data.job);
-            }
-          })
-          .catch(() => undefined);
-      }
-    };
-    events.addEventListener('workflow', handleWorkflowEvent);
-    return () => {
-      events.removeEventListener('workflow', handleWorkflowEvent);
-      events.close();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (comparisonJob === null || !['QUEUED', 'RUNNING'].includes(comparisonJob.status)) return;
-    const selectionKey = comparisonJobSelectionKeyRef.current;
-    if (selectionKey === null) return;
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => {
-      getComparisonJob(comparisonJob.id, controller.signal)
-        .then((data) => {
-          if (
-            controller.signal.aborted
-            || workflowSelectionKeyRef.current !== selectionKey
-            || comparisonJobSelectionKeyRef.current !== selectionKey
-            || data.job.id !== comparisonJob.id
-          ) return;
-          setComparisonJob(data.job);
-        })
-        .catch((caught: unknown) => {
-          if (caught instanceof DOMException && caught.name === 'AbortError') return;
-          setError(caught instanceof Error ? caught.message : '비교 상태를 확인하지 못했습니다.');
-        });
-    }, 900);
-    return () => {
-      window.clearTimeout(timeout);
-      controller.abort();
-    };
-  }, [comparisonJob]);
-
-  useEffect(() => {
-    if (dryRunJob === null || !['QUEUED', 'DRY_RUN_RUNNING'].includes(dryRunJob.status)) return;
-    const selectionKey = dryRunJobSelectionKeyRef.current;
-    if (selectionKey === null) return;
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => {
-      getDeploymentJob(dryRunJob.id, controller.signal)
-        .then((data) => {
-          if (
-            controller.signal.aborted
-            || dryRunSelectionKeyRef.current !== selectionKey
-            || dryRunJobSelectionKeyRef.current !== selectionKey
-            || data.job.id !== dryRunJob.id
-          ) return;
-          setDryRunJob(data.job);
-        })
-        .catch((caught: unknown) => {
-          if (caught instanceof DOMException && caught.name === 'AbortError') return;
-          setError(caught instanceof Error ? caught.message : 'dry-run 상태를 확인하지 못했습니다.');
-        });
-    }, 1_000);
-    return () => {
-      window.clearTimeout(timeout);
-      controller.abort();
-    };
-  }, [dryRunJob]);
-
-  useEffect(() => {
-    if (deploymentJob === null || !['QUEUED', 'DEPLOYING'].includes(deploymentJob.status)) return;
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => {
-      getDeploymentJob(deploymentJob.id, controller.signal)
-        .then((data) => {
-          if (!controller.signal.aborted && data.job.id === deploymentJob.id) setDeploymentJob(data.job);
-        })
-        .catch((caught: unknown) => {
-          if (caught instanceof DOMException && caught.name === 'AbortError') return;
-          setError(caught instanceof Error ? caught.message : '배포 상태를 확인하지 못했습니다.');
-        });
-    }, 1_000);
-    return () => {
-      window.clearTimeout(timeout);
-      controller.abort();
-    };
-  }, [deploymentJob]);
 
   const source = workspace?.sources.find((entry) => entry.id === sourceId);
   const target = workspace?.sources.find((entry) => entry.id === targetOrgId);
@@ -630,14 +486,22 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
 
   return (
     <div className="page-stack">
-      <PageIntro kicker="COMPARE, SELECT, DEPLOY" title="검색한 메타데이터를 배포 대상으로 선택합니다.">
+      <WorkflowStatusPanel
+        liveStatus={liveStatus}
+        comparisonJob={comparisonJob}
+        deploymentJob={deploymentJob}
+        deploymentSubmitting={deploymentSubmitting}
+      />
+
+      <header className="deployment-steps">
+        <p className="eyebrow">COMPARE, SELECT, DEPLOY</p>
         <div className="stepper" aria-label="배포 단계"><span className="step-active"><i>1</i>검색</span><b /><span className={deploymentCart.length > 0 ? 'step-active' : ''}><i>2</i>배포 대상</span><b /><span className={dryRunJob !== null ? 'step-active' : ''}><i>3</i>Dry-run</span><b /><span className={deploymentJob !== null ? 'step-active' : ''}><i>4</i>배포</span></div>
-      </PageIntro>
+      </header>
 
       <div className="deploy-layout">
-        <div className="page-stack">
-          <section className="workflow-panel" aria-labelledby="deploy-source-heading">
-            <div className="panel-heading"><span className="step-number">01</span><div><h2 id="deploy-source-heading">소스와 대상</h2></div><span className="panel-state">{workspace === null ? '조회 중' : 'DEPLOY VIEW'}</span></div>
+        <div className="page-stack deploy-workspace">
+          <section className="workflow-panel deploy-source-panel" aria-labelledby="deploy-source-heading">
+            <div className="panel-heading"><span className="step-number">01</span><div><h2 id="deploy-source-heading">소스와 타겟</h2></div><span className="panel-state">{workspace === null ? '조회 중' : 'DEPLOY VIEW'}</span></div>
             <div className="deploy-source-grid">
               <WorkspaceSourceSelect side="DESIRED SOURCE" value={sourceId} sources={workspace?.sources ?? []} onChange={setSourceId} tone="violet" />
               <div className="direction-marker"><span>배포 대상</span><Icon name="arrow" /></div>
@@ -645,7 +509,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
             </div>
           </section>
 
-          <section className="workflow-panel" aria-labelledby="deploy-scope-heading">
+          <section className="workflow-panel deploy-search-panel" aria-labelledby="deploy-scope-heading">
             <div className="panel-heading"><span className="step-number">02</span><div><h2 id="deploy-scope-heading">메타데이터 검색</h2></div><span className="panel-state">검색</span></div>
             <div className="compare-scope-grid metadata-scope-grid">
               <label><span className="field-label">Salesforce metadata type</span>
@@ -669,14 +533,12 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
                         : '목록에 있는 Salesforce metadata type을 선택하세요.'
             }</p>
             <div className="comparison-controls-row">
-              <div className="option-grid">
-                <OptionToggle title="현재 타입 비교 실행" description="끄면 Source 메타데이터만 받아옵니다." checked={compareCurrentType} onChange={(checked) => {
-                  setCompareCurrentType(checked);
-                  if (!checked) setShowIdentical(false);
-                }} />
-                <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} disabled={!compareCurrentType} />
-              </div>
-              <button className={`button button-secondary comparison-run-button${comparing ? ' comparison-run-loading' : ''}`} type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesStatus !== 'ready' || !scopeValid || !sourceId || (compareCurrentType && (!targetOrgId || sourceId === targetOrgId))}><Icon name={comparing ? 'refresh' : 'compare'} />{comparing ? '메타데이터 받는 중……' : '메타데이터 받아오기'}</button>
+              <OptionToggle title="현재 타입 비교 실행" description="끄면 Source 메타데이터만 받아옵니다." checked={compareCurrentType} onChange={(checked) => {
+                setCompareCurrentType(checked);
+                if (!checked) setShowIdentical(false);
+              }} />
+              <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} disabled={!compareCurrentType} />
+              <button className={`button button-secondary comparison-run-button${comparing ? ' comparison-run-loading' : ''}`} type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesStatus !== 'ready' || !scopeValid || !sourceId || (compareCurrentType && (!targetOrgId || sourceId === targetOrgId))}><Icon name={comparing ? 'refresh' : 'compare'} /><span>{comparing ? '메타데이터 받는 중……' : '메타데이터 받아오기'}</span></button>
             </div>
           </section>
 
@@ -742,13 +604,6 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
             {!testSelectionValid && <p className="apex-test-validation" role="alert">RunSpecifiedTests는 테스트 클래스를 하나 이상 선택하거나 입력해야 합니다.</p>}
           </section>
 
-          <WorkflowStatusPanel
-            liveStatus={liveStatus}
-            comparisonJob={comparisonJob}
-            deploymentJob={deploymentJob}
-            deploymentSubmitting={deploymentSubmitting}
-          />
-
           {error && <section className="compare-error" role="alert"><strong>비교 및 배포 작업을 실행하지 못했습니다.</strong><p>{error}</p></section>}
           {dryRunJob !== null && <DryRunResultPanel job={dryRunJob} canReconcile={canDeploy} reconciling={reconcilingJobId === dryRunJob.id} onReconcile={reconcileDeployment} />}
           {deploymentJob !== null && <DryRunResultPanel job={deploymentJob} canReconcile={canDeploy} reconciling={reconcilingJobId === deploymentJob.id} onReconcile={reconcileDeployment} />}
@@ -760,12 +615,12 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
           <section className="deployment-cart" aria-label="선택한 배포 목록">
             <div className="deployment-cart-head"><strong>배포 대상</strong><span>{deploymentCart.length}개</span></div>
             {deploymentCart.length === 0
-              ? <p>비교 결과에서 metadata를 체크하면 여기에 보존됩니다.</p>
+              ? <p>비교 결과에서 배포할 항목을 선택하세요.</p>
               : <ul>{deploymentCart.map((item) => <li key={item.key}><span><strong>{item.fullName}</strong><small>{item.type}</small></span><button type="button" disabled={dryRunning || deploying} aria-label={`${item.fullName} 배포 대상에서 제거`} onClick={() => setDeploymentCart((current) => current.filter((entry) => entry.key !== item.key))}><Icon name="trash" /></button></li>)}</ul>}
             {deploymentCart.length > 0 && <button className="cart-clear" type="button" disabled={dryRunning || deploying} onClick={() => setDeploymentCart([])}>배포 대상 비우기</button>}
           </section>
           <div className="checksum-preview"><span>PAYLOAD SHA-256</span><code>{dryRunJob?.payloadChecksum ?? deploymentJob?.payloadChecksum ?? '작업 완료 후 계산'}</code></div>
-          <div className="warning-note"><Icon name="shield" /><p><strong>TARGET ONLY는 선택할 수 없습니다.</strong>desired source에 실제로 있는 컴포넌트만 배포 대상으로 지정할 수 있습니다.</p></div>
+          <div className="warning-note"><Icon name="shield" /><p><strong>TARGET ONLY는 선택할 수 없습니다.</strong></p></div>
           {dryRunJob !== null && <DryRunLiveProgress liveStatus={liveStatus} job={dryRunJob} />}
           {dryRunSubmitting && dryRunJob === null && <SubmissionProgress kind="Dry-run" />}
           <div className="cart-actions">
@@ -774,8 +629,9 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
           <section className="deployment-approval" aria-label="Target 바로 배포">
             <strong>Target 바로 배포</strong>
             <p>{dryRunJob?.status === 'APPROVAL_PENDING'
-              ? '성공한 Dry-run의 동일 payload를 배포합니다.'
-              : directDeploymentDescription(testLevel, testNames.length)} 선택된 Target org로 즉시 제출합니다. 브라우저 연결이 끊겨도 이미 제출된 Salesforce 작업은 취소되지 않습니다.</p>
+              ? 'Dry-run을 통과한 동일 payload를 배포합니다.'
+              : directDeploymentDescription(testLevel, testNames.length)}</p>
+            <p>선택한 Target에 실제 반영됩니다. 브라우저를 닫아도 배포는 계속됩니다.</p>
             {!canDeploy && <p className="approval-denied">DEPLOYER 또는 ADMIN 역할만 실제 배포할 수 있습니다.</p>}
             <button className={`button button-danger${deploying ? ' button-busy' : ''}`} type="button" onClick={() => void executeDeployment()} disabled={!canDeploy || deploymentCart.length === 0 || !testSelectionValid || dryRunning || deploying}><Icon name={deploying ? 'refresh' : 'deploy'} />{deploymentSubmitting ? '배포 요청 중……' : deploying ? '배포 중……' : '배포 대상 실제 배포'}</button>
           </section>
