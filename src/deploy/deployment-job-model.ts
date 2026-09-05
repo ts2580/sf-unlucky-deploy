@@ -58,6 +58,7 @@ export interface DeploymentJob {
   persistenceWarning?: string;
   sourceOrgIdentity?: OrgIdentitySnapshot;
   targetOrgIdentity?: OrgIdentitySnapshot;
+  artifactsExpired?: boolean;
 }
 
 export interface CreateDryRunJobInput {

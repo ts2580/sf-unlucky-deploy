@@ -176,6 +176,18 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
     return reply.send({ job: publicJob(app, job, false) });
   });
 
+  app.get<{ Params: { id: string } }>('/api/v1/deployment-jobs/:id/artifacts', {
+    schema: { response: { 200: DeploymentJobResponseSchema } },
+  }, async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply);
+    if (session === undefined) return;
+    const job = await app.sfudRuntime.deploymentJobs.get(request.params.id);
+    if (job === undefined) {
+      return reply.code(404).send({ error: { code: 'DEPLOYMENT_JOB_NOT_FOUND', message: '배포 작업을 찾을 수 없습니다.' } });
+    }
+    return reply.send({ job: publicJob(app, job, true) });
+  });
+
   app.post<{ Params: { id: string } }>(
     '/api/v1/deployment-jobs/:id/reconcile',
     { schema: { response: { 200: DeploymentJobResponseSchema } } },
@@ -235,6 +247,7 @@ function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: b
     ...(includeArtifacts && job.deploymentResult !== undefined ? { deploymentResult: job.deploymentResult } : {}),
     ...(job.errorCode === undefined ? {} : { errorCode: job.errorCode }),
     ...(job.errorMessage === undefined ? {} : { errorMessage: job.errorMessage }),
+    ...(job.artifactsExpired === true ? { artifactsExpired: true } : {}),
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     ...(job.startedAt === undefined ? {} : { startedAt: job.startedAt }),

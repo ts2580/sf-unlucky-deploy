@@ -53,7 +53,10 @@ test('큰 화면의 작업 공간을 활용하고 좁은 화면에서는 패널�
   await expect(page.getByRole('heading', { name: '실행 현황', exact: true })).toHaveCount(0);
   await expect(page.locator('.content > .page-stack > :first-child')).toHaveAttribute('aria-labelledby', 'workflow-status-heading');
   const approval = page.getByRole('region', { name: 'Target 바로 배포' });
+  await expect(approval).toContainText('Source 테스트 자동 선택 후 검증·배포합니다.');
+  await page.getByLabel('테스트 수준').selectOption('NoTestRun');
   await expect(approval).toContainText('NoTestRun 배포 · 프로덕션 org에서 거부될 수 있습니다.');
+  await page.getByLabel('테스트 수준').selectOption('auto');
   await expect(approval).toContainText('선택한 Target에 실제 반영됩니다. 브라우저를 닫아도 배포는 계속됩니다.');
   await expect(page.getByText('TARGET ONLY는 선택할 수 없습니다.')).toBeVisible();
   await page.setViewportSize({ width: 1280, height: 900 });
@@ -701,6 +704,12 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeVisible();
   await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeVisible();
   await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeEnabled();
+  const deploymentSummary = page.getByRole('complementary', { name: '배포 대상' });
+  await expect(deploymentSummary).toContainText('자동 선택 · source 테스트 탐색');
+  await page.getByLabel('테스트 수준').selectOption('RunLocalTests');
+  await expect(deploymentSummary).toContainText('RunLocalTests · Salesforce 구성 테스트');
+  await expect(page.getByRole('region', { name: 'Target 바로 배포' })).toContainText('RunLocalTests · Salesforce 테스트 후 배포합니다.');
+  await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeEnabled();
   await expect(page.getByRole('region', { name: 'Target 바로 배포' }).getByRole('textbox')).toHaveCount(0);
   const apexTests = page.getByRole('region', { name: 'Apex 테스트 클래스 선택' });
   await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toBeVisible();
@@ -717,10 +726,13 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await page.getByLabel('테스트 클래스 검색').fill('');
   await page.getByLabel('테스트 수준').selectOption('RunSpecifiedTests');
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeDisabled();
+  await expect(deploymentSummary).toContainText('RunSpecifiedTests · 0개 · 75%');
   await apexTests.getByRole('checkbox', { name: 'Hello_Test' }).check();
   await expect(page.getByLabel('테스트 클래스 직접 입력')).toHaveValue('Hello_Test');
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeEnabled();
   await expect(page.getByRole('region', { name: 'Target 바로 배포' })).toContainText('선택한 테스트 통과 · 커버리지 75% 이상 필요.');
+  await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeEnabled();
   await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
   await expect(page.getByRole('button', { name: '배포 요청 중……' })).toBeVisible({ timeout: 300 });
   await expect(page.getByLabel('실제 배포 현황')).toContainText('요청 제출 중');

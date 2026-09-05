@@ -70,6 +70,30 @@ function defaultMetadataType(metadataTypes: MetadataTypeOption[]): string {
     ?? '';
 }
 
+function directTestSummary(testLevel: string, testCount: number): string {
+  if (testLevel === 'RunSpecifiedTests') return `RunSpecifiedTests · ${testCount}개 · 75%`;
+  if (testLevel === 'NoTestRun') return 'NoTestRun';
+  if (testLevel === 'auto') return testCount > 0
+    ? `자동 선택 · 지정 ${testCount}개 · 75%`
+    : '자동 선택 · source 테스트 탐색';
+  return `${testLevel} · Salesforce 구성 테스트`;
+}
+
+function directDeploymentDescription(testLevel: string, testCount: number): string {
+  if (testLevel === 'NoTestRun') {
+    return 'NoTestRun 배포 · 프로덕션 org에서 거부될 수 있습니다.';
+  }
+  if (testLevel === 'RunSpecifiedTests') {
+    return testCount > 0
+      ? '선택한 테스트 통과 · 커버리지 75% 이상 필요.'
+      : '테스트 클래스를 하나 이상 선택하세요.';
+  }
+  if (testLevel === 'auto') {
+    return 'Source 테스트 자동 선택 후 검증·배포합니다.';
+  }
+  return `${testLevel} · Salesforce 테스트 후 배포합니다.`;
+}
+
 export function DeploymentPage({ user }: { user: ApiUser }) {
   const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null);
   const [metadataTypes, setMetadataTypes] = useState<MetadataTypeOption[]>([]);
@@ -393,7 +417,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   };
 
   const executeDeployment = async () => {
-    if (!canDeploy || deploymentCart.length === 0) return;
+    if (!canDeploy || deploymentCart.length === 0 || !testSelectionValid) return;
     setError('');
     setDeploymentJob(null);
     const selectionKey = dryRunSelectionKey;
@@ -587,7 +611,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
 
         <aside className="deploy-summary" aria-label="배포 대상">
           <p className="eyebrow">DEPLOYMENT TARGETS</p><h2>{deploying ? '실제 배포 중' : deploymentJob?.status === 'SUCCEEDED' ? '배포 성공' : dryRunning ? 'Dry-run 실행 중' : dryRunJob?.status === 'APPROVAL_PENDING' ? 'Target 배포 준비' : comparing ? '메타데이터 검색 중' : deploymentCart.length > 0 ? `${deploymentCart.length}개 선택됨` : '선택된 배포 대상이 없습니다'}</h2>
-          <dl><div><dt>Desired source</dt><dd>{source?.label ?? '선택 대기'}</dd></div><div><dt>Target org</dt><dd>{target === undefined ? '선택 대기' : [target.label, target.username, target.maskedOrgId].filter(Boolean).join(' · ')}</dd></div><div><dt>현재 검색</dt><dd>{selectedMetadataType?.name ?? 'type 선택 필요'}</dd></div><div><dt>직접 배포 테스트</dt><dd>{testNames.length > 0 ? `RunSpecifiedTests · ${testNames.length}개 · 75%` : 'NoTestRun'}</dd></div></dl>
+          <dl><div><dt>Desired source</dt><dd>{source?.label ?? '선택 대기'}</dd></div><div><dt>Target org</dt><dd>{target === undefined ? '선택 대기' : [target.label, target.username, target.maskedOrgId].filter(Boolean).join(' · ')}</dd></div><div><dt>현재 검색</dt><dd>{selectedMetadataType?.name ?? 'type 선택 필요'}</dd></div><div><dt>직접 배포 테스트</dt><dd>{directTestSummary(testLevel, testNames.length)}</dd></div></dl>
           <section className="deployment-cart" aria-label="선택한 배포 목록">
             <div className="deployment-cart-head"><strong>배포 대상</strong><span>{deploymentCart.length}개</span></div>
             {deploymentCart.length === 0
@@ -606,12 +630,10 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
             <strong>Target 바로 배포</strong>
             <p>{dryRunJob?.status === 'APPROVAL_PENDING'
               ? 'Dry-run을 통과한 동일 payload를 배포합니다.'
-              : testNames.length > 0
-                ? '선택한 테스트 통과 · 커버리지 75% 이상 필요.'
-                : 'NoTestRun 배포 · 프로덕션 org에서 거부될 수 있습니다.'}</p>
+              : directDeploymentDescription(testLevel, testNames.length)}</p>
             <p>선택한 Target에 실제 반영됩니다. 브라우저를 닫아도 배포는 계속됩니다.</p>
             {!canDeploy && <p className="approval-denied">DEPLOYER 또는 ADMIN 역할만 실제 배포할 수 있습니다.</p>}
-            <button className={`button button-danger${deploying ? ' button-busy' : ''}`} type="button" onClick={() => void executeDeployment()} disabled={!canDeploy || deploymentCart.length === 0 || dryRunning || deploying}><Icon name={deploying ? 'refresh' : 'deploy'} />{deploymentSubmitting ? '배포 요청 중……' : deploying ? '배포 중……' : '배포 대상 실제 배포'}</button>
+            <button className={`button button-danger${deploying ? ' button-busy' : ''}`} type="button" onClick={() => void executeDeployment()} disabled={!canDeploy || deploymentCart.length === 0 || !testSelectionValid || dryRunning || deploying}><Icon name={deploying ? 'refresh' : 'deploy'} />{deploymentSubmitting ? '배포 요청 중……' : deploying ? '배포 중……' : '배포 대상 실제 배포'}</button>
           </section>
         </aside>
       </div>
