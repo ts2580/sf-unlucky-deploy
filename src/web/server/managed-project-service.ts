@@ -28,6 +28,7 @@ export class ManagedProjectService {
   private readonly timers = new Map<string, NodeJS.Timeout>();
   private readonly pins = new Map<string, number>();
   private readonly deletions = new Map<string, Promise<void>>();
+  private canonicalRoot: Promise<string> | undefined;
   private closed = false;
 
   public constructor(
@@ -46,7 +47,8 @@ export class ManagedProjectService {
     if (this.closed) throw new Error('프로젝트 저장소가 종료되었습니다.');
     const id = randomUUID();
     if (isolation !== undefined && ![isolation.sessionId, isolation.jobId, isolation.side].every((v) => /^[a-zA-Z0-9_-]{1,100}$/u.test(v))) throw this.unavailable();
-    const parent = isolation === undefined ? this.root : path.join(this.root, isolation.sessionId, isolation.jobId, isolation.side);
+    const storageRoot = await this.resolveRoot();
+    const parent = isolation === undefined ? storageRoot : path.join(storageRoot, isolation.sessionId, isolation.jobId, isolation.side);
     await mkdir(parent, { recursive: true, mode: 0o700 });
     const directory = path.join(parent, id);
     this.directories.set(id, directory);
@@ -93,10 +95,12 @@ export class ManagedProjectService {
   public async complete(id: string, ownerUserId: string,
     project: WorkspaceProject & { realPath: string; origin?: 'git' }): Promise<ManagedProject> {
     const directory = this.pendingDirectory(id, ownerUserId);
-    const [allocationRoot, projectPath] = await Promise.all([realpath(directory), realpath(project.realPath)]);
+    const [storageRoot, allocationRoot, projectPath] = await Promise.all([
+      this.resolveRoot(), realpath(directory), realpath(project.realPath),
+    ]);
     const relative = path.relative(allocationRoot, projectPath);
     if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
-      || !isWithin(this.root, allocationRoot)) throw new Error('프로젝트 저장 경계를 벗어났습니다.');
+      || !isWithin(storageRoot, allocationRoot)) throw new Error('프로젝트 저장 경계를 벗어났습니다.');
     // Recheck after filesystem awaits: cancellation must not resurrect an import.
     const pending = this.requirePending(id);
     if (pending.ownerUserId !== ownerUserId) throw this.unavailable();
@@ -184,6 +188,11 @@ export class ManagedProjectService {
     const pending = this.pending.get(id);
     if (this.closed || pending === undefined || pending.deleting) throw this.unavailable();
     return pending;
+  }
+
+  private resolveRoot(): Promise<string> {
+    this.canonicalRoot ??= realpath(this.root);
+    return this.canonicalRoot;
   }
 
   private unavailable(): Error { return new Error(`사용할 수 없는 ${this.label}입니다.`); }

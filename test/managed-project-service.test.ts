@@ -1,4 +1,4 @@
-import { access, chmod, mkdir, mkdtemp, realpath, rm, utimes } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, rm, utimes } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -16,7 +16,9 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 async function fixture(userQuota = 100, serverQuota = 150) {
-  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'sfud-managed-test-')));
+  // Keep the OS spelling returned by mkdtemp. On Windows realpath can expand
+  // an 8.3 segment, so the service must canonicalize its own boundary root.
+  const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-managed-test-'));
   roots.push(root);
   const service = new ManagedProjectService(root, userQuota, serverQuota, 1000);
   services.push(service);

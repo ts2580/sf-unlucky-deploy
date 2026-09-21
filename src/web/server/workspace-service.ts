@@ -388,7 +388,7 @@ export class WorkspaceService {
   public publicManifest(projectPath: string, manifestPath: string): string {
     const project = [...this.projects, ...this.managedProjects.list()].find((candidate) =>
       candidate.realPath === projectPath || isInside(candidate.realPath, manifestPath));
-    return project === undefined ? path.basename(manifestPath) : path.relative(project.realPath, manifestPath);
+    return portablePath(project === undefined ? path.basename(manifestPath) : path.relative(project.realPath, manifestPath));
   }
 
 }
@@ -416,7 +416,7 @@ async function findManifests(projectPath: string): Promise<string[]> {
     const entries = await readdir(manifestDirectory, { recursive: true, withFileTypes: true });
     return entries
       .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.xml'))
-      .map((entry) => path.relative(projectPath, path.join(entry.parentPath, entry.name)))
+      .map((entry) => portablePath(path.relative(projectPath, path.join(entry.parentPath, entry.name))))
       .sort((left, right) => left.localeCompare(right));
   } catch (error) {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return [];
@@ -458,6 +458,10 @@ export async function scavengeStaleProjectRoots(
 function isInside(parent: string, child: string): boolean {
   const relative = path.relative(parent, child);
   return relative.length > 0 && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
+}
+
+function portablePath(value: string): string {
+  return value.split(path.sep).join('/');
 }
 
 function isManagedStoragePath(candidate: string, kind: 'imports' | 'uploads'): boolean {
