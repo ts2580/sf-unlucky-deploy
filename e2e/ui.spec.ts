@@ -694,7 +694,10 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
     if (pathname.endsWith('/direct-deploy-1/reconcile')) {
       expect(route.request().method()).toBe('POST');
       expect(route.request().headers()['x-sfud-csrf']).toMatch(/^[A-Za-z0-9_-]{32,}$/u);
-      await route.fulfill({ json: { job: directDeploymentFixture('SUCCEEDED') } });
+      await route.fulfill({ json: { job: {
+        ...directDeploymentFixture('SUCCEEDED'),
+        executionEvidence: 'LEGACY_EXECUTION_REPORT_UNVERIFIED',
+      } } });
       return;
     }
     if (pathname.endsWith('/direct-deploy-1')) {
@@ -813,6 +816,8 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await page.getByRole('button', { name: 'Salesforce 상태 다시 확인' }).click();
   await expect(page.getByRole('heading', { name: 'Salesforce 실제 배포 성공' })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByText(/Hello_Test · 코드 커버리지 80.00%/u)).toBeVisible();
+  await expect(page.getByText('이전 실행 기록의 신뢰도')).toBeVisible();
+  await expect(page.getByText('이전 실행 report는 남아 있지만, 제출 attempt와 대조되지 않아 실제 실행을 확정할 수 없습니다.')).toBeVisible();
   await page.getByRole('combobox', { name: 'Salesforce metadata type' }).fill('CustomObject');
   await expect(page.getByLabel('배포 대상').getByText('NewClass', { exact: true })).toBeVisible();
   await expect(apexTests.getByRole('checkbox', { name: 'Hello_Test' })).toBeChecked();
