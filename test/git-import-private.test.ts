@@ -147,7 +147,12 @@ describe('private Git repository access and PAT import', { timeout: 60_000 }, ()
     const f = await fixture({ repositoryPath: 'group/project' });
     const authorization = await f.access.authorize(f.owner.id, f.connection.id, f.address, f.provider);
     expect(authorization.apiCredential).toBeUndefined();
-    expect(authorization.repository.repositoryId).toMatch(/^git:/u);
+    expect(authorization.repository).toEqual({
+      ...f.address,
+      repositoryId: `git:${f.connection.id}`,
+      private: true,
+      defaultBranch: 'main',
+    });
     expect(f.providerCalls.inspect).toEqual([]);
     expect(f.remote.lsRemote).toHaveBeenCalledTimes(1);
     await expect(f.service.refs(f.request, 'branch', undefined, f.owner.id)).resolves.toEqual({
@@ -159,6 +164,8 @@ describe('private Git repository access and PAT import', { timeout: 60_000 }, ()
     expect(f.providerCalls.refs).toEqual([]);
     expect(f.providerCalls.commits).toEqual([]);
     expect(f.fetch).toHaveBeenCalledTimes(1);
+    await expect(f.fetch.mock.calls[0]?.[0].credentialProvider?.getCredential())
+      .resolves.toEqual({ username: 'oauth2', password: 'old-api-token' });
     expect(f.remote.lsRemote).toHaveBeenCalledTimes(3);
   });
 

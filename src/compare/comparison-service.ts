@@ -9,6 +9,7 @@ import { redactSensitiveText, type SfClient } from '../salesforce/sf-client.js';
 import { SingleJobQueue } from '../deploy/single-job-queue.js';
 import { ComparisonJobRepository, type ComparisonJob } from './comparison-job-repository.js';
 import type { WorkspaceService } from '../web/server/workspace-service.js';
+import { immutableSourceSnapshot } from '../sources/source-provenance.js';
 
 export interface CreateComparisonInput {
   sessionWorkspaceId?: string;
@@ -66,12 +67,15 @@ export class ComparisonService {
   private async createPrepared(input: CreateComparisonInput, jobId: string): Promise<ComparisonJob> {
     this.queue.assertAccepting();
     const scope = input.scope ?? 'manifest';
-    const rightSource = await this.workspace.resolveSource(input.rightSourceId, input.createdBy);
-    const leftSource = input.sourceOnly === true
-      ? rightSource
-      : await this.workspace.resolveSource(input.leftSourceId, input.createdBy);
+    const rightResolved = await this.workspace.resolveSourceSnapshot(input.rightSourceId, input.createdBy);
+    const leftResolved = input.sourceOnly === true
+      ? rightResolved
+      : await this.workspace.resolveSourceSnapshot(input.leftSourceId, input.createdBy);
+    const rightSource = rightResolved.source;
+    const leftSource = leftResolved.source;
     for (const source of [leftSource, rightSource]) {
-      assertGitMetadataScope(this.workspace.publicSource(source), input.metadataType === undefined ? undefined : [input.metadataType]);
+      assertGitMetadataScope(source === leftSource ? leftResolved.snapshot : rightResolved.snapshot,
+        input.metadataType === undefined ? undefined : [input.metadataType]);
     }
     const project = scope === 'all'
       ? this.workspace.projectForSources(input.sourceOnly === true ? [rightSource] : [leftSource, rightSource])
@@ -115,7 +119,7 @@ export class ComparisonService {
         manifestPath,
         leftSource,
         rightSource,
-        sourceSnapshot: { left: this.workspace.publicSource(leftSource), right: this.workspace.publicSource(rightSource),
+        sourceSnapshot: { left: immutableSourceSnapshot(leftResolved.snapshot), right: immutableSourceSnapshot(rightResolved.snapshot),
           project: this.workspace.publicSource(`local:${project.realPath}`),
           manifest: this.workspace.publicManifest(project.realPath, manifestPath) },
         strict: input.strict,

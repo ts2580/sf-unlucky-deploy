@@ -3,14 +3,15 @@ import type { GitConnectionService } from './git-connection-service.js';
 import { credentialProviderFor, providerApiCredential, type ApiCredential, type GitCredentialProvider } from './git-credential-provider.js';
 import { GitError } from './git-errors.js';
 import type { GitProvider, GitRepositoryInfo } from './git-provider.js';
-import type { GitRepositoryAddress } from './git-repository.js';
+import { normalizeRepository, type GitRepositoryAddress } from './git-repository.js';
 import { GitRemoteProvider } from './git-remote-provider.js';
 import { GitClient } from './git-client.js';
 
 export interface GitRepositoryAuthorization {
   repository: GitRepositoryInfo;
   apiCredential?: ApiCredential;
-  provider?: GitProvider;
+  /** Git-only resolver for a repository-bound connection. Never a REST provider. */
+  remote?: GitProvider;
   credentialProvider: GitCredentialProvider;
   assertCurrent(): Promise<void>;
 }
@@ -22,9 +23,14 @@ export class GitRepositoryAccess {
   public async validate(owner: string, id: string, address: GitRepositoryAddress) {
     if (!this.enabled) throw new GitError('PROVIDER_NOT_CONFIGURED');
     const state = await this.credentials.credentials(owner, id);
-    if (state.connection.provider !== address.provider || state.connection.providerHost !== address.host
-      || (state.connection.repositoryPath !== undefined && state.connection.repositoryPath !== address.repositoryPath)) {
+    if (state.connection.provider !== address.provider || state.connection.providerHost !== address.host) {
       throw new GitError('GIT_CONNECTION_REQUIRED');
+    }
+    if (state.connection.repositoryPath !== undefined) {
+      const expected = normalizeRepository(state.connection.repositoryPath, state.connection.provider);
+      if (expected.host !== address.host || expected.repositoryPath !== address.repositoryPath) {
+        throw new GitError('GIT_CONNECTION_REQUIRED');
+      }
     }
     return state;
   }
@@ -41,10 +47,34 @@ export class GitRepositoryAccess {
     const credentialProvider: GitCredentialProvider = {
       async getCredential() { await assertCurrent(); return source.getCredential(); },
     };
-    const selectedProvider = state.connection.repositoryPath === undefined ? provider : new GitRemoteProvider(address, credentialProvider, this.remote);
-    const apiCredential = state.connection.repositoryPath === undefined ? providerApiCredential(address.provider, state.tokens) : undefined;
+    if (state.connection.repositoryPath !== undefined) {
+      const repository: GitRepositoryInfo = {
+        ...address,
+        repositoryId: `git:${state.connection.id}`,
+        private: true,
+      };
+      const remoteOutput = this.remote.lsRemote({ repository, credentialProvider, ...(signal === undefined ? {} : { signal }) });
+      const remote = new GitRemoteProvider(address, credentialProvider, this.remote, remoteOutput);
+      try {
+        const discovered = await remote.inspect(address, undefined, signal);
+        await assertCurrent();
+        return {
+          repository: { ...repository, ...(discovered.defaultBranch === undefined ? {} : { defaultBranch: discovered.defaultBranch }) },
+          remote,
+          assertCurrent,
+          credentialProvider,
+        };
+      } catch (error) {
+        if (error instanceof GitError && error.code === 'GIT_REAUTH_REQUIRED') {
+          await this.connections.requireReauthentication(owner, id, state.tokenVersion);
+        }
+        throw error;
+      }
+    }
+
+    const apiCredential = providerApiCredential(address.provider, state.tokens);
     let repository: GitRepositoryInfo;
-    try { repository = await selectedProvider.inspect(address, apiCredential, signal); }
+    try { repository = await provider.inspect(address, apiCredential, signal); }
     catch (error) {
       if (error instanceof GitError && error.code === 'GIT_REAUTH_REQUIRED') {
         await this.connections.requireReauthentication(owner, id, state.tokenVersion);
@@ -52,7 +82,6 @@ export class GitRepositoryAccess {
       throw error;
     }
     await assertCurrent();
-    return { repository, ...(apiCredential === undefined ? {} : { apiCredential }), provider: selectedProvider,
-      assertCurrent, credentialProvider };
+    return { repository, apiCredential, assertCurrent, credentialProvider };
   }
 }

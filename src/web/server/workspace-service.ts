@@ -356,6 +356,11 @@ export class WorkspaceService {
     throw new Error('지원하지 않는 비교 소스입니다.');
   }
 
+  public async resolveSourceSnapshot(sourceId: string, ownerUserId?: string): Promise<{ source: string; snapshot: WorkspaceSource }> {
+    const source = await this.resolveSource(sourceId, ownerUserId);
+    return { source, snapshot: structuredClone(this.publicSource(source)) };
+  }
+
   public publicSource(source: string): WorkspaceSource {
     if (source.startsWith('org:')) {
       const alias = source.slice('org:'.length);

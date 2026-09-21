@@ -12,7 +12,10 @@ export class GitRemoteProvider implements GitProvider {
   public readonly id;
   private snapshot: Promise<RemoteSnapshot> | undefined;
   public constructor(private readonly address: GitRepositoryAddress, private readonly credential: GitCredentialProvider,
-    private readonly client: Pick<GitClient, 'lsRemote'> = new GitClient()) { this.id = address.provider; }
+    private readonly client: Pick<GitClient, 'lsRemote'> = new GitClient(), initialRemoteOutput?: Promise<Buffer>) {
+    this.id = address.provider;
+    if (initialRemoteOutput !== undefined) this.snapshot = initialRemoteOutput.then(parseRefs);
+  }
 
   public async inspect(address: GitRepositoryAddress, _token?: unknown, signal?: AbortSignal): Promise<GitRepositoryInfo> {
     this.assertAddress(address);

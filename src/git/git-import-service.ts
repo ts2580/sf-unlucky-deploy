@@ -99,7 +99,7 @@ export class GitImportService {
   public async refs(input: Pick<GitImportRequest, 'provider' | 'repositoryPath' | 'connectionId'>,
     kind: 'branch' | 'tag', cursor?: string, owner?: string) {
     const { repository, authorization } = await this.authorize(input, owner);
-    const result = await (authorization?.provider ?? this.providers[input.provider]).listRefs(repository, kind, cursor, authorization?.apiCredential);
+    const result = await this.providerFor(authorization, input.provider).listRefs(repository, kind, cursor, authorization?.apiCredential);
     await authorization?.assertCurrent();
     return result;
   }
@@ -158,7 +158,7 @@ export class GitImportService {
     if (input.ref.kind !== 'branch') throw new GitError('INVALID_REF');
     validateGitRef(input.ref);
     const { repository, authorization } = await this.authorize(input, owner, signal);
-    const sha = await (authorization?.provider ?? this.providers[input.provider]).resolveCommit(repository, input.ref, authorization?.apiCredential, signal);
+    const sha = await this.providerFor(authorization, input.provider).resolveCommit(repository, input.ref, authorization?.apiCredential, signal);
     const lease = await this.cache!.acquire([owner, input.connectionId ?? 'public', repository.provider, repository.host, repository.repositoryId], signal);
     try {
       const objects = await this.client.fetch({ directory: lease.directory, repository, commitSha: sha,
@@ -178,7 +178,7 @@ export class GitImportService {
   public async prepareLatest(owner: string, input: GitImportRequest,
     isolation?: { sessionId: string; jobId: string; side: string }): Promise<GitImportRecord> {
     const { repository, authorization } = await this.authorize(input, owner);
-    const sha = await (authorization?.provider ?? this.providers[input.provider]).resolveCommit(repository, input.ref, authorization?.apiCredential);
+    const sha = await this.providerFor(authorization, input.provider).resolveCommit(repository, input.ref, authorization?.apiCredential);
     await authorization?.assertCurrent();
     const record = await this.create(owner, { ...input, expectedCommitSha: sha }, isolation);
     while (true) {
@@ -300,7 +300,7 @@ export class GitImportService {
     const { record, controller } = entry;
     await this.history.transition(record.id, record.ownerUserId, ['QUEUED'], 'FETCHING');
     const { repository, authorization } = await this.authorize(record, record.ownerUserId, controller.signal);
-    const sha = await (authorization?.provider ?? this.providers[record.provider]).resolveCommit(repository, record.ref, authorization?.apiCredential, controller.signal);
+    const sha = await this.providerFor(authorization, record.provider).resolveCommit(repository, record.ref, authorization?.apiCredential, controller.signal);
     if (sha !== record.expectedCommitSha) throw new GitError('REF_CHANGED');
     await authorization?.assertCurrent();
     entry.repository = repository;
@@ -366,6 +366,15 @@ if (this.cache !== undefined) entry.cacheLease = await this.cache.acquire([
 
   private assertActive(entry: Entry): void {
     if (entry.controller.signal.aborted) throw new GitError('IMPORT_CANCELLED');
+  }
+
+  private providerFor(authorization: GitRepositoryAuthorization | undefined, provider: GitProviderId): GitProvider {
+    if (authorization === undefined) return this.providers[provider];
+    if (authorization.remote !== undefined) return authorization.remote;
+    // A connection without an API credential must be repository-bound. Never
+    // silently send that request to a provider REST API.
+    if (authorization.apiCredential === undefined) throw new GitError('GIT_CONNECTION_REQUIRED');
+    return this.providers[provider];
   }
 
   private async cleanup(entry: Entry): Promise<void> {

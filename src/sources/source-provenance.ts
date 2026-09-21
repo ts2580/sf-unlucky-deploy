@@ -9,3 +9,9 @@ export interface JobSourceSnapshot {
   project?: WorkspaceSource;
   manifest?: string;
 }
+
+/** Freeze the public source descriptor at job creation, before temporary Git
+ * storage can expire or a workspace registration can change. */
+export function immutableSourceSnapshot(source: WorkspaceSource): WorkspaceSource {
+  return structuredClone(source);
+}

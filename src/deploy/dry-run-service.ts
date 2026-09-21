@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { assertGitMetadataScope } from '../sources/git-metadata-scope.js';
+import { immutableSourceSnapshot } from '../sources/source-provenance.js';
 
 import type { UserSettingsRepository } from '../storage/user-settings-repository.js';
 import type { OrgExecutionAccessRepository } from '../storage/org-execution-access-repository.js';
 import { runDeployCommand } from '../commands/deploy.js';
 import { SfudError } from '../core/errors.js';
 import { redactSensitiveText, type SfClient } from '../salesforce/sf-client.js';
+import type { WorkspaceSource } from '../api/workspace-contracts.js';
 import type { AllowedProject, WorkspaceService } from '../web/server/workspace-service.js';
 import { DeploymentCoordinator, ReconciliationRequiredError } from './deployment-coordinator.js';
 import { DeploymentJobRepository, type DeploymentJob } from './deployment-job-repository.js';
@@ -62,6 +64,7 @@ export interface CreateDirectDeploymentResult {
 
 interface PreparedDeploymentRequest {
   source: string;
+  sourceSnapshot: WorkspaceSource;
   targetAlias: string;
   project: AllowedProject;
   scope: 'manifest' | 'all' | 'selected';
@@ -119,7 +122,7 @@ export class DryRunService {
       this.coordinator.assertAccepting();
       creation = await this.jobs.createIdempotentDryRun({
         source: prepared.source,
-        sourceSnapshot: { source: this.workspace.publicSource(prepared.source),
+        sourceSnapshot: { source: immutableSourceSnapshot(prepared.sourceSnapshot),
           project: this.workspace.publicSource(`local:${prepared.project.realPath}`),
           manifest: prepared.scope === 'selected'
             ? '선택 항목'
@@ -283,7 +286,7 @@ export class DryRunService {
       this.coordinator.assertAccepting();
       creation = await this.jobs.createDirectDeployment({
         source: prepared.source,
-        sourceSnapshot: { source: this.workspace.publicSource(prepared.source),
+        sourceSnapshot: { source: immutableSourceSnapshot(prepared.sourceSnapshot),
           project: this.workspace.publicSource(`local:${prepared.project.realPath}`),
           manifest: prepared.scope === 'selected'
             ? '선택 항목'
@@ -429,10 +432,11 @@ export class DryRunService {
       throw new SfudError('INVALID_ARGUMENT', '지원하지 않는 배포 범위입니다.');
     }
     const scope = input.scope ?? 'manifest';
-    const [source, targetSource] = await Promise.all([
-      this.workspace.resolveSource(input.sourceId, input.createdBy),
+    const [resolvedSource, targetSource] = await Promise.all([
+      this.workspace.resolveSourceSnapshot(input.sourceId, input.createdBy),
       this.workspace.resolveSource(input.targetOrgId, input.createdBy),
     ]);
+    const source = resolvedSource.source;
     const project = scope === 'all' || scope === 'selected'
       ? this.workspace.projectForSources([source, targetSource])
       : await this.workspace.resolveProject(requiredString(input.projectId, '프로젝트'), input.createdBy);
@@ -447,7 +451,7 @@ export class DryRunService {
     const selectedComponents = scope === 'selected'
       ? normalizeSelectedComponents(input.components ?? [])
       : undefined;
-    assertGitMetadataScope(this.workspace.publicSource(source), selectedComponents?.map((component) => component.type)
+    assertGitMetadataScope(resolvedSource.snapshot, selectedComponents?.map((component) => component.type)
       ?? (input.metadataType === undefined ? undefined : [input.metadataType]));
     if (input.metadataType !== undefined || selectedComponents !== undefined) {
       const availableTypes = await this.workspace.listMetadataTypes(
@@ -481,6 +485,7 @@ export class DryRunService {
       projectPath: project.realPath,
       ...(scope === 'selected' ? {} : { manifestPath }),
       source,
+      sourceSnapshot: immutableSourceSnapshot(resolvedSource.snapshot),
       targetAlias,
       testLevel: input.testLevel,
       tests: [...input.tests].sort(),
@@ -495,6 +500,7 @@ export class DryRunService {
     })).digest('hex');
     return {
       source,
+      sourceSnapshot: immutableSourceSnapshot(resolvedSource.snapshot),
       targetAlias,
       project,
       scope,
