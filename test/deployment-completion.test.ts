@@ -18,6 +18,41 @@ async function fixture() {
 }
 
 describe('배포 완료 저장 복구', () => {
+  it('재확인에서 검증만 완료된 상태로 해소되면 오래된 성공 저장 재시도를 폐기한다', async () => {
+    vi.useFakeTimers();
+    const f = await fixture();
+    try {
+      await f.store.database.run("UPDATE deployment_jobs SET kind = 'DEPLOY', status = 'DEPLOYING' WHERE id = ?", f.id);
+      const transition = f.jobs.transition.bind(f.jobs);
+      vi.spyOn(f.jobs, 'transition').mockImplementationOnce(async () => { throw new Error('database locked'); });
+      expect(await f.completion.complete(f.id, 'SUCCEEDED', { deploymentId: 'validation-id' }))
+        .toMatchObject({ status: 'RECONCILE_REQUIRED' });
+      await transition(f.id, 'VALIDATED_PENDING_EXECUTION');
+      await f.completion.flush();
+      expect(await f.jobs.getRequiredSummary(f.id)).toMatchObject({ status: 'VALIDATED_PENDING_EXECUTION' });
+    } finally { vi.restoreAllMocks(); await f.completion.flush(); await f.store.close(); }
+  });
+
+  it('attempt 버전이 바뀌면 오래된 완료 저장 재시도를 폐기한다', async () => {
+    vi.useFakeTimers();
+    const f = await fixture();
+    try {
+      const attemptId = await f.jobs.attempts.begin({
+        jobId: f.id, operation: 'VALIDATE', payloadChecksum: 'a'.repeat(64), digestVersion: 1,
+        runDirectory: '/fixture/run',
+      });
+      const attempt = await f.jobs.attempts.current(f.id);
+      vi.spyOn(f.jobs, 'transition').mockImplementationOnce(async () => { throw new Error('database locked'); });
+      expect(await f.completion.complete(f.id, 'APPROVAL_PENDING', {
+        deploymentId: '0Af000000000001', attemptId, attemptVersion: attempt!.version,
+      })).toMatchObject({ status: 'RECONCILE_REQUIRED' });
+      await f.store.database.run('UPDATE deployment_attempts SET version = version + 1 WHERE id = ?', attemptId);
+      await f.completion.flush();
+      expect(await f.jobs.getRequiredSummary(f.id)).toMatchObject({ status: 'RECONCILE_REQUIRED' });
+      expect(f.jobs.transition).toHaveBeenCalledTimes(2);
+    } finally { vi.restoreAllMocks(); await f.completion.flush(); await f.store.close(); }
+  });
+
   it('최종 저장 실패를 재확인 상태로 보존하고 자동으로 DB 저장만 재시도한다', async () => {
     vi.useFakeTimers();
     const f = await fixture();

@@ -61,8 +61,7 @@ export async function apiRequest<TResponse, TBody = never>(
       throw new ApiClientError('API 요청이 공유 계약과 일치하지 않습니다.', 0, 'CLIENT_SCHEMA_MISMATCH');
     }
     const headers: Record<string, string> = {};
-    const formDataBody = options.body instanceof FormData;
-    if (options.body !== undefined && !formDataBody) headers['content-type'] = 'application/json';
+    if (options.body !== undefined) headers['content-type'] = 'application/json';
     if (options.csrf === true) headers['x-sfud-csrf'] = readCookie('sfud_csrf') ?? '';
     if (options.idempotencyKey !== undefined) headers['idempotency-key'] = options.idempotencyKey;
     const response = await fetch(url, {
@@ -72,7 +71,7 @@ export async function apiRequest<TResponse, TBody = never>(
       headers,
       ...(options.body === undefined
         ? {}
-        : { body: formDataBody ? options.body as FormData : JSON.stringify(options.body) }),
+        : { body: JSON.stringify(options.body) }),
     });
     const payload = await parseResponse(response);
     if (response.status === 401) {

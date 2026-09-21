@@ -1,8 +1,8 @@
+import { registerGitProjectRoutes } from './git-project-routes.js';
 import { access } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import fastifyMultipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import Fastify, { type FastifyInstance } from 'fastify';
 
@@ -17,7 +17,10 @@ import { registerDeploymentRoutes } from './deployment-routes.js';
 import { registerProjectUploadRoutes } from './project-upload-routes.js';
 import { registerWorkflowEventRoutes } from './workflow-events.js';
 import { registerSettingsRoutes } from './settings-routes.js';
-import type { SfClient } from '../../salesforce/sf-client.js';
+import { registerGitConnectionRoutes } from './git-connection-routes.js';
+import { registerJobAccessRoutes } from './job-access-routes.js';
+import { registerOrgExecutionAccessRoutes } from './org-execution-access-routes.js';
+import { redactSensitiveText, type SfClient } from '../../salesforce/sf-client.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -37,15 +40,22 @@ export interface WebServerOptions {
   sfClient?: SfClient;
   trustedProxies?: string[];
   publicOrigin?: string;
-  userUploadQuotaBytes?: number;
-  serverUploadQuotaBytes?: number;
+  userImportQuotaBytes?: number;
+  serverImportQuotaBytes?: number;
+  quickDeployEnabled?: boolean;
 }
 
 export async function createWebServer(options: WebServerOptions): Promise<FastifyInstance> {
   const trustedProxies = options.trustedProxies ?? [];
   const publicOrigin = normalizePublicOrigin(options.publicOrigin);
   const app = Fastify({
-    logger: options.logger ?? false,
+    logger: options.logger === true ? {
+      redact: ['req.headers.authorization', 'req.headers.cookie', 'res.headers.set-cookie'],
+      serializers: { req: (request) => ({ method: request.method,
+        url: /^\/api\/v1\/git\/(?:connections|auth)(?:\/|\?|$)/u.test(request.url)
+          ? request.url.split('?')[0]! : redactSensitiveText(request.url),
+      }) },
+    } : false,
     ...(trustedProxies.length === 0 ? {} : { trustProxy: trustedProxies }),
   });
   const assetsDirectory = options.assetsDirectory ?? resolveDefaultAssetsDirectory();
@@ -58,13 +68,14 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     process.cwd(),
     options.sfClient,
     {
-      ...(options.userUploadQuotaBytes === undefined
+      ...(options.userImportQuotaBytes === undefined
         ? {}
-        : { userUploadQuotaBytes: options.userUploadQuotaBytes }),
-      ...(options.serverUploadQuotaBytes === undefined
+        : { userImportQuotaBytes: options.userImportQuotaBytes }),
+      ...(options.serverImportQuotaBytes === undefined
         ? {}
-        : { serverUploadQuotaBytes: options.serverUploadQuotaBytes }),
+        : { serverImportQuotaBytes: options.serverImportQuotaBytes }),
     },
+    ...(options.quickDeployEnabled === undefined ? [] : [{ quickDeployEnabled: options.quickDeployEnabled }]),
   );
   app.decorate('sfudRuntime', runtime);
   app.addHook('onClose', async () => {
@@ -85,17 +96,6 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     if (request.url.startsWith('/api/')) reply.header('cache-control', 'no-store');
   });
 
-  await app.register(fastifyMultipart, {
-    preservePath: true,
-    throwFileSizeLimit: true,
-    limits: {
-      fields: 1,
-      files: 2_000,
-      parts: 2_001,
-      fileSize: 10 * 1024 * 1024,
-    },
-  });
-
   app.get('/api/v1/health', async (): Promise<HealthResponse> => ({
     status: 'ok',
     service: 'sfud-ui',
@@ -105,6 +105,16 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
   app.get('/api/v1/diagnostics', async (request, reply): Promise<DiagnosticsResponse | undefined> => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
+    const queue = runtime.deploymentQueue.status();
+    const comparisonQueue = runtime.comparisonQueue.status();
+    if (queue.activeJobId !== undefined
+      && !await runtime.jobAccess.canAccess('deployment', queue.activeJobId, session.user.id)) {
+      delete queue.activeJobId;
+    }
+    if (comparisonQueue.activeJobId !== undefined
+      && !await runtime.jobAccess.canAccess('comparison', comparisonQueue.activeJobId, session.user.id)) {
+      delete comparisonQueue.activeJobId;
+    }
     return {
       status: 'ok',
       service: 'sfud-ui',
@@ -115,8 +125,8 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
       engine: 'sqlite',
       status: 'ok',
     },
-    queue: runtime.deploymentQueue.status(),
-    comparisonQueue: runtime.comparisonQueue.status(),
+    queue,
+    comparisonQueue,
     recoveredJobCount: runtime.recoveredJobCount,
     recoveredComparisonCount: runtime.recoveredComparisonCount,
     };
@@ -124,8 +134,12 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
 
   await registerAuthRoutes(app, publicOrigin === undefined ? {} : { publicOrigin });
   await registerAdminRoutes(app);
+  await registerOrgExecutionAccessRoutes(app);
   await registerProjectUploadRoutes(app);
   await registerSettingsRoutes(app);
+  await registerJobAccessRoutes(app);
+  await registerGitConnectionRoutes(app);
+  await registerGitProjectRoutes(app);
   await registerComparisonRoutes(app);
   await registerDeploymentRoutes(app);
   await registerWorkflowEventRoutes(app);
@@ -135,7 +149,9 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
       root: assetsDirectory,
       wildcard: false,
     });
-    app.get('/*', async (_request, reply) => reply.sendFile('index.html'));
+    app.get('/*', async (request, reply) => request.url.startsWith('/api/')
+      ? reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'API를 찾을 수 없습니다.' } })
+      : reply.sendFile('index.html'));
   } else {
     app.get('/', async (_request, reply) => reply
       .code(503)

@@ -55,6 +55,9 @@ jobs:
       - name: 의존성 설치
         run: npm ci
 
+      - name: 배포 잠금 파일 그래프 동기화
+        run: npm run lockfile:check
+
       - name: 타입·단위 테스트·빌드
         run: npm run check
 
@@ -114,7 +117,7 @@ jobs:
       - name: 의존성 설치
         run: npm ci
 
-      - name: process path upload sqlite 스모크
+      - name: process path Git 관리 저장소 sqlite 스모크
         run: npm run test:platform
 
       - name: CLI UI 빌드

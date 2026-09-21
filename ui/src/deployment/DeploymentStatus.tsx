@@ -156,6 +156,9 @@ function workflowStatusItem(
   if (status === 'APPROVAL_PENDING') {
     return { title, label: `Dry-run 성공 · 배포 가능${elapsed}`, detail, tone: 'success' };
   }
+  if (status === 'VALIDATED_PENDING_EXECUTION') {
+    return { title, label: `검증 완료 · 실제 미배포${elapsed}`, detail, tone: 'pending' };
+  }
   return {
     title,
     label: `완료${elapsed}`,
@@ -187,23 +190,34 @@ export function DryRunResultPanel({
   canReconcile,
   reconciling,
   onReconcile,
+  canManuallyReconcile,
+  manuallyReconciling,
+  onManualReconcile,
 }: {
   job: DryRunJobResponse;
   canReconcile: boolean;
   reconciling: boolean;
   onReconcile: (job: DryRunJobResponse) => Promise<void>;
+  canManuallyReconcile: boolean;
+  manuallyReconciling: boolean;
+  onManualReconcile: (job: DryRunJobResponse, input: {
+    deploymentId: string; operation: 'VALIDATE' | 'DEPLOY' | 'QUICK_DEPLOY'; observedAt: string; evidence: string;
+  }) => Promise<void>;
 }) {
   if (job.kind === 'DEPLOY' && ['QUEUED', 'DEPLOYING'].includes(job.status)) {
-    return <><section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? '실제 배포 대기 중' : `Salesforce 실제 배포 중${job.progress === undefined ? '' : ` · ${job.progress.status}`}`}</strong><p>{job.progress === undefined ? `${job.source.label} → ${job.target.label} · dry-run으로 고정한 payload를 배포합니다.` : progressSummary(job.progress)}</p></div></section><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></>;
+    return <><section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? '실제 배포 대기 중' : `Salesforce 실제 배포 중${job.progress === undefined ? '' : ` · ${job.progress.status}`}`}</strong><p>{job.progress === undefined ? executionDescription(job) : progressSummary(job.progress)}</p></div></section><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></>;
   }
   if (['QUEUED', 'DRY_RUN_RUNNING'].includes(job.status)) {
     return <><section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? 'dry-run 대기 중' : `Salesforce check-only 실행 중${job.progress === undefined ? '' : ` · ${job.progress.status}`}`}</strong><p>{job.progress === undefined ? `${job.source.label} → ${job.target.label} · snapshot, 차이, 테스트를 검증합니다.` : progressSummary(job.progress)}</p></div></section><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></>;
   }
   if (job.status === 'FAILED' || job.status === 'RECONCILE_REQUIRED') {
-    return <section className="compare-error" role="alert"><strong>{job.status === 'FAILED' ? `${job.kind === 'DEPLOY' ? '실제 배포' : 'dry-run'}이 실패했습니다.` : 'Salesforce 상태 재확인이 필요합니다.'}</strong><p>{job.errorMessage ?? '상세 오류가 기록되지 않았습니다.'}</p>{job.persistenceWarning !== undefined && <p>로컬 저장 경고: {job.persistenceWarning}</p>}{job.status === 'RECONCILE_REQUIRED' && <button className={`button button-secondary reconcile-button${reconciling ? ' button-busy' : ''}`} type="button" disabled={!canReconcile || reconciling} onClick={() => void onReconcile(job)}><Icon name={reconciling ? 'refresh' : 'shield'} />{reconciling ? 'Salesforce 상태 확인 중……' : 'Salesforce 상태 다시 확인'}</button>}<SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></section>;
+    return <section className="compare-error" role="alert"><strong>{job.status === 'FAILED' ? `${job.kind === 'DEPLOY' ? '실제 배포' : 'dry-run'}이 실패했습니다.` : 'Salesforce 상태 재확인이 필요합니다.'}</strong><p>{job.errorMessage ?? '상세 오류가 기록되지 않았습니다.'}</p>{job.persistenceWarning !== undefined && <p>로컬 저장 경고: {job.persistenceWarning}</p>}{job.status === 'RECONCILE_REQUIRED' && <button className={`button button-secondary reconcile-button${reconciling ? ' button-busy' : ''}`} type="button" disabled={!canReconcile || reconciling} onClick={() => void onReconcile(job)}><Icon name={reconciling ? 'refresh' : 'shield'} />{reconciling ? 'Salesforce 상태 확인 중……' : 'Salesforce 상태 다시 확인'}</button>}{job.status === 'RECONCILE_REQUIRED' && canManuallyReconcile && job.salesforceDeploymentId === undefined && <ManualReconcileForm job={job} busy={manuallyReconciling} onSubmit={onManualReconcile} />}<SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></section>;
   }
   if (job.kind === 'DEPLOY' && job.status === 'SUCCEEDED') {
-    return <section className="dry-run-result" aria-label="Salesforce 실제 배포 성공"><div className="comparison-result-head"><div><p className="eyebrow">DEPLOYMENT COMPLETE</p><h2>Salesforce 실제 배포 성공</h2><small>{job.salesforceDeploymentId ?? 'deployment ID 없음'}</small></div><span className="result-success"><Icon name="check" />배포 성공</span></div>{job.persistenceWarning !== undefined && <div className="warning-note" role="alert"><Icon name="shield" /><p><strong>Salesforce 배포는 성공했지만 로컬 저장을 확인해야 합니다.</strong>{job.persistenceWarning}</p></div>}<div className="approval-preview"><Icon name="shield" /><div><strong>선택한 payload 배포를 완료했습니다.</strong><p>{deploymentTestResult(job)}</p></div></div><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></section>;
+    return <section className="dry-run-result" aria-label="Salesforce 실제 배포 성공"><div className="comparison-result-head"><div><p className="eyebrow">DEPLOYMENT COMPLETE</p><h2>Salesforce 실제 배포 성공</h2><small>{job.salesforceDeploymentId ?? 'deployment ID 없음'}</small></div><span className="result-success"><Icon name="check" />배포 성공</span></div>{job.persistenceWarning !== undefined && <div className="warning-note" role="alert"><Icon name="shield" /><p><strong>Salesforce 배포는 성공했지만 로컬 저장을 확인해야 합니다.</strong>{job.persistenceWarning}</p></div>}<div className="approval-preview"><Icon name="shield" /><div><strong>선택한 payload 배포를 완료했습니다.</strong><p>{executionDescription(job)}</p><p>{deploymentTestResult(job)}</p></div></div><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></section>;
+  }
+  if (job.status === 'VALIDATED_PENDING_EXECUTION') {
+    return <section className="warning-note" role="status"><Icon name="shield" /><div><strong>검증만 완료되었습니다. 실제 배포는 실행되지 않았습니다.</strong><p>검증 후 작업이 중단되었습니다. 고정된 검증 결과와 승인을 확인해야 합니다.</p></div></section>;
   }
   if (job.status !== 'APPROVAL_PENDING') return null;
   if (job.persistenceWarning !== undefined || !job.prepared) {
@@ -213,7 +227,7 @@ export function DryRunResultPanel({
   return (
     <section className="dry-run-result" aria-labelledby="dry-run-result-title">
       <div className="comparison-result-head"><div><p className="eyebrow">CHECK-ONLY COMPLETE</p><h2 id="dry-run-result-title">Salesforce dry-run 성공</h2><small>{job.salesforceDeploymentId ?? 'deployment ID 없음'}</small></div><span className="result-success"><Icon name="check" />검증 성공</span></div>
-      {summary !== undefined && <div className="comparison-summary"><div className="summary-added"><span>NEW</span><strong>{summary.added}</strong></div><div className="summary-removed"><span>TARGET ONLY</span><strong>{summary.removed}</strong></div><div className="summary-modified"><span>MODIFIED</span><strong>{summary.modified}</strong></div><div><span>TOTAL</span><strong>{summary.total}</strong></div></div>}
+      {job.comparisonLimit?.exceeded === true ? <p className="comparison-warning">파일 {job.comparisonLimit.fileCount.toLocaleString('ko-KR')}개가 최대 {job.comparisonLimit.maximumFiles.toLocaleString('ko-KR')}개를 초과하여 비교를 생략했습니다. Salesforce 배포 검증은 완료했습니다.</p> : summary !== undefined && <div className="comparison-summary"><div className="summary-added"><span>NEW</span><strong>{summary.added}</strong></div><div className="summary-removed"><span>TARGET ONLY</span><strong>{summary.removed}</strong></div><div className="summary-modified"><span>MODIFIED</span><strong>{summary.modified}</strong></div><div><span>TOTAL</span><strong>{summary.total}</strong></div></div>}
       <div className="dry-run-details">
         <div><span className="card-icon icon-green"><Icon name="check" /></span><p><strong>{job.testPlan?.level ?? '테스트 수준 미상'}</strong>{job.testPlan?.tests.length ? `${job.testPlan.tests.join(', ')}${job.testCoverage === undefined ? '' : ` · ${job.testCoverage.toFixed(2)}%`}` : 'Salesforce 구성 테스트'}</p></div>
         <div><span className="card-icon icon-blue"><Icon name="shield" /></span><p><strong>Payload 고정</strong><code>{job.payloadChecksum}</code></p></div>
@@ -222,6 +236,51 @@ export function DryRunResultPanel({
       <SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} />
     </section>
   );
+}
+
+function executionDescription(job: DryRunJobResponse): string {
+  if (job.executionMode === 'QUICK_DEPLOY') {
+    return `검증 ID ${job.reusedValidationId ?? '미상'}를 재사용한 Quick Deploy를 실행합니다.`;
+  }
+  if (job.executionMode === 'STANDARD_DEPLOY') {
+    return `일반 배포를 실행합니다.${job.executionReason === undefined ? '' : ` ${job.executionReason}`}`;
+  }
+  if (job.executionMode === 'REVALIDATION_REQUIRED') {
+    return `재검증이 필요합니다. ${job.executionReason ?? ''}`.trim();
+  }
+  if (job.executionMode === 'RECONCILE_REQUIRED') {
+    return `검증 상태 재확인이 필요합니다. ${job.executionReason ?? ''}`.trim();
+  }
+  return `${job.source.label} → ${job.target.label} · dry-run으로 고정한 payload를 배포합니다.`;
+}
+
+function ManualReconcileForm({
+  job,
+  busy,
+  onSubmit,
+}: {
+  job: DryRunJobResponse;
+  busy: boolean;
+  onSubmit: (job: DryRunJobResponse, input: {
+    deploymentId: string; operation: 'VALIDATE' | 'DEPLOY' | 'QUICK_DEPLOY'; observedAt: string; evidence: string;
+  }) => Promise<void>;
+}) {
+  const [operation, setOperation] = useState<'VALIDATE' | 'DEPLOY' | 'QUICK_DEPLOY'>(job.kind === 'DRY_RUN' ? 'VALIDATE' : 'DEPLOY');
+  return <form className="manual-reconcile-form" onSubmit={(event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    void onSubmit(job, {
+      deploymentId: String(data.get('deploymentId') ?? ''), operation,
+      observedAt: new Date(String(data.get('observedAt') ?? '')).toISOString(), evidence: String(data.get('evidence') ?? ''),
+    });
+  }}>
+    <strong>관리자 원격 ID 연결</strong><p>원격 Deployment Status report에서 대상 org·실행 ID·유형을 확인한 경우에만 연결합니다.</p>
+    <label>실행 ID<input name="deploymentId" required pattern="0Af[A-Za-z0-9]{12,15}" placeholder="0Af…" /></label>
+    <label>제출 유형<select value={operation} onChange={(event) => setOperation(event.target.value as typeof operation)}><option value="VALIDATE">검증 (check-only)</option><option value="DEPLOY">일반 배포</option><option value="QUICK_DEPLOY">Quick Deploy</option></select></label>
+    <label>확인 시각<input name="observedAt" required type="datetime-local" defaultValue={new Date().toISOString().slice(0, 16)} /></label>
+    <label>대조 근거<textarea name="evidence" required minLength={24} maxLength={2000} placeholder="대상 org, 실행 ID, 제출 시각, 원격 report를 어떻게 대조했는지 기록합니다." /></label>
+    <button className="button button-secondary" type="submit" disabled={busy}>{busy ? '원격 report 확인 중……' : '원격 ID 연결 후 재확인'}</button>
+  </form>;
 }
 
 function SalesforceDiagnosticsPanel({ diagnostics }: { diagnostics: SalesforceDeploymentDiagnostics | undefined }) {

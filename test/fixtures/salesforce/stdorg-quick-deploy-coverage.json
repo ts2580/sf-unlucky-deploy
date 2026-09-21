@@ -1,0 +1,39 @@
+{
+  "status": 0,
+  "result": {
+    "id": "0Af…0AM",
+    "checkOnly": true,
+    "done": true,
+    "status": "Succeeded",
+    "success": true,
+    "numberComponentsDeployed": 2,
+    "numberComponentsTotal": 2,
+    "numberTestsCompleted": 1,
+    "numberTestsTotal": 1,
+    "details": {
+      "runTestResult": {
+        "codeCoverage": [
+          {
+            "id": "01p…YAJ",
+            "name": "SfudQuickDeployVerificationFixture",
+            "namespace": null,
+            "numLocations": 2,
+            "numLocationsNotCovered": 0,
+            "type": "Class"
+          }
+        ],
+        "numFailures": 0,
+        "numTestsRun": 1,
+        "successes": [
+          {
+            "id": "01p…YAZ",
+            "methodName": "sumsTwoValues",
+            "name": "SfudQuickDeployVerificationFixtureTest"
+          }
+        ],
+        "failures": []
+      },
+      "componentFailures": []
+    }
+  }
+}

@@ -3,12 +3,18 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { SfudError } from '../core/errors.js';
 import { boundedCommandTimeoutMs, createDeadline, remainingDeadlineMs } from '../core/deadline.js';
 import {
-  isAmbiguousSalesforceFailure,
+  SfCommandNotStartedError,
   sanitizeSfOutput,
   type SfClient,
 } from '../salesforce/sf-client.js';
 
 export type SalesforceDeploymentPhase = 'DRY_RUN' | 'DEPLOY';
+
+export class ExternalDeploymentStateUnknownError extends SfudError {
+  public constructor(message: string, public readonly deploymentId?: string, options?: ErrorOptions) {
+    super('SF_EXTERNAL_STATE_UNKNOWN', message, options);
+  }
+}
 
 export interface SalesforceComponentFailure {
   componentType?: string;
@@ -47,6 +53,7 @@ export interface SalesforceDeploymentProgress {
   status: string;
   done: boolean;
   success?: boolean;
+  checkOnly?: boolean;
   numberComponentsDeployed?: number;
   numberComponentsTotal?: number;
   numberComponentErrors?: number;
@@ -88,6 +95,7 @@ export interface SalesforceDeploymentReportOptions {
 export interface SalesforceDeploymentReport {
   report: unknown;
   progress: SalesforceDeploymentProgress;
+  reportedDeploymentId?: string;
 }
 
 export async function reportSalesforceDeployment(
@@ -102,8 +110,11 @@ export async function reportSalesforceDeployment(
     timeoutMs: options.timeoutMs ?? 5 * 60 * 1_000,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   }));
+  assertReportIdentity(report, options.deploymentId, options.phase);
+  const reportedDeploymentId = extractDeploymentId(report);
   return {
     report,
+    ...(reportedDeploymentId === undefined ? {} : { reportedDeploymentId }),
     progress: toProgress(
       report,
       options.phase,
@@ -123,9 +134,13 @@ export async function runAsyncSalesforceDeployment(
   const sleep = options.sleep ?? (async (milliseconds) => { await delay(milliseconds); });
   const deadline = createDeadline(timeoutMs, () => now().getTime());
   let deploymentId: string | undefined;
+  let terminalFailureConfirmed = false;
 
+  // 의도 저장/권한 확인 실패는 외부 실행 실패와 분리한다.
+  assertNotAborted(options.signal);
+  await options.beforeSubmit?.();
+  assertNotAborted(options.signal);
   try {
-    await options.beforeSubmit?.();
     const submitted = sanitizeSfOutput(await options.sfClient.runJson(
       [...withoutWait(options.startArgs), '--async'],
       {
@@ -164,9 +179,11 @@ export async function runAsyncSalesforceDeployment(
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       }));
       const progress = toProgress(report, options.phase, deploymentId, now);
+      assertReportIdentity(report, deploymentId, options.phase);
       await notifyWithoutInterruptingPolling(options.onProgress, [progress], 'progress', options.onPersistenceError);
       if (progress.done) {
         if (progress.success === false || !['Succeeded', 'SucceededPartial'].includes(progress.status)) {
+          terminalFailureConfirmed = true;
           const summary = firstDiagnosticSummary(progress.diagnostics);
           throw new SfudError(
             'DEPLOY_FAILED',
@@ -179,18 +196,33 @@ export async function runAsyncSalesforceDeployment(
       nextPollIntervalMs = Math.min(Math.ceil(nextPollIntervalMs * 1.5), 5_000);
     }
   } catch (error) {
-    const abortedAfterSubmission = error instanceof SfudError
-      && error.code === 'SF_COMMAND_ABORTED'
-      && deploymentId !== undefined;
-    if (abortedAfterSubmission || isAmbiguousSalesforceFailure(error)) {
+    // 시작 명령 호출 이후에는 오류 문자열로 미제출을 추정할 수 없다.
+    // report 프로세스의 미시작도 이미 제출한 원격 작업의 실패 근거는 아니다.
+    if (!terminalFailureConfirmed
+      && !(deploymentId === undefined && error instanceof SfCommandNotStartedError)) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new SfudError(
-        'SF_EXTERNAL_STATE_UNKNOWN',
+      throw new ExternalDeploymentStateUnknownError(
         `Salesforce 배포 요청의 최종 상태를 확인할 수 없습니다${deploymentId === undefined ? '' : ` (${deploymentId})`}: ${message}`,
+        deploymentId,
         { cause: error },
       );
     }
     throw error;
+  }
+}
+
+function assertNotAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw new SfCommandNotStartedError('SF_COMMAND_ABORTED', 'Salesforce 배포가 제출 전에 취소되었습니다.');
+  }
+}
+
+function assertReportIdentity(report: unknown, deploymentId: string, phase: SalesforceDeploymentPhase): void {
+  const returnedId = extractDeploymentId(report);
+  const checkOnly = booleanValue(deploymentResult(report).checkOnly);
+  if ((returnedId !== undefined && returnedId !== deploymentId)
+    || (checkOnly !== undefined && checkOnly !== (phase === 'DRY_RUN'))) {
+    throw new SfudError('SF_EXTERNAL_STATE_UNKNOWN', '원격 보고서의 실행 ID 또는 검증/실제 배포 유형이 일치하지 않습니다.');
   }
 }
 
@@ -240,6 +272,7 @@ function toProgress(
     status,
     done,
     ...optionalBoolean('success', result.success),
+    ...optionalBoolean('checkOnly', result.checkOnly),
     ...optionalNumber('numberComponentsDeployed', result.numberComponentsDeployed),
     ...optionalNumber('numberComponentsTotal', result.numberComponentsTotal),
     ...optionalNumber('numberComponentErrors', result.numberComponentErrors),

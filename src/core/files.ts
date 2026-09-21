@@ -87,6 +87,22 @@ export async function sha256Directory(rootPath: string): Promise<string> {
   return hash.digest('hex');
 }
 
+/**
+ * 배포 승인에 사용하는 v2 digest. 정렬된 상대 경로·바이트 길이·본문 SHA-256을
+ * 길이 접두어로 직렬화해 파일 경계와 경로 경계를 모호하지 않게 한다.
+ */
+export async function sha256DirectoryV2(rootPath: string): Promise<string> {
+  const digest = createHash('sha256');
+  digest.update('sfud-payload-digest-v2\0', 'utf8');
+  for (const entry of await listDigestEntries(rootPath)) {
+    const contentSha256 = await sha256File(entry.absolutePath);
+    updateDigestField(digest, entry.relativePath);
+    updateDigestField(digest, String(entry.byteLength));
+    updateDigestField(digest, contentSha256);
+  }
+  return digest.digest('hex');
+}
+
 export async function writeJson(filePath: string, value: unknown): Promise<void> {
   const directory = path.dirname(filePath);
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -100,6 +116,43 @@ export async function writeJson(filePath: string, value: unknown): Promise<void>
 
 async function updateHashFromFile(hash: ReturnType<typeof createHash>, filePath: string): Promise<void> {
   for await (const chunk of createReadStream(filePath)) hash.update(chunk as Buffer);
+}
+
+async function listDigestEntries(rootPath: string): Promise<Array<{
+  absolutePath: string;
+  relativePath: string;
+  byteLength: number;
+}>> {
+  const entries: Array<{ absolutePath: string; relativePath: string; byteLength: number }> = [];
+  async function visit(currentPath: string): Promise<void> {
+    const children = await readdir(currentPath, { withFileTypes: true });
+    children.sort((left, right) => left.name.localeCompare(right.name));
+    for (const child of children) {
+      const absolutePath = path.join(currentPath, child.name);
+      if (child.isDirectory()) {
+        await visit(absolutePath);
+      } else if (child.isFile()) {
+        const info = await stat(absolutePath);
+        entries.push({
+          absolutePath,
+          relativePath: path.relative(rootPath, absolutePath).split(path.sep).join('/'),
+          byteLength: info.size,
+        });
+      } else {
+        throw new SfudError('PAYLOAD_CHANGED', `배포 payload에 지원하지 않는 파일 형식이 있습니다: ${path.relative(rootPath, absolutePath)}`);
+      }
+    }
+  }
+  await visit(rootPath);
+  return entries;
+}
+
+function updateDigestField(hash: ReturnType<typeof createHash>, value: string): void {
+  const bytes = Buffer.from(value, 'utf8');
+  const length = Buffer.allocUnsafe(4);
+  length.writeUInt32BE(bytes.length);
+  hash.update(length);
+  hash.update(bytes);
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

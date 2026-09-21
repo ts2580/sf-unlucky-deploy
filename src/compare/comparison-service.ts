@@ -1,4 +1,7 @@
+import type { UserSettingsRepository } from '../storage/user-settings-repository.js';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { assertGitMetadataScope } from '../sources/git-metadata-scope.js';
 
 import { runCompareCommand } from '../commands/compare.js';
 import { SfudError } from '../core/errors.js';
@@ -8,6 +11,7 @@ import { ComparisonJobRepository, type ComparisonJob } from './comparison-job-re
 import type { WorkspaceService } from '../web/server/workspace-service.js';
 
 export interface CreateComparisonInput {
+  sessionWorkspaceId?: string;
   projectId?: string;
   scope?: 'manifest' | 'all';
   metadataType?: string;
@@ -27,18 +31,51 @@ export class ComparisonService {
     private readonly workspace: WorkspaceService,
     private readonly sfClient: SfClient,
     private readonly runsDirectory: string,
+    private readonly settings?: UserSettingsRepository,
   ) {}
 
   public async create(input: CreateComparisonInput): Promise<ComparisonJob> {
+    const jobId = randomUUID();
+    const prepared: string[] = [];
+    const releases: (() => void)[] = [];
+    const prepare = async (id: string, side: string) => {
+      if (!id.startsWith('git-registered:')) return id;
+      if (this.workspace.gitRegistrations === undefined || input.scope !== 'all' || input.metadataType === undefined) {
+        throw new Error('등록 브랜치는 메타데이터 타입을 선택해 비교하세요.');
+      }
+      const record = await this.workspace.gitRegistrations.prepare(id.slice('git-registered:'.length), input.createdBy, input.metadataType,
+        { sessionId: input.sessionWorkspaceId ?? randomUUID(), jobId, side });
+      const sourceId = `git:${record.id}`;
+      prepared.push(record.id);
+      releases.push(this.workspace.pinSources([sourceId], input.createdBy));
+      return sourceId;
+    };
+    this.queue.assertAccepting();
+    if (input.sourceOnly !== true && input.leftSourceId === input.rightSourceId) throw new Error('서로 다른 비교 소스를 선택하세요.');
+    try {
+      const rightSourceId = await prepare(input.rightSourceId, 'right');
+      const leftSourceId = input.sourceOnly === true ? rightSourceId : await prepare(input.leftSourceId, 'left');
+      return await this.createPrepared({ ...input, leftSourceId, rightSourceId }, jobId);
+    } catch (error) {
+      for (const release of releases) release();
+      for (const id of prepared) await this.workspace.gitImports?.remove(id, input.createdBy).catch(() => undefined);
+      throw error;
+    } finally { for (const release of releases) release(); }
+  }
+
+  private async createPrepared(input: CreateComparisonInput, jobId: string): Promise<ComparisonJob> {
     this.queue.assertAccepting();
     const scope = input.scope ?? 'manifest';
     const rightSource = await this.workspace.resolveSource(input.rightSourceId, input.createdBy);
     const leftSource = input.sourceOnly === true
       ? rightSource
       : await this.workspace.resolveSource(input.leftSourceId, input.createdBy);
+    for (const source of [leftSource, rightSource]) {
+      assertGitMetadataScope(this.workspace.publicSource(source), input.metadataType === undefined ? undefined : [input.metadataType]);
+    }
     const project = scope === 'all'
       ? this.workspace.projectForSources(input.sourceOnly === true ? [rightSource] : [leftSource, rightSource])
-      : await this.workspace.resolveProject(requiredProjectId(input.projectId));
+      : await this.workspace.resolveProject(requiredProjectId(input.projectId), input.createdBy);
     if (input.sourceOnly !== true && leftSource === rightSource) throw new Error('서로 다른 비교 소스를 선택하세요.');
     if (scope !== 'all' && input.metadataType !== undefined) {
       throw new Error('Salesforce metadata type은 전체 metadata 비교에서만 선택할 수 있습니다.');
@@ -60,24 +97,32 @@ export class ComparisonService {
       : (await this.workspace.resolveManifest(
         requiredProjectId(input.projectId),
         requiredManifest(input.manifest),
+        input.createdBy,
       )).path;
     const releaseSources = this.workspace.pinSources(
-      input.sourceOnly === true ? [input.rightSourceId] : [input.leftSourceId, input.rightSourceId],
+      [...(input.sourceOnly === true ? [input.rightSourceId] : [input.leftSourceId, input.rightSourceId]),
+        ...(scope === 'manifest' && input.projectId !== undefined ? [input.projectId] : [])],
       input.createdBy,
     );
     let job: ComparisonJob;
     try {
       this.queue.assertAccepting();
       job = await this.repository.create({
+        id: jobId,
         scope: scope === 'all' ? 'ALL' : 'MANIFEST',
         ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
         projectPath: project.realPath,
         manifestPath,
         leftSource,
         rightSource,
+        sourceSnapshot: { left: this.workspace.publicSource(leftSource), right: this.workspace.publicSource(rightSource),
+          project: this.workspace.publicSource(`local:${project.realPath}`),
+          manifest: this.workspace.publicManifest(project.realPath, manifestPath) },
         strict: input.strict,
         showIdentical: input.showIdentical,
         createdBy: input.createdBy,
+        ...([input.leftSourceId, input.rightSourceId, input.projectId].some((id) => /^(git|upload):/u.test(id ?? ''))
+          ? { accessOwnerUserId: input.createdBy } : {}),
       });
     } catch (error) {
       releaseSources();
@@ -97,7 +142,9 @@ export class ComparisonService {
     await this.repository.markRunning(jobId);
     const job = await this.repository.getRequired(jobId);
     try {
+      const settings = await this.settings?.get(job.createdBy);
       const result = await runCompareCommand({
+        maximumComparisonFiles: settings?.maximumComparisonFiles ?? 2000,
         left: job.leftSource,
         right: job.rightSource,
         ...(job.scope === 'ALL'
@@ -116,6 +163,7 @@ export class ComparisonService {
         sfClient: this.sfClient,
         stdout: () => undefined,
         signal,
+        ...(job.sourceSnapshot === undefined ? {} : { sourceSnapshot: job.sourceSnapshot }),
       });
       await this.repository.markSucceeded(job.id, result.comparison, result.runDirectory);
     } catch (error) {

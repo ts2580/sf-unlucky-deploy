@@ -1,4 +1,5 @@
 import { Type, type Static } from '@sinclair/typebox';
+import { WorkspaceSourceSchema } from './workspace-contracts.js';
 
 const RequestedTestLevelSchema = Type.Union([
   Type.Literal('auto'),
@@ -51,10 +52,25 @@ export const ExecuteDeploymentRequestSchema = Type.Object({
   confirmation: Type.Optional(Type.String({ minLength: 1 })),
 }, { additionalProperties: false });
 
+const DeploymentAttemptOperationSchema = Type.Union([
+  Type.Literal('VALIDATE'),
+  Type.Literal('DEPLOY'),
+  Type.Literal('QUICK_DEPLOY'),
+]);
+
+/** ID가 저장되지 않은 외부 제출을 ADMIN이 원격 보고서와 대조해 연결할 때만 사용한다. */
+export const BindDeploymentAttemptRequestSchema = Type.Object({
+  deploymentId: Type.String({ pattern: '^0Af[A-Za-z0-9]{12,15}$' }),
+  operation: DeploymentAttemptOperationSchema,
+  observedAt: Type.String({ minLength: 20, maxLength: 40 }),
+  evidence: Type.String({ minLength: 24, maxLength: 2_000 }),
+}, { additionalProperties: false });
+
 const DeploymentStatusSchema = Type.Union([
   Type.Literal('QUEUED'),
   Type.Literal('DRY_RUN_RUNNING'),
   Type.Literal('APPROVAL_PENDING'),
+  Type.Literal('VALIDATED_PENDING_EXECUTION'),
   Type.Literal('DEPLOYING'),
   Type.Literal('SUCCEEDED'),
   Type.Literal('FAILED'),
@@ -68,6 +84,13 @@ const RemoteDeploymentStatusSchema = Type.Union([
   Type.Literal('SUCCEEDED'),
   Type.Literal('FAILED'),
   Type.Literal('UNKNOWN'),
+]);
+
+const DeploymentExecutionModeSchema = Type.Union([
+  Type.Literal('QUICK_DEPLOY'),
+  Type.Literal('STANDARD_DEPLOY'),
+  Type.Literal('REVALIDATION_REQUIRED'),
+  Type.Literal('RECONCILE_REQUIRED'),
 ]);
 
 const SalesforceDiagnosticsSchema = Type.Object({
@@ -111,24 +134,21 @@ const DeploymentJobSchema = Type.Object({
   id: Type.String(),
   kind: Type.Union([Type.Literal('DRY_RUN'), Type.Literal('DEPLOY')]),
   status: DeploymentStatusSchema,
-  source: Type.Object({
-    id: Type.String(),
-    kind: Type.Union([Type.Literal('org'), Type.Literal('local')]),
-    label: Type.String(),
-  }),
-  target: Type.Object({
-    id: Type.String(),
-    kind: Type.Union([Type.Literal('org'), Type.Literal('local')]),
-    label: Type.String(),
-  }),
+  source: WorkspaceSourceSchema,
+  target: WorkspaceSourceSchema,
   manifest: Type.String(),
   scope: Type.Optional(DeploymentScopeSchema),
   metadataType: Type.Optional(Type.String()),
   components: Type.Optional(Type.Array(SelectedDeploymentComponentSchema)),
   prepared: Type.Boolean(),
   payloadChecksum: Type.Optional(Type.String()),
+  payloadDigestVersion: Type.Optional(Type.Literal(2)),
   salesforceDeploymentId: Type.Optional(Type.String()),
   remoteStatus: RemoteDeploymentStatusSchema,
+  executionEvidence: Type.Optional(Type.String()),
+  executionMode: Type.Optional(DeploymentExecutionModeSchema),
+  reusedValidationId: Type.Optional(Type.String()),
+  executionReason: Type.Optional(Type.String()),
   persistenceWarning: Type.Optional(Type.String()),
   progress: Type.Optional(Type.Object({
     phase: Type.Union([Type.Literal('DRY_RUN'), Type.Literal('DEPLOY')]),
@@ -136,6 +156,7 @@ const DeploymentJobSchema = Type.Object({
     status: Type.String(),
     done: Type.Boolean(),
     success: Type.Optional(Type.Boolean()),
+    checkOnly: Type.Optional(Type.Boolean()),
     numberComponentsDeployed: Type.Optional(Type.Number()),
     numberComponentsTotal: Type.Optional(Type.Number()),
     numberComponentErrors: Type.Optional(Type.Number()),
@@ -152,6 +173,7 @@ const DeploymentJobSchema = Type.Object({
   })),
   testCoverage: Type.Optional(Type.Number()),
   comparisonSummary: Type.Optional(ComparisonSummarySchema),
+  comparisonLimit: Type.Optional(Type.Object({ maximumFiles: Type.Integer(), fileCount: Type.Integer(), exceeded: Type.Boolean() })),
   errorCode: Type.Optional(Type.String()),
   errorMessage: Type.Optional(Type.String()),
   createdAt: Type.String(),
@@ -169,6 +191,7 @@ export const DeploymentJobListResponseSchema = Type.Object({
 export type CreateDryRunRequest = Static<typeof CreateDryRunRequestSchema>;
 export type CreateDirectDeploymentRequest = Static<typeof CreateDirectDeploymentRequestSchema>;
 export type ExecuteDeploymentRequest = Static<typeof ExecuteDeploymentRequestSchema>;
+export type BindDeploymentAttemptRequest = Static<typeof BindDeploymentAttemptRequestSchema>;
 export type DeploymentJobResponse = Static<typeof DeploymentJobSchema>;
 export type DeploymentJobEnvelope = Static<typeof DeploymentJobResponseSchema>;
 export type DeploymentJobListResponse = Static<typeof DeploymentJobListResponseSchema>;

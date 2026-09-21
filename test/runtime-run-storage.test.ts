@@ -63,6 +63,27 @@ describe('웹 런타임 실행 저장소', () => {
     } finally { await storage.close(); await store.close(); }
   });
 
+  it('보호된 실행 기록이 quota를 넘으면 새 요청을 막되 기존 payload를 삭제하지 않는다', async () => {
+    vi.stubEnv('SFUD_RUN_MAX_BYTES', '1');
+    const store = await openSqliteStore({ databasePath: ':memory:' });
+    const storage = await RuntimeRunStorage.create(':memory:', store.database);
+    const jobs = new DeploymentJobRepository(store.database);
+    try {
+      const job = await jobs.createDryRun({
+        source: 'local:/fixture', targetAlias: 'target', manifestPath: '@all', payloadChecksum: 'a'.repeat(64),
+        targetOrgIdentity: { alias: 'target', username: 'target@example.com', orgId: '00D000000000001' },
+      });
+      const protectedPayload = await artifact(storage.directory, job.id, Date.now());
+
+      await expect(storage.assertCanAcceptNewRun()).rejects.toMatchObject({ code: 'REQUEST_CAPACITY_EXCEEDED' });
+      await expect(access(protectedPayload)).resolves.toBeUndefined();
+
+      await jobs.transition(job.id, 'FAILED');
+      await storage.clean(() => Date.now() + 8 * 24 * 3_600_000);
+      await expect(storage.assertCanAcceptNewRun()).resolves.toBeUndefined();
+    } finally { await storage.close(); await store.close(); }
+  });
+
   it('서버 재시작 없이 주기적으로 만료된 실행을 정리한다', async () => {
     const store = await openSqliteStore({ databasePath: ':memory:' });
     const storage = await RuntimeRunStorage.create(':memory:', store.database);
@@ -77,6 +98,42 @@ describe('웹 런타임 실행 저장소', () => {
       storage.start(10);
       await vi.waitFor(async () => { await expect(access(expired)).rejects.toThrow(); });
     } finally { await storage.close(); await store.close(); }
+  });
+
+  it('유효 승인 작업이 참조한 레거시 선택 manifest는 보호하고 미참조 디렉터리는 정리한다', async () => {
+    vi.stubEnv('SFUD_RUN_MAX_BYTES', '1');
+    const store = await openSqliteStore({ databasePath: ':memory:' });
+    const storage = await RuntimeRunStorage.create(':memory:', store.database);
+    const jobs = new DeploymentJobRepository(store.database);
+    const manifests = path.join(storage.directory, 'selected-manifests');
+    const now = Date.now();
+    try {
+      await mkdir(manifests);
+      const referenced = path.join(manifests, 'referenced.xml');
+      await writeFile(referenced, '<Package/>');
+      await utimes(manifests, new Date(now - 8 * 24 * 3_600_000), new Date(now - 8 * 24 * 3_600_000));
+      const job = await jobs.createDryRun({
+        source: 'local:/fixture', targetAlias: 'target', manifestPath: referenced, payloadChecksum: 'a'.repeat(64),
+        targetOrgIdentity: { alias: 'target', username: 'target@example.com', orgId: '00D000000000001' },
+      });
+      await jobs.transition(job.id, 'DRY_RUN_RUNNING');
+      await jobs.transition(job.id, 'APPROVAL_PENDING');
+
+      await storage.clean(() => now);
+      await expect(access(referenced)).resolves.toBeUndefined();
+    } finally { await storage.close(); await store.close(); }
+
+    const unreferencedStore = await openSqliteStore({ databasePath: ':memory:' });
+    const unreferencedStorage = await RuntimeRunStorage.create(':memory:', unreferencedStore.database);
+    try {
+      const stale = path.join(unreferencedStorage.directory, 'selected-manifests');
+      await mkdir(stale);
+      await writeFile(path.join(stale, 'stale.xml'), '<Package/>');
+      await utimes(stale, new Date(now - 8 * 24 * 3_600_000), new Date(now - 8 * 24 * 3_600_000));
+
+      await unreferencedStorage.clean(() => now);
+      await expect(access(stale)).rejects.toThrow();
+    } finally { await unreferencedStorage.close(); await unreferencedStore.close(); }
   });
 
   it('영구 DB 종료 시 실행 기록을 보존한다', async () => {

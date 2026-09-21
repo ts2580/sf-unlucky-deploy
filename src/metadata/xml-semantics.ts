@@ -40,10 +40,33 @@ const LAYOUT_COLLECTIONS: Readonly<Record<string, XmlCollectionPolicy>> = {
   'Layout.relatedLists': ordered('relatedList'),
 };
 
+const CUSTOM_OBJECT_COLLECTIONS: Readonly<Record<string, XmlCollectionPolicy>> = {
+  'CustomObject.fields': unordered('fullName'),
+  'CustomObject.recordTypes': unordered('fullName'),
+  'CustomObject.validationRules': unordered('fullName'),
+  'CustomObject.businessProcesses': unordered('fullName'),
+  'CustomObject.compactLayouts': unordered('fullName'),
+  'CustomObject.fieldSets': unordered('fullName'),
+  'CustomObject.indexes': unordered('fullName'),
+  'CustomObject.listViews': unordered('fullName'),
+  'CustomObject.sharingReasons': unordered('fullName'),
+  'CustomObject.webLinks': unordered('fullName'),
+  // Collection order is not the same as order inside a component: picklist
+  // choices, layout columns/items and field-set members retain their order.
+  'CustomObject.fields.valueSet.valueSetDefinition.value': ordered('fullName'),
+  'CustomObject.fields.picklist.picklistValues': ordered('fullName'),
+};
+
 const XML_SEMANTIC_POLICIES: Readonly<Record<string, MetadataXmlPolicy>> = {
   Profile: { collections: PROFILE_COLLECTIONS },
   PermissionSet: { collections: PERMISSION_SET_COLLECTIONS },
   Layout: { collections: LAYOUT_COLLECTIONS },
+  CustomObject: { collections: CUSTOM_OBJECT_COLLECTIONS },
+  CustomField: { collections: {
+    'CustomField.valueSet.valueSetDefinition.value': ordered('fullName'),
+    'CustomField.picklist.picklistValues': ordered('fullName'),
+  } },
+  CustomLabels: { collections: { 'CustomLabels.labels': unordered('fullName') } },
 };
 
 export function hasXmlSemanticPolicy(metadataType: string | undefined): boolean {

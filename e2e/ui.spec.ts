@@ -1,6 +1,3 @@
-import { mkdir, writeFile } from 'node:fs/promises';
-import path from 'node:path';
-
 import { expect, test, type Page } from '@playwright/test';
 
 const email = 'e2e-admin@example.com';
@@ -57,7 +54,7 @@ test('큰 화면의 작업 공간을 활용하고 좁은 화면에서는 패널�
   await page.getByLabel('테스트 수준').selectOption('NoTestRun');
   await expect(approval).toContainText('NoTestRun 배포 · 프로덕션 org에서 거부될 수 있습니다.');
   await page.getByLabel('테스트 수준').selectOption('auto');
-  await expect(approval).toContainText('선택한 Target에 실제 반영됩니다. 브라우저를 닫아도 배포는 계속됩니다.');
+  await expect(approval).toContainText('선택한 Salesforce org에 실제 반영됩니다. 브라우저를 닫아도 배포는 계속됩니다.');
   await expect(page.getByText('TARGET ONLY는 선택할 수 없습니다.')).toBeVisible();
   await page.setViewportSize({ width: 1280, height: 900 });
   const baseFonts = await page.evaluate(() => {
@@ -204,6 +201,19 @@ test('ADMIN이 사용자를 생성하고 역할과 활성 상태를 관리한다
   await userRow.getByRole('combobox', { name: 'E2E 운영자 역할' }).selectOption('DEPLOYER');
   await expect(page.getByRole('status')).toContainText('사용자 설정을 변경했습니다.');
   await expect(userRow.getByRole('combobox', { name: 'E2E 운영자 역할' })).toHaveValue('DEPLOYER');
+
+  const accessPanel = page.locator('.admin-org-access-panel');
+  await expect(accessPanel.getByRole('heading', { name: '대상 org 실제 배포 권한' })).toBeVisible();
+  await accessPanel.getByLabel('대상 org 별칭').fill('target');
+  await accessPanel.getByLabel('실행 사용자').selectOption({ label: 'E2E 운영자 · DEPLOYER' });
+  await accessPanel.getByRole('button', { name: '실행 권한 추가' }).click();
+  await expect(page.getByRole('status')).toContainText('target org의 실제 배포 권한을 추가했습니다.');
+  const accessRow = accessPanel.locator('.admin-org-access-row', { hasText: 'E2E 운영자 · DEPLOYER' });
+  await expect(accessRow).toContainText('target');
+  await accessRow.getByRole('button', { name: '회수' }).click();
+  await expect(page.getByRole('status')).toContainText('target org의 실제 배포 권한을 회수했습니다.');
+  await expect(accessPanel.locator('.admin-org-access-row')).toHaveCount(0);
+
   await userRow.getByRole('button', { name: '비활성화' }).click();
   await expect(userRow).toContainText('비활성');
   await userRow.getByRole('button', { name: '활성화' }).click();
@@ -223,41 +233,38 @@ test('ADMIN이 사용자를 생성하고 역할과 활성 상태를 관리한다
   await expect(page.getByRole('link', { name: '사용자 관리', exact: true })).toHaveCount(0);
 });
 
-test('설정에서 내 단말기의 DX 프로젝트를 임시 소스로 업로드한다', async ({ page }, testInfo) => {
-  const projectPath = testInfo.outputPath('uploaded-project');
-  await mkdir(projectPath, { recursive: true });
-  await writeFile(path.join(projectPath, 'sfdx-project.json'), JSON.stringify({
-    packageDirectories: [{ path: '.', default: true }],
-    sourceApiVersion: '67.0',
-  }));
+test('설정에서 폴더 업로드 UI가 제거되고 이전 API는 인증된 410을 반환한다', async ({ page }) => {
   await page.route('**/api/v1/workspace', async (route) => route.fulfill({ json: {
-    orgs: [], projects: [], uploads: [], sources: [],
+    orgs: [], projects: [], sources: [],
   } }));
   await login(page, '/settings');
   const suffixInput = page.getByLabel('테스트 클래스 접미사');
   await expect(suffixInput).toHaveValue('_Test');
   await suffixInput.fill('Spec');
-  await page.getByRole('button', { name: '접미사 저장' }).click();
+  await expect(page.getByLabel('최대 비교 파일 수')).toHaveValue('2000');
+  await page.getByLabel('최대 비교 파일 수').fill('3500');
+  await page.getByRole('button', { name: '설정 저장' }).click();
   await expect(page.getByRole('status')).toContainText('테스트 클래스 접미사를 Spec(으)로 저장했습니다.');
   await page.reload();
   await expect(page.getByLabel('테스트 클래스 접미사')).toHaveValue('Spec');
-  await expect(page.getByRole('heading', { name: '내 단말기 프로젝트' })).toBeVisible();
-  const uploadInput = page.getByRole('region', { name: '내 단말기 프로젝트' }).locator('.upload-button input[type="file"]');
-  await expect(uploadInput).toBeEnabled();
-  await uploadInput.setInputFiles(projectPath);
+  await expect(page.getByLabel('최대 비교 파일 수')).toHaveValue('3500');
+  await expect(page.getByRole('heading', { name: 'Git 프로젝트 가져오기' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '내 단말기 프로젝트' })).toHaveCount(0);
+  await expect(page.getByText('DX 프로젝트 업로드', { exact: true })).toHaveCount(0);
+  await expect(page.locator('input[type="file"]')).toHaveCount(0);
 
-  await expect(page.getByRole('status')).toContainText('uploaded-project 업로드 완료');
-  await expect(page.getByRole('region', { name: '내 단말기 프로젝트' }).getByText('uploaded-project', { exact: true })).toBeVisible();
-  await expect(page.getByText('내 단말기에서 임시 업로드 · 마지막 사용 후 4시간', { exact: true }))
-    .toBeVisible();
-  await page.setViewportSize({ width: 390, height: 844 });
-  expect(await page.evaluate(
-    () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
-  )).toBe(false);
-  await expect(page.getByText('DX 프로젝트 업로드', { exact: true })).toBeVisible();
-  await page.getByRole('link', { name: '비교 및 배포', exact: true }).click();
-  await expect(page.locator('.upload-button input[type="file"]')).toHaveCount(0);
-  await expect(page.getByText('새 프로젝트 소스가 필요한가요?')).toHaveCount(0);
+  const uploadApi = async (method: 'POST' | 'DELETE') => page.evaluate(async (requestMethod) => {
+    const csrf = document.cookie.split(';').map((entry) => entry.trim()).find((entry) => entry.startsWith('sfud_csrf='))?.slice('sfud_csrf='.length) ?? '';
+    const response = await fetch(requestMethod === 'POST' ? '/api/v1/uploads/projects' : '/api/v1/uploads/projects/removed-project', {
+      method: requestMethod,
+      credentials: 'same-origin',
+      headers: { 'x-sfud-csrf': decodeURIComponent(csrf) },
+      ...(requestMethod === 'POST' ? { body: (() => { const form = new FormData(); form.append('label', 'removed'); return form; })() } : {}),
+    });
+    return response.status;
+  }, method);
+  expect(await uploadApi('POST')).toBe(410);
+  expect(await uploadApi('DELETE')).toBe(410);
 });
 
 test('metadata type 조회 전 상태를 오류로 표시하지 않는다', async ({ page }) => {
@@ -358,7 +365,7 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
 
   await login(page, '/deploy');
   const sourceSelect = page.getByLabel('DESIRED SOURCE 비교 소스');
-  const targetSelect = page.getByLabel('TARGET ORG 비교 소스');
+  const targetSelect = page.getByLabel('TARGET 비교 소스');
   await expect(sourceSelect).toHaveValue('org:right');
   await expect(targetSelect).toHaveValue('org:left');
   const sourceSelectBox = await sourceSelect.boundingBox();
@@ -531,6 +538,68 @@ test('선택 변경 후 이전 비교 polling 결과를 폐기한다', async ({ 
   await expect(page.getByRole('button', { name: /같은 범위로 Dry-run/u })).toHaveCount(0);
 });
 
+for (const width of [1440, 390]) {
+  test(`비교 한도 초과 시 diff 없이 고정된 Git 소스로 배포할 수 있다 (${width}px)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const errors: string[] = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+    const registered = { id: 'git-registered:limit-fixture', kind: 'local', location: 'git', label: 'owner/repo · main', detail: '등록 브랜치' };
+    const fixed = { ...registered, id: 'git:fixed-limit-source' };
+    const target = { id: 'org:target', kind: 'org', location: 'org', label: 'target', detail: 'Sandbox' };
+    const limit = { maximumFiles: 2000, fileCount: 2001, exceeded: true };
+    const job = { id: 'limit-comparison', mode: 'source', status: 'SUCCEEDED', scope: 'all', metadataType: 'ApexClass',
+      manifest: 'ApexClass', left: target, right: fixed, comparisonLimit: limit,
+      result: { comparisonLimit: limit,
+        summary: { total: 1, added: 0, removed: 0, modified: 0, identical: 0, different: 0 },
+        warnings: ['비교 대상 파일 2,001개가 설정한 최대 2,000개를 초과하여 비교하지 않았습니다. Source 목록에서 배포 대상을 선택할 수 있습니다.'],
+        components: [{ key: 'ApexClass:Hello', type: 'ApexClass', fullName: 'Hello', status: 'SOURCE',
+          files: [{ path: 'classes/Hello.cls', kind: 'text', status: 'SOURCE' }] }],
+      } };
+    await page.route('**/api/v1/workspace', (route) => route.fulfill({ json: { orgs: [], projects: [], sources: [registered, target] } }));
+    await page.route('**/api/v1/git/connections', (route) => route.fulfill({ json: { connections: [] } }));
+    await page.route('**/api/v1/metadata-types**', (route) => route.fulfill({ json: { metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }] } }));
+    await page.route('**/api/v1/apex-test-classes**', (route) => route.fulfill({ json: { testClasses: [] } }));
+    await page.route('**/api/v1/comparisons**', (route) => {
+      if (route.request().method() === 'POST') return route.fulfill({ status: 202, json: { job } });
+      return route.fulfill({ json: new URL(route.request().url()).pathname === '/api/v1/comparisons' ? { jobs: [] } : { job } });
+    });
+    let dryRunBody: Record<string, unknown> | undefined;
+    let directBody: Record<string, unknown> | undefined;
+    await page.route('**/api/v1/deployments/direct', async (route) => {
+      directBody = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({ status: 202, json: { job: { ...directDeploymentFixture('SUCCEEDED'), source: fixed, comparisonLimit: limit } } });
+    });
+    await page.route('**/api/v1/deployments/dry-run', async (route) => {
+      dryRunBody = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({ status: 202, json: { job: { ...dryRunFixture('APPROVAL_PENDING'), source: fixed, comparisonLimit: limit } } });
+    });
+    await login(page, '/deploy');
+    await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue(registered.id);
+    await page.getByRole('button', { name: '메타데이터 받아오기' }).click();
+    await expect(page.getByText('비교 제한 초과 · 배포 목록 준비 완료')).toBeVisible();
+    await expect(page.getByText(/비교 대상 파일 2,001개/)).toBeVisible();
+    await expect(page.getByLabel('현재 타입 비교 실행')).toBeDisabled();
+    await expect(page.getByLabel('현재 타입 비교 실행')).not.toBeChecked();
+    await expect(page.locator('.component-status')).toHaveText('SOURCE');
+    await expect(page.locator('.file-diff-panel')).toHaveCount(0);
+    await page.getByLabel('Hello 배포 대상으로 선택').check();
+    await page.getByRole('combobox', { name: '테스트 수준' }).selectOption('NoTestRun');
+    await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeEnabled();
+    await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
+    await expect.poll(() => directBody).toMatchObject({ sourceId: fixed.id, targetOrgId: target.id,
+      components: [{ type: 'ApexClass', fullName: 'Hello' }] });
+    await expect(page.getByRole('heading', { name: 'Salesforce 실제 배포 성공' })).toBeVisible();
+    await page.getByRole('button', { name: '배포 대상 Dry-run' }).click();
+    await expect.poll(() => dryRunBody).toMatchObject({ sourceId: fixed.id, targetOrgId: target.id,
+      components: [{ type: 'ApexClass', fullName: 'Hello' }] });
+    await expect(page.getByRole('heading', { name: 'Salesforce dry-run 성공' })).toBeVisible();
+    await expect(page.getByText(/Salesforce 배포 검증은 완료했습니다/)).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    expect(errors).toEqual([]);
+  });
+}
+
 test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시한다', async ({ page }) => {
   await page.route('**/api/v1/workspace', async (route) => route.fulfill({ json: {
     orgs: [{
@@ -650,7 +719,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
 
   await login(page, '/deploy');
   await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue('project:project-1');
-  await expect(page.getByLabel('TARGET ORG 비교 소스')).toHaveValue('org:target');
+  await expect(page.getByLabel('TARGET 비교 소스')).toHaveValue('org:target');
   await expect(page.getByRole('complementary', { name: '배포 대상' }))
     .toContainText('target · target@example.com · 00D00…001');
   const directTestInput = page.getByLabel('테스트 클래스 직접 입력');
@@ -740,6 +809,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByLabel('실제 배포 현황')).toContainText(/InProgress · 소요시간 \d+초/u);
   await expect(page.getByLabel('실제 배포 현황')).toContainText('컴포넌트 1/2');
   await expect(page.getByText('Salesforce 상태 재확인이 필요합니다.')).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByText('관리자 원격 ID 연결')).toHaveCount(0);
   await page.getByRole('button', { name: 'Salesforce 상태 다시 확인' }).click();
   await expect(page.getByRole('heading', { name: 'Salesforce 실제 배포 성공' })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByText(/Hello_Test · 코드 커버리지 80.00%/u)).toBeVisible();
@@ -832,7 +902,7 @@ async function mockResponsiveWorkspace(page: Page) {
   }));
   await page.route('**/api/v1/workspace', async (route) => route.fulfill({ json: {
     orgs: sources.map((source) => ({ ...source, alias: source.label, connected: true })),
-    projects: [], uploads: [], sources,
+    projects: [], sources,
   } }));
   await page.route('**/api/v1/metadata-types**', async (route) => route.fulfill({ json: {
     metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }],
