@@ -5,6 +5,8 @@ export interface SalesforceJobResult {
   deploymentId?: string;
   remoteStatus?: RemoteDeploymentStatus;
   persistenceWarning?: string;
+  attemptId?: string;
+  attemptVersion?: number;
 }
 
 interface PendingCompletion {
@@ -19,7 +21,7 @@ export class DeploymentCompletion {
   private retryRequest: Promise<void> | undefined;
 
   public constructor(
-    private readonly jobs: Pick<DeploymentJobRepository, 'transition' | 'getRequiredSummary'>,
+    private readonly jobs: Pick<DeploymentJobRepository, 'transition' | 'getRequiredSummary' | 'attempts'>,
   ) {}
 
   public async complete(
@@ -32,6 +34,8 @@ export class DeploymentCompletion {
       ...(result.deploymentId === undefined ? {} : { salesforceDeploymentId: result.deploymentId }),
       remoteStatus: result.remoteStatus ?? (result.deploymentId === undefined ? 'NOT_SUBMITTED' : 'SUCCEEDED'),
       ...(result.persistenceWarning === undefined ? {} : { persistenceWarning: result.persistenceWarning }),
+      ...(result.attemptId === undefined ? {} : { attemptId: result.attemptId }),
+      ...(result.attemptVersion === undefined ? {} : { attemptVersion: result.attemptVersion }),
     } };
     try {
       return await this.jobs.transition(id, status, completion.details);
@@ -44,6 +48,10 @@ export class DeploymentCompletion {
         // UPDATE가 커밋된 뒤 알림이나 후속 조회만 실패했을 수 있다.
         const current = await this.jobs.getRequiredSummary(id);
         if (current.status === status) {
+          this.pending.delete(id);
+          return current;
+        }
+        if (!await this.isCurrentAttempt(id, completion)) {
           this.pending.delete(id);
           return current;
         }
@@ -74,7 +82,11 @@ export class DeploymentCompletion {
       for (const [id, completion] of this.pending) {
         try {
           const current = await this.jobs.getRequiredSummary(id);
-          if (['APPROVAL_PENDING', 'SUCCEEDED', 'FAILED'].includes(current.status)) {
+          if (['APPROVAL_PENDING', 'VALIDATED_PENDING_EXECUTION', 'SUCCEEDED', 'FAILED'].includes(current.status)) {
+            this.pending.delete(id);
+            continue;
+          }
+          if (!await this.isCurrentAttempt(id, completion)) {
             this.pending.delete(id);
             continue;
           }
@@ -98,5 +110,11 @@ export class DeploymentCompletion {
       void this.retryPending();
     }, 1_000);
     this.retryTimer.unref();
+  }
+
+  private async isCurrentAttempt(id: string, completion: PendingCompletion): Promise<boolean> {
+    if (completion.details.attemptId === undefined || completion.details.attemptVersion === undefined) return true;
+    const attempt = await this.jobs.attempts.current(id);
+    return attempt?.id === completion.details.attemptId && attempt.version === completion.details.attemptVersion;
   }
 }

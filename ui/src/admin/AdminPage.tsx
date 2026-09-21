@@ -1,23 +1,35 @@
 import { useEffect, useState, type FormEvent } from 'react';
 
-import { createAdminUser, listAdminUsers, updateAdminUser, type AdminUser } from './api';
+import {
+  createAdminUser,
+  grantOrgExecutionAccess,
+  listAdminUsers,
+  listOrgExecutionGrants,
+  revokeOrgExecutionAccess,
+  updateAdminUser,
+  type AdminUser,
+  type OrgExecutionGrant,
+} from './api';
 import type { ApiUser } from '../auth/api';
 import { Icon } from '../components/Icon';
 import { PageIntro } from '../components/PageIntro';
 
 export function AdminPage({ currentUser }: { currentUser: ApiUser }) {
   const [users, setUsers] = useState<AdminUser[]>([]);
+  const [grants, setGrants] = useState<OrgExecutionGrant[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [accessSubmitting, setAccessSubmitting] = useState(false);
   const [savingIds, setSavingIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
 
   useEffect(() => {
     const controller = new AbortController();
-    listAdminUsers(controller.signal)
-      .then((data) => {
-        setUsers(data.users);
+    Promise.all([listAdminUsers(controller.signal), listOrgExecutionGrants(controller.signal)])
+      .then(([userData, accessData]) => {
+        setUsers(userData.users);
+        setGrants(accessData.grants);
       })
       .catch((caught: unknown) => {
         if (caught instanceof DOMException && caught.name === 'AbortError') return;
@@ -51,6 +63,42 @@ export function AdminPage({ currentUser }: { currentUser: ApiUser }) {
     }
   };
 
+  const grantExecutionAccess = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const targetAlias = String(data.get('targetAlias') ?? '').trim();
+    const userId = String(data.get('userId') ?? '');
+    setAccessSubmitting(true);
+    setError('');
+    setMessage('');
+    try {
+      await grantOrgExecutionAccess(targetAlias, userId);
+      setGrants((await listOrgExecutionGrants()).grants);
+      setMessage(`${targetAlias} org의 실제 배포 권한을 추가했습니다.`);
+      form.reset();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '실제 배포 권한을 추가하지 못했습니다.');
+    } finally {
+      setAccessSubmitting(false);
+    }
+  };
+
+  const revokeExecutionAccess = async (grant: OrgExecutionGrant) => {
+    setAccessSubmitting(true);
+    setError('');
+    setMessage('');
+    try {
+      await revokeOrgExecutionAccess(grant.targetAlias, grant.userId);
+      setGrants((current) => current.filter((item) => item !== grant));
+      setMessage(`${grant.targetAlias} org의 실제 배포 권한을 회수했습니다.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '실제 배포 권한을 회수하지 못했습니다.');
+    } finally {
+      setAccessSubmitting(false);
+    }
+  };
+
   const updateUser = async (userId: string, changes: { role?: ApiUser['role']; disabled?: boolean }) => {
     setSavingIds((current) => new Set(current).add(userId));
     setError('');
@@ -72,6 +120,7 @@ export function AdminPage({ currentUser }: { currentUser: ApiUser }) {
 
   const activeUsers = users.filter((user) => !user.disabled).length;
   const activeAdmins = users.filter((user) => !user.disabled && user.role === 'ADMIN').length;
+  const executionCandidates = users.filter((user) => !user.disabled && ['DEPLOYER', 'ADMIN'].includes(user.role));
   return (
     <div className="page-stack">
       <PageIntro
@@ -119,6 +168,24 @@ export function AdminPage({ currentUser }: { currentUser: ApiUser }) {
                 <button className={user.disabled ? 'admin-user-enable' : 'admin-user-disable'} type="button" disabled={saving || isCurrent} onClick={() => void updateUser(user.id, { disabled: !user.disabled })}>{saving ? '저장 중……' : user.disabled ? '활성화' : '비활성화'}</button>
               </article>;
             })}</div>}
+      </section>
+      <section className="admin-org-access-panel" aria-labelledby="admin-org-access-heading">
+        <div className="admin-users-head"><div><h2 id="admin-org-access-heading">대상 org 실제 배포 권한</h2><p>처음 권한을 추가한 org는 allowlist가 활성화됩니다. 이후 ADMIN과 아래 사용자만 실제 배포를 실행할 수 있습니다.</p></div><span>{grants.length}건</span></div>
+        <form className="admin-org-access-form" onSubmit={(event) => void grantExecutionAccess(event)}>
+          <label><span>대상 org 별칭</span><input name="targetAlias" maxLength={128} required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,127}" placeholder="production" /></label>
+          <label><span>실행 사용자</span><select name="userId" required defaultValue="" disabled={executionCandidates.length === 0}><option value="" disabled>사용자를 선택하세요</option>{executionCandidates.map((user) => <option key={user.id} value={user.id}>{user.displayName} · {user.role}</option>)}</select></label>
+          <button className="button button-primary" type="submit" disabled={accessSubmitting || executionCandidates.length === 0}><Icon name={accessSubmitting ? 'refresh' : 'key'} />{accessSubmitting ? '저장 중……' : '실행 권한 추가'}</button>
+        </form>
+        {grants.length === 0
+          ? <p className="empty-runs">아직 org allowlist가 활성화되지 않았습니다.</p>
+          : <div className="admin-org-access-list" role="list">{grants.map((grant) => {
+            const user = users.find((item) => item.id === grant.userId);
+            return <article className="admin-org-access-row" key={`${grant.targetAlias}:${grant.userId}`} role="listitem">
+              <div><strong>{grant.targetAlias}</strong><span>{user === undefined ? grant.userId : `${user.displayName} · ${user.role}`}</span></div>
+              <small>부여 {grant.createdAt.slice(0, 10)}</small>
+              <button type="button" disabled={accessSubmitting} onClick={() => void revokeExecutionAccess(grant)}>회수</button>
+            </article>;
+          })}</div>}
       </section>
     </div>
   );

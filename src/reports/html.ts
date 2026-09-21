@@ -2,9 +2,11 @@ import type { ComparisonResult, FileDifference } from '../metadata/comparator.js
 import type { XmlChange } from '../metadata/xml-diff.js';
 
 export function renderHtmlReport(result: ComparisonResult): string {
+  const skipped = result.comparisonLimit?.exceeded === true;
+  const title = skipped ? 'Salesforce Source 목록 · 비교하지 않음' : 'Salesforce 메타데이터 비교 결과';
   const changed = result.components.filter((component) => component.status !== 'IDENTICAL');
   const components = changed.length === 0
-    ? '<p class="empty" data-testid="empty-result">두 소스의 메타데이터가 동일합니다.</p>'
+    ? `<p class="empty" data-testid="empty-result">${skipped ? 'Source 메타데이터가 없습니다.' : '두 소스의 메타데이터가 동일합니다.'}</p>`
     : changed
         .map(
           (component) => `
@@ -34,7 +36,7 @@ export function renderHtmlReport(result: ComparisonResult): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Salesforce 메타데이터 비교 결과</title>
+  <title>${title}</title>
   <style>
     :root { color-scheme: light dark; --bg: #f4f6fb; --panel: #fff; --text: #172033; --muted: #657089; --line: #dce2ef; --added: #18794e; --removed: #c23434; --modified: #9a6700; --same: #64748b; }
     * { box-sizing: border-box; }
@@ -58,6 +60,7 @@ export function renderHtmlReport(result: ComparisonResult): string {
     .file { padding-top: 16px; }
     .file h3 { font-size: 14px; margin: 0 0 10px; overflow-wrap: anywhere; }
     .badge { border-radius: 999px; color: #fff; font-size: 11px; font-weight: 800; padding: 3px 8px; }
+    .status-source .badge { background: var(--same); }
     .status-added .badge { background: var(--added); }
     .status-removed .badge { background: var(--removed); }
     .status-modified .badge { background: var(--modified); }
@@ -75,18 +78,15 @@ export function renderHtmlReport(result: ComparisonResult): string {
 </head>
 <body>
   <main>
-    <h1 data-testid="report-title">Salesforce 메타데이터 비교 결과</h1>
-    <p class="subtitle">${escapeHtml(result.generatedAt)} · ${result.strict ? 'strict' : 'metadata-aware'} 비교</p>
+    <h1 data-testid="report-title">${title}</h1>
+    <p class="subtitle">${escapeHtml(result.generatedAt)} · ${skipped ? '파일 수 제한 초과로 비교 생략' : `${result.strict ? 'strict' : 'metadata-aware'} 비교`}</p>
     <section class="sources" aria-label="비교 소스">
       <div class="source"><span>LEFT</span><code data-testid="left-source">${escapeHtml(result.left.displayName)}</code></div>
       <div class="source"><span>RIGHT</span><code data-testid="right-source">${escapeHtml(result.right.displayName)}</code></div>
     </section>
     <section class="summary" aria-label="비교 요약" data-testid="summary">
       ${summaryCard('전체', result.summary.total)}
-      ${summaryCard('추가', result.summary.added)}
-      ${summaryCard('삭제', result.summary.removed)}
-      ${summaryCard('변경', result.summary.modified)}
-      ${summaryCard('동일', result.summary.identical)}
+      ${skipped ? '' : [summaryCard('추가', result.summary.added), summaryCard('삭제', result.summary.removed), summaryCard('변경', result.summary.modified), summaryCard('동일', result.summary.identical)].join('')}
     </section>
     ${
       result.warnings.length > 0
@@ -110,7 +110,7 @@ function renderFile(file: FileDifference): string {
     ? `<table><thead><tr><th>상태</th><th>경로</th><th>이전 값</th><th>새 값</th></tr></thead><tbody>${file.xmlChanges.map(renderXmlChange).join('')}</tbody></table>`
     : '';
   const diff = file.unifiedDiff ? `<pre>${escapeHtml(file.unifiedDiff)}</pre>` : '';
-  const binary = file.kind === 'binary'
+  const binary = file.kind === 'binary' && file.status !== 'SOURCE'
     ? `<p class="hash">LEFT ${escapeHtml(file.leftSha256 ?? '없음')} (${file.leftSize ?? 0} bytes)<br>RIGHT ${escapeHtml(file.rightSha256 ?? '없음')} (${file.rightSize ?? 0} bytes)</p>`
     : '';
   const semantic = file.rawContentChanged === true && file.xmlSemanticStatus !== undefined

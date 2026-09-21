@@ -1,4 +1,6 @@
-import { copyFile, mkdir } from 'node:fs/promises';
+import type { WorkspaceSource } from '../api/workspace-contracts.js';
+import { copyFile, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 import { SfudError } from '../core/errors.js';
@@ -7,7 +9,7 @@ import {
   ensureEmptyDirectory,
   findPackageRoot,
   pathExists,
-  sha256Directory,
+  sha256DirectoryV2,
   sha256File,
   writeJson,
 } from '../core/files.js';
@@ -15,6 +17,7 @@ import type { SfClient } from '../salesforce/sf-client.js';
 import type { SourceSpec } from './source-spec.js';
 
 export interface SnapshotOptions {
+  provenance?: NonNullable<WorkspaceSource['provenance']>;
   source: SourceSpec;
   manifestPath: string;
   retrievalManifestPath?: string;
@@ -29,11 +32,13 @@ export interface SnapshotOptions {
 }
 
 export interface MetadataSnapshot {
+  provenance?: NonNullable<WorkspaceSource['provenance']>;
   source: SourceSpec;
   packageRoot: string;
   manifestPath: string;
   manifestSha256: string;
   payloadSha256: string;
+  payloadDigestVersion?: 2;
   createdAt: string;
   metadataTypes?: MetadataTypeDescriptor[];
 }
@@ -80,39 +85,67 @@ export async function createSnapshot(options: SnapshotOptions): Promise<Metadata
     );
     packageRoot = await findPackageRoot(rawDir);
   } else {
-    await options.sfClient.runJson(
-      [
-        'project',
-        'convert',
-        'source',
-        '--manifest',
-        retrievalManifestPath,
-        '--output-dir',
-        rawDir,
-        '--package-name',
-        'sfud',
-      ],
-      {
-        cwd: options.source.projectPath,
-        ...(options.commandTimeoutMs === undefined ? {} : { timeoutMs: options.commandTimeoutMs }),
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-      },
-    );
+    // The run directory may live under a Salesforce project whose .forceignore
+    // excludes .sfud/**.  SDR applies the discovered project's ignore rules to
+    // convert output, so writing directly to rawDir can silently leave only
+    // package.xml while reporting success.  Convert outside every project and
+    // copy the resulting package into the run artifact afterwards.
+    const conversionDirectory = await mkdtemp(path.join(os.tmpdir(), 'sfud-convert-'));
+    try {
+      await options.sfClient.runJson(
+        [
+          'project',
+          'convert',
+          'source',
+          '--manifest',
+          retrievalManifestPath,
+          '--output-dir',
+          conversionDirectory,
+          '--package-name',
+          'sfud',
+        ],
+        {
+          cwd: options.source.projectPath,
+          ...(options.commandTimeoutMs === undefined ? {} : { timeoutMs: options.commandTimeoutMs }),
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        },
+      );
+      await copyDirectoryContents(conversionDirectory, rawDir);
+    } finally {
+      await rm(conversionDirectory, { recursive: true, force: true });
+    }
     packageRoot = await findPackageRoot(rawDir);
   }
 
   const snapshot: MetadataSnapshot = {
     source: options.source,
+    ...(options.provenance === undefined ? {} : { provenance: options.provenance }),
     packageRoot,
     manifestPath,
     manifestSha256: await sha256File(manifestPath),
-    payloadSha256: await sha256Directory(packageRoot),
+    payloadSha256: await sha256DirectoryV2(packageRoot),
+    payloadDigestVersion: 2,
     createdAt: new Date().toISOString(),
     ...(options.metadataTypes === undefined ? {} : { metadataTypes: options.metadataTypes }),
   };
 
   await writeJson(path.join(options.outputDir, 'snapshot.json'), snapshot);
   return snapshot;
+}
+
+async function copyDirectoryContents(sourceDirectory: string, targetDirectory: string): Promise<void> {
+  for (const entry of await readdir(sourceDirectory, { withFileTypes: true })) {
+    const sourcePath = path.join(sourceDirectory, entry.name);
+    const targetPath = path.join(targetDirectory, entry.name);
+    if (entry.isDirectory()) {
+      await mkdir(targetPath, { recursive: true, mode: 0o700 });
+      await copyDirectoryContents(sourcePath, targetPath);
+    } else if (entry.isFile()) {
+      await copyFile(sourcePath, targetPath);
+    } else {
+      throw new SfudError('SNAPSHOT_FAILED', `변환 결과에 지원하지 않는 파일 형식이 있습니다: ${entry.name}`);
+    }
+  }
 }
 
 async function validateInputs(source: SourceSpec, manifestPath: string): Promise<void> {

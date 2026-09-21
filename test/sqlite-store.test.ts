@@ -46,7 +46,9 @@ describe('SQLite 저장소', () => {
     expect(await store.database.get('PRAGMA journal_mode')).toEqual({ journal_mode: 'wal' });
     expect(await store.database.get('PRAGMA busy_timeout')).toEqual({ timeout: 5_000 });
     expect(await store.database.get('SELECT COUNT(*) count FROM schema_migrations'))
-      .toEqual({ count: 18 });
+      .toEqual({ count: 35 });
+    expect(await store.database.all('SELECT id, salt FROM git_token_key_parameters'))
+      .toEqual([]);
     if (process.platform !== 'win32') {
       expect((await stat(path.dirname(databasePath))).mode & 0o777).toBe(0o700);
       expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -190,11 +192,11 @@ describe('SQLite 저장소', () => {
     await expect(comparisonJobs.getRequired(comparison.id)).rejects.toThrow();
   });
 
-  it('v8 승인 이력을 보존하면서 직접 배포를 허용하는 v9로 마이그레이션한다', async () => {
+  it.each([{ from: 8, to: 9 }, { from: 28, to: 29 }, { from: 29, to: 30 }, { from: 30, to: 31 }, { from: 31, to: 32 }, { from: 32, to: 33 }, { from: 33, to: 34 }, { from: 34, to: 35 }])('v$from 작업·승인 이력을 보존하면서 v$to로 이관한다', async ({ from, to }) => {
     const database = await open({ filename: ':memory:', driver: sqlite3.Database });
     try {
       await database.exec('PRAGMA foreign_keys = ON');
-      await applyMigrations(database, fixedNow, 8);
+      await applyMigrations(database, fixedNow, from);
       await database.run(`
         INSERT INTO users (id, email, display_name, role, created_at, updated_at)
         VALUES ('migration-user', 'migration@example.com', 'Migration', 'DEPLOYER', ?, ?)
@@ -220,7 +222,20 @@ describe('SQLite 저장소', () => {
           'migration-user', ?, 'target', ?)
       `, checksum, fixedNow());
 
-      await applyMigrations(database, fixedNow, 9);
+      if (from === 28 || from === 29) {
+        await database.run(`UPDATE deployment_jobs SET progress_json = ?, source_provenance_json = ?,
+          comparison_limit_json = ?, dry_run_artifact_path = ?, test_coverage = 85,
+          salesforce_deployment_id = '0Af000000000001' WHERE id = 'migration-dry'`,
+        JSON.stringify({ phase: 'DRY_RUN', deploymentId: 'validation-id' }),
+        JSON.stringify({ source: 'fixture' }), JSON.stringify({ exceeded: true }), '/fixture/dry-run.json.gz');
+      }
+      const originalJobs = await database.all<Array<Record<string, unknown>>>('SELECT * FROM deployment_jobs ORDER BY id');
+      const originalApprovals = await database.all('SELECT * FROM deployment_approvals ORDER BY id');
+      await applyMigrations(database, fixedNow, to);
+      for (const original of originalJobs) {
+        expect(await database.get('SELECT * FROM deployment_jobs WHERE id = ?', original.id)).toMatchObject(original);
+      }
+      expect(await database.all('SELECT * FROM deployment_approvals ORDER BY id')).toEqual(originalApprovals);
       await expect(database.all('PRAGMA foreign_key_check')).resolves.toEqual([]);
       await expect(database.get('SELECT COUNT(*) count FROM deployment_approvals'))
         .resolves.toEqual({ count: 1 });
@@ -233,6 +248,69 @@ describe('SQLite 저장소', () => {
         ) VALUES ('migration-direct', 'DEPLOY', 'QUEUED', 'local:source', 'target',
           'manifest.xml', ?, 'migration-user', ?, ?, 0, 'MANIFEST')
       `, checksum, fixedNow(), fixedNow())).resolves.toMatchObject({ changes: 1 });
+      if (to === 29 || to === 30) {
+        await expect(database.run("UPDATE deployment_jobs SET status = 'VALIDATED_PENDING_EXECUTION' WHERE id = 'migration-direct'"))
+          .resolves.toMatchObject({ changes: 1 });
+        expect(await database.all('SELECT * FROM deployment_attempts')).toEqual([]);
+      }
+      if (to === 30) {
+        expect(await database.get('SELECT execution_evidence FROM deployment_jobs WHERE id = ?', 'migration-dry'))
+          .toEqual({ execution_evidence: 'LEGACY_VALIDATION_ONLY' });
+        expect(await database.get('SELECT execution_evidence FROM deployment_jobs WHERE id = ?', 'migration-deploy'))
+          .toEqual({ execution_evidence: 'LEGACY_NO_EXTERNAL_ID' });
+        expect(await database.get('SELECT execution_evidence FROM deployment_jobs WHERE id = ?', 'migration-direct'))
+          .toEqual({ execution_evidence: 'NOT_STARTED' });
+      }
+      if (to === 31) {
+        expect(await database.get('SELECT payload_digest_version FROM deployment_jobs WHERE id = ?', 'migration-dry'))
+          .toEqual({ payload_digest_version: 1 });
+      }
+      if (to === 32) {
+        expect(await database.get('SELECT execution_mode, reused_validation_id, execution_reason FROM deployment_jobs WHERE id = ?', 'migration-dry'))
+          .toEqual({ execution_mode: null, reused_validation_id: null, execution_reason: null });
+      }
+      if (to === 34) {
+        expect(await database.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'org_execution_grants'"))
+          .toEqual({ name: 'org_execution_grants' });
+      }
+      if (to === 35) {
+        expect(await database.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'deployment_execution_leases'"))
+          .toEqual({ name: 'deployment_execution_leases' });
+      }
+    } finally {
+      await database.close();
+    }
+  });
+
+  it('v18 작업과 승인 이력의 기존 공개 범위를 additive ACL 마이그레이션으로 보존한다', async () => {
+    const database = await open({ filename: ':memory:', driver: sqlite3.Database });
+    try {
+      await database.exec('PRAGMA foreign_keys = ON');
+      await applyMigrations(database, fixedNow, 18);
+      await database.run(`
+        INSERT INTO users (id, email, display_name, role, created_at, updated_at)
+        VALUES ('legacy', 'legacy@example.com', 'Legacy', 'ADMIN', ?, ?)
+      `, fixedNow(), fixedNow());
+      await database.run(`
+        INSERT INTO comparison_jobs (id, project_path, manifest_path, left_source, right_source,
+          status, created_by, created_at, updated_at)
+        VALUES ('legacy-comparison', '/project', '/manifest', 'org:left', 'local:/source',
+          'SUCCEEDED', 'legacy', ?, ?)
+      `, fixedNow(), fixedNow());
+      await database.run(`
+        INSERT INTO deployment_jobs (id, kind, status, source, target_alias, manifest_path,
+          payload_checksum, created_by, created_at, updated_at)
+        VALUES ('legacy-deployment', 'DRY_RUN', 'SUCCEEDED', 'local:/source', 'target', '/manifest',
+          ?, 'legacy', ?, ?)
+      `, checksum, fixedNow(), fixedNow());
+      await applyMigrations(database, fixedNow);
+      await applyMigrations(database, fixedNow);
+      expect(await database.all('PRAGMA foreign_key_check')).toEqual([]);
+      for (const table of ['comparison_jobs', 'deployment_jobs']) {
+        expect(await database.get(`SELECT access_owner_user_id owner, created_by creator FROM ${table}`))
+          .toEqual({ owner: null, creator: 'legacy' });
+      }
+      expect(await database.get('SELECT COUNT(*) count FROM job_access_grants')).toEqual({ count: 0 });
     } finally {
       await database.close();
     }
@@ -300,6 +378,41 @@ describe('SQLite 저장소', () => {
     })).resolves.toMatchObject({ id: deploy.id });
   });
 
+  it('v1 digest로 남은 성공 dry-run은 승인 대신 재검증을 요구한다', async () => {
+    const store = await openMemoryStore();
+    const ids = ['legacy-deployer', 'legacy-dry-run'];
+    const users = new UserRepository(store.database, fixedNow, () => ids.shift()!);
+    const jobs = new DeploymentJobRepository(store.database, fixedNow, () => ids.shift()!);
+    const deployer = await users.create({
+      email: 'legacy-digest@example.com', displayName: '레거시 digest 검증', role: 'DEPLOYER',
+    });
+    const dryRun = await jobs.createDryRun({
+      source: 'local:sf-project', targetAlias: 'stdOrg', targetOrgIdentity: orgIdentity('stdOrg'),
+      manifestPath: 'manifest/package.xml', payloadChecksum: checksum, createdBy: deployer.id,
+    });
+    await jobs.transition(dryRun.id, 'DRY_RUN_RUNNING');
+    await recordPreparedArtifacts(jobs, dryRun.id);
+    await jobs.transition(dryRun.id, 'APPROVAL_PENDING');
+    await store.database.run(
+      'UPDATE deployment_jobs SET payload_digest_version = 1 WHERE id = ?',
+      dryRun.id,
+    );
+
+    await expect(jobs.approveAndQueueDeployment({
+      dryRunJobId: dryRun.id,
+      approvedBy: deployer.id,
+      payloadChecksum: checksum,
+      targetAlias: 'stdOrg',
+      confirmation: '실제 배포',
+    })).rejects.toMatchObject({
+      code: 'APPROVAL_DENIED',
+      message: expect.stringMatching(/v1 payload digest/u),
+    });
+    expect(await store.database.get(
+      "SELECT COUNT(*) AS count FROM deployment_jobs WHERE kind = 'DEPLOY'",
+    )).toEqual({ count: 0 });
+  });
+
   it('checksum 변경, 권한 부족, 잘못된 상태 전이를 차단한다', async () => {
     const store = await openMemoryStore();
     const ids = ['viewer-1', 'dry-run-2'];
@@ -357,6 +470,7 @@ describe('SQLite 저장소', () => {
     await jobs.transition(dryRun.id, 'APPROVAL_PENDING');
     now = '2026-08-23T00:31:00.000Z';
 
+    await expect(jobs.assertApprovalFresh(dryRun.id)).rejects.toThrow(/유효시간 30분/u);
     await expect(jobs.approveAndQueueDeployment({
       dryRunJobId: dryRun.id, approvedBy: deployer.id, payloadChecksum: checksum,
       targetAlias: 'stdOrg', confirmation: '실제 배포',

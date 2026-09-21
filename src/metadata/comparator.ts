@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isUtf8 } from 'node:buffer';
-import { readFile, stat } from 'node:fs/promises';
+import { open, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { createTwoFilesPatch } from 'diff';
@@ -11,8 +11,11 @@ import type { MetadataSnapshot } from '../sources/snapshot.js';
 import { resolveMetadataComponents, type MetadataComponent } from './component-resolver.js';
 import { compareXml, type XmlChange } from './xml-diff.js';
 import { hasXmlSemanticPolicy } from './xml-semantics.js';
+import { projectChildMetadata } from './child-metadata-projection.js';
+import { normalizedTextHash } from './normalized-text-hash.js';
+import { compareLargeXml } from './large-xml-diff.js';
 
-export type DifferenceStatus = 'ADDED' | 'REMOVED' | 'MODIFIED' | 'IDENTICAL';
+export type DifferenceStatus = 'ADDED' | 'REMOVED' | 'MODIFIED' | 'IDENTICAL' | 'SOURCE';
 export type FileKind = 'xml' | 'text' | 'binary';
 
 export interface FileDifference {
@@ -49,6 +52,7 @@ export interface ComparisonSummary {
 }
 
 export interface ComparisonResult {
+  comparisonLimit?: { maximumFiles: number; fileCount: number; exceeded: boolean };
   generatedAt: string;
   strict: boolean;
   left: SnapshotReference;
@@ -66,7 +70,9 @@ interface SnapshotReference {
 }
 
 export interface CompareOptions {
+  maximumFiles?: number;
   strict?: boolean;
+  metadataType?: string;
 }
 
 const COMPONENT_COMPARISON_CONCURRENCY = 8;
@@ -80,6 +86,22 @@ export async function compareSnapshots(
   right: MetadataSnapshot,
   options: CompareOptions = {},
 ): Promise<ComparisonResult> {
+  if (options.maximumFiles !== undefined && (!Number.isSafeInteger(options.maximumFiles) || options.maximumFiles < 1)) {
+    throw new SfudError('INVALID_ARGUMENT', '최대 비교 파일 수는 1 이상의 정수여야 합니다.');
+  }
+  const leftProjection = await projectChildMetadata(left, options.metadataType);
+  try {
+    const rightProjection = await projectChildMetadata(right, options.metadataType);
+    try { return await comparePreparedSnapshots(leftProjection.snapshot, rightProjection.snapshot, options); }
+    finally { await rightProjection.dispose(); }
+  } finally { await leftProjection.dispose(); }
+}
+
+async function comparePreparedSnapshots(
+  left: MetadataSnapshot,
+  right: MetadataSnapshot,
+  options: CompareOptions,
+): Promise<ComparisonResult> {
   if (left.manifestSha256 !== right.manifestSha256) {
     throw new SfudError(
       'INVALID_ARGUMENT',
@@ -89,6 +111,26 @@ export async function compareSnapshots(
 
   const leftComponents = await resolveMetadataComponents(left.packageRoot, left.metadataTypes);
   const rightComponents = await resolveMetadataComponents(right.packageRoot, right.metadataTypes);
+  // Count each relative path once, including companion metadata but excluding package.xml.
+  const fileCount = new Set([...leftComponents.values(), ...rightComponents.values()]
+    .flatMap((component) => component.files)).size;
+  const comparisonLimit = options.maximumFiles === undefined ? undefined : {
+    maximumFiles: options.maximumFiles, fileCount, exceeded: fileCount > options.maximumFiles,
+  };
+  if (comparisonLimit?.exceeded === true) {
+    // Inventory only: no content reads, hashes or diff computation in this branch.
+    const components: ComponentDifference[] = [...rightComponents.values()]
+      .sort((a, b) => a.key.localeCompare(b.key))
+      .map((component) => ({ ...component, status: 'SOURCE',
+        files: component.files.map((filePath) => ({ path: filePath, status: 'SOURCE', kind: detectFileKind(filePath) })),
+      }));
+    return {
+      generatedAt: new Date().toISOString(), strict: options.strict ?? false,
+      left: snapshotReference(left), right: snapshotReference(right),
+      summary: summarize(components), components, comparisonLimit,
+      warnings: [`비교 대상 파일 ${fileCount.toLocaleString('ko-KR')}개가 설정한 최대 ${options.maximumFiles!.toLocaleString('ko-KR')}개를 초과하여 비교하지 않았습니다. Source 목록에서 배포 대상을 선택할 수 있습니다. 설정 변경 후 다시 불러오면 재확인합니다.`],
+    };
+  }
   const keys = [...new Set([...leftComponents.keys(), ...rightComponents.keys()])].sort((a, b) =>
     a.localeCompare(b),
   );
@@ -113,7 +155,7 @@ export async function compareSnapshots(
     ? ['Profile과 PermissionSet 결과는 동일 manifest에 포함된 메타데이터 범위 안에서만 유효합니다.']
     : [];
   if (components.some((component) => component.files.some((file) => file.diffTruncated === true))) {
-    warnings.push('크기 상한을 넘은 파일은 checksum만 비교했으며 상세 diff 일부를 생략했습니다.');
+    warnings.push('비교 판정은 전체 내용을 기준으로 수행했으며 상세 diff 일부를 생략했습니다. 대형 XML은 자식 항목 단위의 요약을 표시합니다.');
   }
   const genericXmlTypes = [...new Set(components.flatMap((component) =>
     component.files.some((file) =>
@@ -127,6 +169,7 @@ export async function compareSnapshots(
   }
 
   return {
+    ...(comparisonLimit === undefined ? {} : { comparisonLimit }),
     generatedAt: new Date().toISOString(),
     strict: options.strict ?? false,
     left: snapshotReference(left),
@@ -248,10 +291,37 @@ async function compareFile(
       sha256File(path.join(leftRoot, relativePath)),
       sha256File(path.join(rightRoot, relativePath)),
     ]);
-    const kind = detectFileKind(relativePath);
-    const status = leftStat.size === rightStat.size && leftSha256 === rightSha256
-      ? 'IDENTICAL' as const
-      : 'MODIFIED' as const;
+    const leftPath = path.join(leftRoot, relativePath);
+    const rightPath = path.join(rightRoot, relativePath);
+    let kind = detectFileKind(relativePath, metadataType, await readPrefix(leftPath), await readPrefix(rightPath));
+    let identical = leftStat.size === rightStat.size && leftSha256 === rightSha256;
+    const rawContentChanged = !identical;
+    if (!identical) {
+      const [leftNormalized, rightNormalized] = await Promise.all([
+        normalizedTextHash(path.join(leftRoot, relativePath)),
+        normalizedTextHash(path.join(rightRoot, relativePath)),
+      ]);
+      if (leftNormalized === undefined || rightNormalized === undefined) kind = 'binary';
+      else {
+        if (kind === 'binary') kind = 'text';
+        identical = leftNormalized === rightNormalized;
+      }
+    }
+    if (kind === 'xml' && rawContentChanged) {
+      const xml = await compareLargeXml(leftPath, rightPath, metadataType, MAX_XML_CHANGES);
+      const strictTextChanged = strict && !identical;
+      return {
+        path: relativePath, kind, leftSha256, rightSha256,
+        leftSize: leftStat.size, rightSize: rightStat.size,
+        status: xml.equal && !strictTextChanged ? 'IDENTICAL' : 'MODIFIED',
+        xmlChanges: xml.changes,
+        xmlSemanticStatus: xml.equal ? 'EQUAL' : 'DIFFERENT',
+        xmlComparisonPolicy: hasXmlSemanticPolicy(metadataType) ? 'REGISTERED' : 'GENERIC',
+        rawContentChanged,
+        ...(xml.truncated || strictTextChanged ? { diffTruncated: true } : {}),
+      };
+    }
+    const status = identical ? 'IDENTICAL' as const : 'MODIFIED' as const;
     return {
       path: relativePath,
       kind,
@@ -261,7 +331,11 @@ async function compareFile(
       rightSize: rightStat.size,
       status,
       ...(status === 'MODIFIED' && kind !== 'binary' ? { diffTruncated: true } : {}),
-      ...(status === 'IDENTICAL' && kind === 'xml' ? { xmlChanges: [] } : {}),
+      ...(status === 'IDENTICAL' && kind === 'xml' ? {
+        xmlChanges: [], xmlSemanticStatus: 'EQUAL' as const,
+        xmlComparisonPolicy: hasXmlSemanticPolicy(metadataType) ? 'REGISTERED' as const : 'GENERIC' as const,
+        rawContentChanged,
+      } : {}),
     };
   }
 
@@ -269,7 +343,7 @@ async function compareFile(
     readFile(path.join(leftRoot, relativePath)),
     readFile(path.join(rightRoot, relativePath)),
   ]);
-  const kind = detectFileKind(relativePath, leftContent, rightContent);
+  const kind = detectFileKind(relativePath, metadataType, leftContent, rightContent);
   const common = {
     path: relativePath,
     kind,
@@ -283,7 +357,11 @@ async function compareFile(
     return {
       ...common,
       status: 'IDENTICAL',
-      ...(kind === 'xml' ? { xmlChanges: [] } : {}),
+      ...(kind === 'xml' ? {
+        xmlChanges: [], xmlSemanticStatus: 'EQUAL' as const,
+        xmlComparisonPolicy: hasXmlSemanticPolicy(metadataType) ? 'REGISTERED' as const : 'GENERIC' as const,
+        rawContentChanged: false,
+      } : {}),
     };
   }
 
@@ -355,7 +433,7 @@ async function compareFile(
   };
 }
 
-function detectFileKind(relativePath: string, ...contents: Buffer[]): FileKind {
+function detectFileKind(relativePath: string, metadataType?: string, ...contents: Buffer[]): FileKind {
   const lowerPath = relativePath.toLowerCase();
   const knownTextExtensions = [
     '.cls',
@@ -379,11 +457,30 @@ function detectFileKind(relativePath: string, ...contents: Buffer[]): FileKind {
     return 'xml';
   }
 
+  // MDAPI files commonly omit both the .xml suffix and XML declaration.
+  if (/\.(?:object|profile|permissionset|labels|layout)$/u.test(lowerPath)
+    || (metadataType !== undefined && contents.length > 0 && contents.every((content) => {
+      const root = /^<(?:[A-Za-z_][\w.-]*:)?([A-Za-z_][\w.-]*)(?:\s|\/?>)/u
+        .exec(normalizeText(content.toString('utf8')).trimStart());
+      return root?.[1] === metadataType;
+    }))) {
+    return 'xml';
+  }
+
   if (knownTextExtensions.some((extension) => lowerPath.endsWith(extension))) {
     return 'text';
   }
 
   return contents.every((content) => isUtf8(content) && !content.includes(0)) ? 'text' : 'binary';
+}
+
+async function readPrefix(filePath: string): Promise<Buffer> {
+  const file = await open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(4096);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally { await file.close(); }
 }
 
 function boundedUnifiedDiff(value: string): { unifiedDiff: string; diffTruncated?: true } {

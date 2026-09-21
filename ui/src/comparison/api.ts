@@ -1,3 +1,4 @@
+import type { WorkspaceSource } from '../../../src/api/workspace-contracts';
 import { apiRequest } from '../api-client';
 import type { ComparisonFileDifference } from '../ComparisonFileDiff';
 
@@ -5,19 +6,20 @@ export interface ComparisonComponent {
   key: string;
   type: string;
   fullName: string;
-  status: 'ADDED' | 'REMOVED' | 'MODIFIED' | 'IDENTICAL';
+  status: 'ADDED' | 'REMOVED' | 'MODIFIED' | 'IDENTICAL' | 'SOURCE';
   files: ComparisonFileDifference[];
 }
 
 export interface ComparisonJobResponse {
+  comparisonLimit?: { maximumFiles: number; fileCount: number; exceeded: boolean };
   id: string;
   mode?: 'compare' | 'source';
   status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
   scope?: 'all' | 'manifest';
   metadataType?: string;
   manifest: string;
-  left: { id: string; kind: 'org' | 'local'; label: string };
-  right: { id: string; kind: 'org' | 'local'; label: string };
+  left: WorkspaceSource;
+  right: WorkspaceSource;
   errorMessage?: string;
   createdAt?: string;
   startedAt?: string;
@@ -25,6 +27,7 @@ export interface ComparisonJobResponse {
   completedAt?: string;
   summary?: ComparisonSummary;
   result?: {
+    comparisonLimit?: { maximumFiles: number; fileCount: number; exceeded: boolean };
     summary: ComparisonSummary;
     warnings: string[];
     components: ComparisonComponent[];

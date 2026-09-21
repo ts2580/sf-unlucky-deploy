@@ -14,6 +14,9 @@ export interface SfClient {
   runJson(args: readonly string[], options: SfRunOptions): Promise<unknown>;
 }
 
+/** 프로세스가 시작되지 않았음을 확인한 오류에만 사용한다. */
+export class SfCommandNotStartedError extends SfudError {}
+
 export class ProcessSfClient implements SfClient {
   public constructor(private readonly command = 'sf') {}
 
@@ -62,13 +65,13 @@ async function runProcess(
   options: SfRunOptions,
 ): Promise<ProcessResult> {
   if (options.signal?.aborted === true) {
-    throw new SfudError('SF_COMMAND_ABORTED', 'Salesforce CLI 명령이 시작 전에 취소되었습니다.');
+    throw new SfCommandNotStartedError('SF_COMMAND_ABORTED', 'Salesforce CLI 명령이 시작 전에 취소되었습니다.');
   }
   return await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: {
-        ...process.env,
+        ...salesforceEnvironment(),
         SF_USE_PROGRESS_BAR: 'false',
       },
       shell: false,
@@ -81,6 +84,8 @@ async function runProcess(
     const maxOutputBytes = options.maxOutputBytes ?? 32 * 1024 * 1024;
     const terminationGraceMs = options.terminationGraceMs ?? 2_000;
     let outputBytes = 0;
+    let spawned = false;
+    child.once('spawn', () => { spawned = true; });
     let requestedError: SfudError | undefined;
     let settled = false;
     let forceKillTimer: NodeJS.Timeout | undefined;
@@ -109,7 +114,7 @@ async function runProcess(
     child.stderr.on('data', (chunk: Buffer) => collect(stderr, chunk));
     child.on('error', (error) => {
       finish(() => reject(
-        new SfudError('SF_COMMAND_FAILED', `Salesforce CLI를 실행할 수 없습니다: ${error.message}`, {
+        new (spawned ? SfudError : SfCommandNotStartedError)('SF_COMMAND_FAILED', `Salesforce CLI를 실행할 수 없습니다: ${error.message}`, {
           cause: error,
         }),
       ));
@@ -169,9 +174,19 @@ function killProcessTree(
   }
 }
 
+function salesforceEnvironment(): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    !/^(?:SFUD_(?:GIT|GITHUB|GITLAB|BITBUCKET)_|GIT_|GH_TOKEN$|GITHUB_TOKEN$|GLAB_TOKEN$|GITLAB_TOKEN$|BITBUCKET_(?:TOKEN|CLIENT_SECRET)$)/iu.test(key)));
+}
+
 export function redactSensitiveText(value: string): string {
   return value
-    .replace(/("?(?:accessToken|refreshToken|clientSecret|sfdxAuthUrl)"?\s*[:=]\s*")([^"]+)(")/giu, '$1[REDACTED]$3')
+    .replace(/((?:["']?)(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|code[_-]?verifier|sfdxAuthUrl)(?:["']?)\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&}]+)/giu,
+      (_match, prefix: string, secret: string) => `${prefix}${secret.startsWith('"') ? '"[REDACTED]"' : secret.startsWith("'") ? "'[REDACTED]'" : '[REDACTED]'}`)
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9+/_=.-]+/giu, '$1 [REDACTED]')
+    .replace(/([?&](?:code|state|access_token|refresh_token|client_secret)=)[^&#\s"']*/giu, '$1[REDACTED]')
+    .replace(/(https?:\/\/)[^/\s@]+@/giu, '$1[REDACTED]@')
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|glpat-[A-Za-z0-9_-]{8,})/gu, '[REDACTED]')
     .replace(/force:\/\/[^\s"']+/giu, 'force://[REDACTED]')
     .trim();
 }
@@ -183,7 +198,7 @@ export function sanitizeSfOutput(value: unknown): unknown {
   if (typeof value === 'object' && value !== null) {
     const sanitized: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value)) {
-      if (/(?:access|refresh)?token|clientsecret|sfdxauthurl/iu.test(key)) {
+      if (/(?:access|refresh)?token|client[_-]?secret|code[_-]?verifier|authorization|sfdxauthurl/iu.test(key)) {
         sanitized[key] = '[REDACTED]';
       } else {
         sanitized[key] = sanitizeSfOutput(entry);

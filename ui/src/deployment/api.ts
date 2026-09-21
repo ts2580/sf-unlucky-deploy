@@ -1,6 +1,7 @@
 import type {
   CreateDirectDeploymentRequest,
   CreateDryRunRequest,
+  BindDeploymentAttemptRequest,
   DeploymentJobEnvelope,
   DeploymentJobListResponse,
   ExecuteDeploymentRequest,
@@ -8,6 +9,7 @@ import type {
 import {
   CreateDirectDeploymentRequestSchema,
   CreateDryRunRequestSchema,
+  BindDeploymentAttemptRequestSchema,
   DeploymentJobListResponseSchema,
   DeploymentJobResponseSchema,
   ExecuteDeploymentRequestSchema,
@@ -64,5 +66,16 @@ export function startDirectDeployment(
 export function reconcileDeploymentJob(id: string): Promise<DeploymentJobEnvelope> {
   return apiRequest(`/api/v1/deployment-jobs/${encodeURIComponent(id)}/reconcile`, {
     method: 'POST', csrf: true, responseSchema: DeploymentJobResponseSchema,
+  });
+}
+
+export function manuallyReconcileDeploymentJob(
+  id: string,
+  body: BindDeploymentAttemptRequest,
+): Promise<DeploymentJobEnvelope> {
+  return apiRequest(`/api/v1/deployment-jobs/${encodeURIComponent(id)}/manual-reconcile`, {
+    method: 'POST', body, csrf: true,
+    requestSchema: BindDeploymentAttemptRequestSchema,
+    responseSchema: DeploymentJobResponseSchema,
   });
 }

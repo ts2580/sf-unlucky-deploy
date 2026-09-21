@@ -33,6 +33,10 @@ const parser = new XMLParser({
   parseAttributeValue: false,
   parseTagValue: false,
   trimValues: false,
+  // Declarations/processing instructions are not Salesforce metadata values.
+  // The streaming comparator follows the same rule; strict mode retains them
+  // through its normalized original-text comparison.
+  ignorePiTags: true,
 });
 
 export interface CompareXmlOptions {
@@ -77,15 +81,19 @@ function diffValue(
     return [];
   }
 
+  // fast-xml-parser represents a single occurrence as an object/scalar and
+  // repeated occurrences as an array. Normalize the collection, not its items:
+  // an identity-qualified path ending in ']' is already one collection item.
+  if (Array.isArray(left) || Array.isArray(right)
+    || (!currentPath.endsWith(']') && (findXmlCollectionPolicy(metadataType, currentPath)?.identityKeys.length ?? 0) > 0)) {
+    return diffArray(asCollection(left), asCollection(right), currentPath, metadataType);
+  }
+
   if (left === undefined) {
     return [{ kind: 'ADDED', path: currentPath, after: formatValue(right) }];
   }
   if (right === undefined) {
     return [{ kind: 'REMOVED', path: currentPath, before: formatValue(left) }];
-  }
-
-  if (Array.isArray(left) && Array.isArray(right)) {
-    return diffArray(left, right, currentPath, metadataType);
   }
 
   if (isRecord(left) && isRecord(right)) {
@@ -113,6 +121,10 @@ function diffValue(
       after: formatValue(right),
     },
   ];
+}
+
+function asCollection(value: unknown): unknown[] {
+  return value === undefined ? [] : Array.isArray(value) ? value : [value];
 }
 
 function diffArray(

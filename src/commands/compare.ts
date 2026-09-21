@@ -1,3 +1,4 @@
+import type { JobSourceSnapshot } from '../sources/source-provenance.js';
 import path from 'node:path';
 
 import { SfudError } from '../core/errors.js';
@@ -16,6 +17,7 @@ export interface CompareCommandOptions {
   left: string;
   right: string;
   sourceOnly?: boolean;
+  maximumComparisonFiles?: number;
   manifest?: string;
   allMetadata?: boolean;
   metadataType?: string;
@@ -30,6 +32,7 @@ export interface CompareCommandOptions {
 }
 
 export interface CommandDependencies {
+  sourceSnapshot?: JobSourceSnapshot;
   cwd?: string;
   sfClient?: SfClient;
   stdout?: (value: string) => void;
@@ -71,11 +74,12 @@ export async function runCompareCommand(
       throw new SfudError('INVALID_ARGUMENT', '--wait는 1 이상의 정수여야 합니다.');
     }
     const snapshotCommandTimeoutMs = salesforceWaitCommandTimeoutMs(snapshotWaitMinutes);
-    await writeRunMetadata(context, 'compare', leftSource, rightSource.displayName, manifestPath);
+    await writeRunMetadata(context, 'compare', leftSource, rightSource.displayName, manifestPath, dependencies.sourceSnapshot);
 
     const [leftSnapshot, rightSnapshot] = await Promise.all([
       createSnapshot({
         source: options.sourceOnly === true ? rightSource : leftSource,
+        ...(dependencies.sourceSnapshot?.left?.provenance === undefined ? {} : { provenance: dependencies.sourceSnapshot.left.provenance }),
         manifestPath,
         ...(options.sourceOnly === true
           ? {}
@@ -93,6 +97,7 @@ export async function runCompareCommand(
       }),
       createSnapshot({
         source: rightSource,
+        ...(dependencies.sourceSnapshot?.right?.provenance === undefined ? {} : { provenance: dependencies.sourceSnapshot.right.provenance }),
         manifestPath,
         ...(sourceManifests === undefined ? {} : {
           retrievalManifestPath: sourceManifests[options.sourceOnly === true ? 0 : 1]!.manifestPath,
@@ -108,7 +113,10 @@ export async function runCompareCommand(
       }),
     ]);
 
-    const comparison = await compareSnapshots(leftSnapshot, rightSnapshot, { strict: options.strict ?? false });
+    const comparison = await compareSnapshots(leftSnapshot, rightSnapshot, { strict: options.strict ?? false,
+      ...(options.maximumComparisonFiles === undefined || options.sourceOnly === true
+        ? {} : { maximumFiles: options.maximumComparisonFiles }),
+      ...(options.metadataType === undefined ? {} : { metadataType: options.metadataType }) });
     const reports = await writeComparisonReports(comparison, context.reportDirectory);
     const stdout = dependencies.stdout ?? ((value: string) => process.stdout.write(value));
 

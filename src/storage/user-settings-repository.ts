@@ -5,6 +5,7 @@ const DEFAULT_TEST_CLASS_SUFFIX = '_Test';
 
 export interface UserSettings {
   testClassSuffix: string;
+  maximumComparisonFiles: number;
 }
 
 export class UserSettingsRepository {
@@ -14,30 +15,37 @@ export class UserSettingsRepository {
   ) {}
 
   public async get(userId: string): Promise<UserSettings> {
-    const row = await this.database.get<{ test_class_suffix: string }>(`
-      SELECT test_class_suffix FROM user_settings WHERE user_id = ?
+    const row = await this.database.get<{ test_class_suffix: string; maximum_comparison_files: number }>(`
+      SELECT test_class_suffix, maximum_comparison_files FROM user_settings WHERE user_id = ?
     `, userId);
-    return { testClassSuffix: row?.test_class_suffix ?? DEFAULT_TEST_CLASS_SUFFIX };
+    return { testClassSuffix: row?.test_class_suffix ?? DEFAULT_TEST_CLASS_SUFFIX,
+      maximumComparisonFiles: row?.maximum_comparison_files ?? 2000 };
   }
 
-  public async update(userId: string, testClassSuffixInput: string): Promise<UserSettings> {
+  public async update(userId: string, testClassSuffixInput: string, maximumComparisonFilesInput?: unknown): Promise<UserSettings> {
     const testClassSuffix = normalizeTestClassSuffix(testClassSuffixInput);
+    if (maximumComparisonFilesInput !== undefined && (typeof maximumComparisonFilesInput !== 'number'
+      || !Number.isSafeInteger(maximumComparisonFilesInput) || maximumComparisonFilesInput < 1 || maximumComparisonFilesInput > 50_000)) {
+      throw new Error('최대 비교 파일 수는 1~50,000 사이의 정수로 입력하세요.');
+    }
+    const maximumComparisonFiles = maximumComparisonFilesInput as number | undefined;
     const timestamp = this.now();
     await runInImmediateTransaction(this.database, async (transaction) => {
       await transaction.run(`
-        INSERT INTO user_settings (user_id, test_class_suffix, updated_at)
-        VALUES (?, ?, ?)
+        INSERT INTO user_settings (user_id, test_class_suffix, maximum_comparison_files, updated_at)
+        VALUES (?, ?, COALESCE(?, 2000), ?)
         ON CONFLICT(user_id) DO UPDATE SET
           test_class_suffix = excluded.test_class_suffix,
+          maximum_comparison_files = COALESCE(?, user_settings.maximum_comparison_files),
           updated_at = excluded.updated_at
-      `, userId, testClassSuffix, timestamp);
+      `, userId, testClassSuffix, maximumComparisonFiles ?? null, timestamp, maximumComparisonFiles ?? null);
       await transaction.run(`
         INSERT INTO audit_events (
           actor_user_id, event_type, entity_type, entity_id, detail_json, created_at
         ) VALUES (?, 'USER_SETTINGS_UPDATED', 'USER_SETTINGS', ?, ?, ?)
-      `, userId, userId, JSON.stringify({ testClassSuffix }), timestamp);
+      `, userId, userId, JSON.stringify({ testClassSuffix, ...(maximumComparisonFiles === undefined ? {} : { maximumComparisonFiles }) }), timestamp);
     });
-    return { testClassSuffix };
+    return await this.get(userId);
   }
 }
 

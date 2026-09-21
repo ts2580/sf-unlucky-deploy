@@ -4,6 +4,8 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { renderHtmlReport } from '../src/reports/html.js';
+import { renderMarkdownReport } from '../src/reports/markdown.js';
 import { compareSnapshots, MAX_DIFF_INPUT_BYTES } from '../src/metadata/comparator.js';
 import type { SourceSpec } from '../src/sources/source-spec.js';
 import type { MetadataSnapshot } from '../src/sources/snapshot.js';
@@ -13,6 +15,53 @@ describe('metadata comparator', () => {
   const temporaryDirectories: string[] = [];
 
   afterEach(async () => removeDirectoriesAfterTest(temporaryDirectories));
+
+  it.each([3, 4, 5])('상한 %i에서 상대 경로 합집합을 세고 초과할 때만 Source 목록으로 전환한다', async (maximumFiles) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-file-limit-'));
+    temporaryDirectories.push(root);
+    const left = path.join(root, 'left');
+    const right = path.join(root, 'right');
+    await writeFixtureFiles(left, { 'package.xml': '<Package/>',
+      'classes/Shared.cls': 'left', 'classes/Shared.cls-meta.xml': '<ApexClass/>', 'classes/TargetOnly.cls': 'target' });
+    await writeFixtureFiles(right, { 'package.xml': '<Package/>',
+      'classes/Shared.cls': 'right', 'classes/Shared.cls-meta.xml': '<ApexClass/>', 'classes/SourceOnly.cls': 'source' });
+    const result = await compareSnapshots(snapshot(left, 'left'), snapshot(right, 'right'), { maximumFiles });
+    expect(result.comparisonLimit).toEqual({ maximumFiles, fileCount: 4, exceeded: maximumFiles < 4 });
+    if (maximumFiles < 4) {
+      expect(result.components.map((entry) => entry.key)).toEqual(['ApexClass:Shared', 'ApexClass:SourceOnly']);
+      expect(result.summary).toEqual({ total: 2, added: 0, removed: 0, modified: 0, identical: 0, different: 0 });
+      for (const component of result.components) {
+        expect(component.status).toBe('SOURCE');
+        for (const file of component.files) {
+          expect(file.status).toBe('SOURCE');
+          expect(file).not.toHaveProperty('unifiedDiff');
+          expect(file).not.toHaveProperty('xmlChanges');
+          expect(file).not.toHaveProperty('leftSha256');
+          expect(file).not.toHaveProperty('rightSha256');
+        }
+      }
+      expect(renderHtmlReport(result)).toContain('비교하지 않음');
+      expect(renderMarkdownReport(result)).toContain('차이 판정 없음');
+    } else {
+      expect(result.summary).toMatchObject({ total: 3, added: 1, removed: 1, modified: 1 });
+      expect(result.components[0]?.files.some((file) => file.unifiedDiff !== undefined)).toBe(true);
+    }
+  });
+
+  it('초과 상태에서 Source가 비어 있어도 동일 판정을 만들지 않는다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-empty-source-limit-'));
+    temporaryDirectories.push(root);
+    const left = path.join(root, 'left');
+    const right = path.join(root, 'right');
+    await writeFixtureFiles(left, { 'classes/One.cls': 'one', 'classes/Two.cls': 'two' });
+    await mkdir(right);
+    const result = await compareSnapshots(snapshot(left, 'left'), snapshot(right, 'right'), { maximumFiles: 1 });
+    expect(result.components).toEqual([]);
+    expect(result.comparisonLimit?.exceeded).toBe(true);
+    expect(renderHtmlReport(result)).toContain('Source 메타데이터가 없습니다.');
+    expect(renderHtmlReport(result)).not.toContain('두 소스의 메타데이터가 동일합니다.');
+    expect(renderMarkdownReport(result)).not.toContain('차이가 없습니다.');
+  });
 
   it('추가·삭제·텍스트·XML·바이너리 변경을 컴포넌트 단위로 비교한다', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-comparator-'));
