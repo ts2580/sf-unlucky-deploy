@@ -1,4 +1,4 @@
-import { access, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -13,6 +13,25 @@ describe('deploy command', () => {
   const temporaryDirectories: string[] = [];
 
   afterEach(async () => removeDirectoriesAfterTest(temporaryDirectories));
+
+  it('비교 한도를 넘으면 diff를 생략하고 같은 payload의 검증·배포를 계속한다', async () => {
+    const fixture = await createDeployFixture(temporaryDirectories);
+    const client = new DeployFixtureSfClient();
+    const result = await runDeployCommand({ from: `local:${fixture.projectPath}`, to: 'target',
+      manifest: fixture.manifestPath, reportDir: fixture.runDirectory,
+      execute: true, maximumComparisonFiles: 1, color: false,
+    }, { cwd: fixture.projectPath, sfClient: client, stdout: () => undefined });
+    expect(result.comparison.comparisonLimit).toMatchObject({ maximumFiles: 1, exceeded: true });
+    expect(result.comparison.components.every((component) => component.status === 'SOURCE')).toBe(true);
+    expect(result.executed).toBe(true);
+    const calls = deploymentStartCalls(client.calls);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.args).toContain('--dry-run');
+    expect(calls[1]?.args).not.toContain('--dry-run');
+    expect(calls[0]?.args[calls[0].args.indexOf('--metadata-dir') + 1])
+      .toBe(calls[1]?.args[calls[1].args.indexOf('--metadata-dir') + 1]);
+    expect(await readFile(result.reports.diff, 'utf8')).toContain('비교하지 않음');
+  });
 
   it('기본 동작은 dry-run 한 번만 실행한다', async () => {
     const fixture = await createDeployFixture(temporaryDirectories);
@@ -138,9 +157,37 @@ describe('deploy command', () => {
     expect(client.deployedManifest).toContain('<members>SourceOnly</members>');
     expect(client.deployedManifest).toContain('<members>Shared</members>');
     expect(client.deployedManifest).not.toContain('TargetOnly');
-    expect(client.calls.filter((call) => call.args.includes('convert'))).toHaveLength(2);
+    expect(client.calls.filter((call) => call.args.includes('convert'))).toHaveLength(1);
     expect(result.payloadSha256).toBe(result.comparison.right.payloadSha256);
+    expect(result.payloadDigestVersion).toBe(2);
     expect(result.comparison.left.manifestSha256).toBe(result.comparison.right.manifestSha256);
+  });
+
+  it('동적 source가 변해도 최초 검증한 변환 payload를 실제 배포한다', async () => {
+    const fixture = await createDeployFixture(temporaryDirectories);
+    await writeFile(path.join(fixture.projectPath, 'sfdx-project.json'), JSON.stringify({
+      packageDirectories: [{ path: 'force-app' }], sourceApiVersion: '67.0',
+    }));
+    await mkdir(path.join(fixture.projectPath, 'force-app'), { recursive: true });
+    const client = new DeployablePayloadSfClient(
+      ['Shared', 'SourceOnly'],
+      ['Shared', 'TargetOnly'],
+      ['ChangedAfterDryRun'],
+    );
+
+    const result = await runDeployCommand({
+      from: `local:${fixture.projectPath}`,
+      to: 'target',
+      allMetadata: true,
+      reportDir: fixture.runDirectory,
+      execute: true,
+      color: false,
+    }, { cwd: fixture.projectPath, sfClient: client, stdout: () => undefined });
+
+    expect(result.executed).toBe(true);
+    expect(client.calls.filter((call) => call.args.includes('convert'))).toHaveLength(1);
+    expect(client.deployedClassNames).toContain('SourceOnly.cls');
+    expect(client.deployedClassNames).not.toContain('ChangedAfterDryRun.cls');
   });
 
   it('동적 source manifest가 비어 있으면 target-only 비교 후 Salesforce 배포를 생략한다', async () => {
@@ -240,10 +287,13 @@ class DeployFixtureSfClient implements SfClient {
 class DeployablePayloadSfClient implements SfClient {
   public readonly calls: Array<{ args: readonly string[]; options: SfRunOptions }> = [];
   public deployedManifest = '';
+  public deployedClassNames: readonly string[] = [];
+  private conversionCount = 0;
 
   public constructor(
     private readonly sourceMembers: readonly string[] = ['Shared', 'SourceOnly'],
     private readonly targetMembers: readonly string[] = ['Shared', 'TargetOnly'],
+    private readonly sourceMembersAfterFirstConversion?: readonly string[],
   ) {}
 
   public async runJson(args: readonly string[], options: SfRunOptions): Promise<unknown> {
@@ -270,10 +320,13 @@ class DeployablePayloadSfClient implements SfClient {
       return { status: 0 };
     }
     if (args.includes('convert')) {
+      this.conversionCount += 1;
       await writeMetadataPackage(
         flagValue(args, '--output-dir'),
         await readFile(flagValue(args, '--manifest'), 'utf8'),
-        this.sourceMembers,
+        this.conversionCount === 1 || this.sourceMembersAfterFirstConversion === undefined
+          ? this.sourceMembers
+          : this.sourceMembersAfterFirstConversion,
       );
       return { status: 0 };
     }
@@ -282,6 +335,7 @@ class DeployablePayloadSfClient implements SfClient {
         path.join(flagValue(args, '--metadata-dir'), 'package.xml'),
         'utf8',
       );
+      this.deployedClassNames = await readdir(path.join(flagValue(args, '--metadata-dir'), 'classes'));
       return { status: 0, result: { id: '0Af-source-only', status: 'Queued', done: false } };
     }
     if (args[0] === 'project' && args[1] === 'deploy' && args[2] === 'report') {

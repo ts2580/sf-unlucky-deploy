@@ -1,3 +1,4 @@
+import type { JobSourceSnapshot } from '../sources/source-provenance.js';
 import path from 'node:path';
 
 import { ensureEmptyDirectory, writeJson } from '../core/files.js';
@@ -41,6 +42,7 @@ export async function writeRunMetadata(
   left: SourceSpec,
   rightDisplayName: string,
   manifestPath: string,
+  sourceSnapshot?: JobSourceSnapshot,
 ): Promise<void> {
   await writeJson(path.join(context.rootDirectory, 'run.json'), {
     runId: context.runId,
@@ -49,6 +51,7 @@ export async function writeRunMetadata(
     left: left.displayName,
     right: rightDisplayName,
     manifestPath,
+    ...(sourceSnapshot === undefined ? {} : { sourceSnapshot }),
   });
 }
 

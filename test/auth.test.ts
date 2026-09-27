@@ -6,6 +6,25 @@ const bootstrapToken = 'one-time-bootstrap-token';
 const password = 'correct horse battery staple';
 
 describe('로컬 관리자 인증', () => {
+  it('성공 로그인 뒤 기존 scrypt digest를 현재 비용으로 교체한다', async () => {
+    const server = await createWebServer({
+      host: '127.0.0.1', port: 27_546, assetsDirectory: '/definitely/missing/sfud-ui', databasePath: ':memory:', bootstrapToken,
+    });
+    try {
+      expect((await server.inject({ method: 'POST', url: '/api/v1/auth/bootstrap', payload: adminPayload(bootstrapToken) })).statusCode).toBe(201);
+      const legacyDigest = 'scrypt$16384$8$1$YWJjZGVmZ2hpamtsbW5vcA$71iq-9jmTvOEflLj7tfwS8RopMa4tmw2Hhh6HZBH8KCscMWlT6IsqzXQQFQzkqlvR1ANIbXanWQC5sgQo6yyLw';
+      await server.sfudRuntime.store.database.run('UPDATE password_credentials SET password_digest = ?', legacyDigest);
+      const login = await server.inject({
+        method: 'POST', url: '/api/v1/auth/login', payload: { email: 'admin@example.com', password: 'legacy account password' },
+      });
+      expect(login.statusCode).toBe(200);
+      expect(await server.sfudRuntime.store.database.get<{ password_digest: string }>('SELECT password_digest FROM password_credentials'))
+        .toMatchObject({ password_digest: expect.stringMatching(/^scrypt\$32768\$8\$1\$/u) });
+    } finally {
+      await server.close();
+    }
+  });
+
   it('최초 관리자, 세션, CSRF, 로그아웃과 재로그인을 보호한다', async () => {
     const server = await createWebServer({
       host: '127.0.0.1',
@@ -158,6 +177,82 @@ describe('로컬 관리자 인증', () => {
       });
       expect(blocked.statusCode).toBe(429);
       expect(blocked.json()).toMatchObject({ error: { code: 'TOO_MANY_ATTEMPTS' } });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('동시 로그인은 실패 예약과 전역 KDF 슬롯을 먼저 확보한다', async () => {
+    const server = await createWebServer({
+      host: '127.0.0.1', port: 27_546,
+      assetsDirectory: '/definitely/missing/sfud-ui', databasePath: ':memory:', bootstrapToken,
+      trustedProxies: ['127.0.0.1'],
+    });
+    try {
+      expect((await server.inject({
+        method: 'POST', url: '/api/v1/auth/bootstrap', payload: adminPayload(bootstrapToken),
+      })).statusCode).toBe(201);
+
+      const responses = await Promise.all(
+        Array.from({ length: 10 }, async (_, index) => ({
+          index,
+          response: await loginFrom(
+            server,
+            `198.51.100.${index + 1}`,
+            `parallel-${index}@example.com`,
+            'wrong password value',
+          ),
+        })),
+      );
+      expect(responses.filter(({ response }) => response.statusCode === 401)).toHaveLength(5);
+      expect(responses.filter(({ response }) => response.statusCode === 429)).toHaveLength(5);
+      const failedAttempt = responses.find(({ response }) => response.statusCode === 401)!;
+      for (let index = 0; index < 4; index += 1) {
+        expect((await loginFrom(
+          server,
+          `198.51.100.${failedAttempt.index + 1}`,
+          `parallel-${failedAttempt.index}@example.com`,
+          'wrong password value',
+        )).statusCode).toBe(401);
+      }
+      expect((await loginFrom(
+        server,
+        `198.51.100.${failedAttempt.index + 1}`,
+        `parallel-${failedAttempt.index}@example.com`,
+        'wrong password value',
+      )).statusCode).toBe(429);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('성공 로그인은 같은 계정의 다른 실패 예약과 확정 실패를 지우지 않는다', async () => {
+    const server = await createWebServer({
+      host: '127.0.0.1', port: 27_546,
+      assetsDirectory: '/definitely/missing/sfud-ui', databasePath: ':memory:', bootstrapToken,
+    });
+    try {
+      expect((await server.inject({
+        method: 'POST', url: '/api/v1/auth/bootstrap', payload: adminPayload(bootstrapToken),
+      })).statusCode).toBe(201);
+      for (let index = 0; index < 4; index += 1) {
+        expect((await server.inject({
+          method: 'POST', url: '/api/v1/auth/login',
+          payload: { email: 'admin@example.com', password: 'wrong password value' },
+        })).statusCode).toBe(401);
+      }
+      expect((await server.inject({
+        method: 'POST', url: '/api/v1/auth/login',
+        payload: { email: 'admin@example.com', password },
+      })).statusCode).toBe(200);
+      expect((await server.inject({
+        method: 'POST', url: '/api/v1/auth/login',
+        payload: { email: 'admin@example.com', password: 'wrong password value' },
+      })).statusCode).toBe(401);
+      expect((await server.inject({
+        method: 'POST', url: '/api/v1/auth/login',
+        payload: { email: 'admin@example.com', password: 'wrong password value' },
+      })).statusCode).toBe(429);
     } finally {
       await server.close();
     }

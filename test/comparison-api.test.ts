@@ -219,6 +219,27 @@ describe('비교 API', () => {
         args[0] === 'project' && args[1] === 'generate' && args[2] === 'manifest'))
         .toHaveLength(2);
 
+      for (const maximumComparisonFiles of [1, 2]) {
+        expect((await server.inject({ method: 'PUT', url: '/api/v1/settings',
+          headers: { cookie, 'x-sfud-csrf': csrfToken }, payload: { testClassSuffix: 'Spec', maximumComparisonFiles },
+        })).statusCode).toBe(200);
+        const response = await server.inject({ method: 'POST', url: '/api/v1/comparisons',
+          headers: { cookie, 'x-sfud-csrf': csrfToken }, payload: { ...comparisonPayload, maximumComparisonFiles: 50000 },
+        });
+        expect(response.statusCode).toBe(202);
+        const id = response.json().job.id as string;
+        await server.sfudRuntime.comparisonQueue.onIdle();
+        const completedLimit = (await server.inject({ url: `/api/v1/comparisons/${id}`, headers: { cookie } })).json();
+        expect(completedLimit.job).toMatchObject({ status: 'SUCCEEDED',
+          mode: maximumComparisonFiles === 1 ? 'source' : 'compare',
+          comparisonLimit: { maximumFiles: maximumComparisonFiles, fileCount: 2, exceeded: maximumComparisonFiles === 1 },
+          result: { components: [ { status: maximumComparisonFiles === 1 ? 'SOURCE' : 'MODIFIED' } ] },
+        });
+        const history = (await server.inject({ url: '/api/v1/comparisons', headers: { cookie } })).json();
+        expect(history.jobs.find((entry: { id: string }) => entry.id === id)).toMatchObject({
+          mode: completedLimit.job.mode, comparisonLimit: completedLimit.job.comparisonLimit,
+        });
+      }
       const callsBeforeSourceOnly = sfClient.calls.length;
       const sourceOnlyCreated = await server.inject({
         method: 'POST',

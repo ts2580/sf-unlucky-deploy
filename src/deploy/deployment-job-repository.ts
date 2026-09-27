@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { assertJobAccess, initializeJobAccess, jobVisibilitySql } from '../storage/job-access-repository.js';
 
 import { SfudError } from '../core/errors.js';
 import type { DatabaseExecutor, DatabaseHandle } from '../storage/database-executor.js';
@@ -9,16 +10,17 @@ import type { ApexTestPlan } from './test-plan.js';
 import { apexCoverageSummary } from './test-coverage.js';
 import type { SalesforceDeploymentProgress } from './salesforce-deployment.js';
 import { hydrateArtifacts } from './deployment-artifacts.js';
+import { DeploymentAttemptRepository } from './deployment-attempt-repository.js';
 import {
   mapDeploymentJob,
-  type DeploymentJobRow, type RemoteDeploymentStatus, type DeploymentJobStatus,
+  type DeploymentJobRow, type RemoteDeploymentStatus, type DeploymentJobStatus, type DeploymentExecutionMode,
   type DeploymentJob, type CreateDryRunJobInput, type CreateDirectDeploymentJobInput,
   type CreateIdempotentDryRunJobInput, type CreateDryRunJobResult,
   type CreateDirectDeploymentJobResult, type TransitionDetails, type ApproveDeploymentInput,
 } from './deployment-job-model.js';
 
 export type {
-  DeploymentJobKind, DeploymentScope, RemoteDeploymentStatus, DeploymentJobStatus,
+  DeploymentJobKind, DeploymentScope, RemoteDeploymentStatus, DeploymentJobStatus, DeploymentExecutionEvidence, DeploymentExecutionMode,
   DeploymentJob, CreateDryRunJobInput, CreateDirectDeploymentJobInput,
   CreateIdempotentDryRunJobInput, CreateDryRunJobResult, CreateDirectDeploymentJobResult,
   TransitionDetails, ApproveDeploymentInput,
@@ -26,10 +28,10 @@ export type {
 
 const DRY_RUN_APPROVAL_TTL_MS = 30 * 60 * 1_000;
 const DEPLOYMENT_JOB_SUMMARY_COLUMNS = `
-  id, kind, status, source, target_alias, manifest_path, scope, metadata_type,
-  payload_checksum, run_directory, salesforce_deployment_id, dry_run_job_id, created_by,
+  id, kind, status, source, source_provenance_json, target_alias, manifest_path, scope, metadata_type,
+  payload_checksum, payload_digest_version, run_directory, salesforce_deployment_id, dry_run_job_id, created_by,
   error_code, error_message, created_at, updated_at, started_at, completed_at, is_prepared,
-  NULL AS comparison_result_json, NULL AS comparison_artifact_path,
+  comparison_limit_json, NULL AS comparison_result_json, NULL AS comparison_artifact_path,
   test_plan_json,
   NULL AS dry_run_result_json, NULL AS dry_run_artifact_path,
   selected_components_json,
@@ -37,26 +39,30 @@ const DEPLOYMENT_JOB_SUMMARY_COLUMNS = `
   progress_json, remote_status, persistence_warning,
   source_org_identity_json, target_org_identity_json,
   summary_added, summary_removed, summary_modified, summary_identical, summary_total, summary_different,
-  test_coverage
+  test_coverage, execution_evidence, execution_mode, reused_validation_id, execution_reason
 `;
 
 const ALLOWED_TRANSITIONS: Record<DeploymentJobStatus, ReadonlySet<DeploymentJobStatus>> = {
   QUEUED: new Set(['DRY_RUN_RUNNING', 'DEPLOYING', 'FAILED']),
   DRY_RUN_RUNNING: new Set(['APPROVAL_PENDING', 'FAILED', 'RECONCILE_REQUIRED']),
   APPROVAL_PENDING: new Set(),
+  VALIDATED_PENDING_EXECUTION: new Set(['FAILED']),
   DEPLOYING: new Set(['SUCCEEDED', 'FAILED', 'RECONCILE_REQUIRED']),
   SUCCEEDED: new Set(),
   FAILED: new Set(),
-  RECONCILE_REQUIRED: new Set(['APPROVAL_PENDING', 'SUCCEEDED', 'FAILED']),
+  RECONCILE_REQUIRED: new Set(['APPROVAL_PENDING', 'VALIDATED_PENDING_EXECUTION', 'SUCCEEDED', 'FAILED']),
 };
 
 export class DeploymentJobRepository {
+  public readonly attempts: DeploymentAttemptRepository;
   public constructor(
     private readonly database: DatabaseExecutor,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly createId: () => string = randomUUID,
     private readonly onChanged?: (job: DeploymentJob) => void,
-  ) {}
+  ) {
+    this.attempts = new DeploymentAttemptRepository(database);
+  }
 
   public async createDryRun(input: CreateDryRunJobInput): Promise<DeploymentJob> {
     return (await this.createDryRunJob(input)).job;
@@ -68,6 +74,29 @@ export class DeploymentJobRepository {
     assertClientRequestId(input.clientRequestId);
     assertChecksum(input.requestHash);
     return await this.createDryRunJob(input);
+  }
+
+  public async findIdempotentDryRun(
+    createdBy: string,
+    clientRequestId: string,
+  ): Promise<{ job: DeploymentJob; requestHash: string } | undefined> {
+    const row = await this.database.get<DeploymentJobRow & { request_hash: string }>(`
+      SELECT * FROM deployment_jobs
+      WHERE kind = 'DRY_RUN' AND created_by = ? AND client_request_id = ?
+    `, createdBy, clientRequestId);
+    return row === undefined ? undefined : { job: await hydrateArtifacts(mapDeploymentJob(row)), requestHash: row.request_hash };
+  }
+
+  public async findIdempotentDirectDeployment(
+    createdBy: string,
+    clientRequestId: string,
+  ): Promise<{ job: DeploymentJob; requestHash: string } | undefined> {
+    const row = await this.database.get<DeploymentJobRow & { request_hash: string }>(`
+      SELECT * FROM deployment_jobs
+      WHERE kind = 'DEPLOY' AND dry_run_job_id IS NULL
+        AND created_by = ? AND client_request_id = ?
+    `, createdBy, clientRequestId);
+    return row === undefined ? undefined : { job: await hydrateArtifacts(mapDeploymentJob(row)), requestHash: row.request_hash };
   }
 
   private async createDryRunJob(
@@ -94,10 +123,10 @@ export class DeploymentJobRepository {
       }
       await transaction.run(`
         INSERT INTO deployment_jobs (
-          id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
+          id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum, payload_digest_version,
           run_directory, selected_components_json, source_org_identity_json, target_org_identity_json,
           created_by, client_request_id, request_hash, created_at, updated_at
-        ) VALUES (?, 'DRY_RUN', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, 'DRY_RUN', 'QUEUED', ?, ?, ?, ?, ?, ?, 2, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         id,
         input.source,
@@ -116,6 +145,9 @@ export class DeploymentJobRepository {
         timestamp,
         timestamp,
       );
+      await initializeJobAccess(transaction, 'deployment', id, input.accessOwnerUserId);
+      await transaction.run('UPDATE deployment_jobs SET source_provenance_json = ? WHERE id = ?',
+        input.sourceSnapshot === undefined ? null : JSON.stringify(input.sourceSnapshot), id);
       await this.writeAudit(transaction, input.createdBy, 'DRY_RUN_QUEUED', id, {
         targetAlias: input.targetAlias,
         payloadChecksum: input.payloadChecksum,
@@ -169,10 +201,10 @@ export class DeploymentJobRepository {
       }
       await transaction.run(`
         INSERT INTO deployment_jobs (
-          id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
+          id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum, payload_digest_version,
           run_directory, selected_components_json, created_by, client_request_id, request_hash,
           source_org_identity_json, target_org_identity_json, created_at, updated_at
-        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, 'DEPLOY', 'QUEUED', ?, ?, ?, ?, ?, ?, 2, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         id,
         input.source,
@@ -191,6 +223,9 @@ export class DeploymentJobRepository {
         timestamp,
         timestamp,
       );
+      await initializeJobAccess(transaction, 'deployment', id, input.accessOwnerUserId);
+      await transaction.run('UPDATE deployment_jobs SET source_provenance_json = ? WHERE id = ?',
+        input.sourceSnapshot === undefined ? null : JSON.stringify(input.sourceSnapshot), id);
       await this.writeAudit(transaction, input.createdBy, 'DIRECT_DEPLOYMENT_QUEUED', id, {
         targetAlias: input.targetAlias,
         payloadChecksum: input.payloadChecksum,
@@ -235,6 +270,42 @@ export class DeploymentJobRepository {
     return job;
   }
 
+  public async recordSelectedManifest(id: string, manifestPath: string): Promise<DeploymentJob> {
+    const result = await this.database.run(`
+      UPDATE deployment_jobs
+      SET manifest_path = ?, updated_at = ?
+      WHERE id = ? AND status = 'QUEUED' AND selected_components_json IS NOT NULL
+    `, manifestPath, this.now(), id);
+    if (result.changes !== 1) {
+      throw new SfudError('INVALID_JOB_STATE', '선택 manifest를 기록할 수 없는 작업 상태입니다.');
+    }
+    return await this.notifyById(id);
+  }
+
+  public async recordExecutionPlan(input: {
+    id: string;
+    mode: DeploymentExecutionMode;
+    reasons: readonly string[];
+    validationId?: string;
+  }): Promise<DeploymentJob> {
+    const result = await this.database.run(`
+      UPDATE deployment_jobs
+      SET execution_mode = ?, reused_validation_id = ?, execution_reason = ?, updated_at = ?
+      WHERE id = ? AND kind = 'DEPLOY' AND status = 'DEPLOYING'
+    `, input.mode, input.validationId ?? null, input.reasons.length === 0 ? null : input.reasons.join(' '), this.now(), input.id);
+    if (result.changes !== 1) throw new SfudError('INVALID_JOB_STATE', '배포 실행 방식을 기록할 수 없는 작업 상태입니다.');
+    return await this.notifyById(input.id);
+  }
+
+  public async assertApprovalFresh(dryRunJobId: string): Promise<void> {
+    const dryRun = await this.getRequiredSummary(dryRunJobId);
+    const completedAt = dryRun.completedAt === undefined ? Number.NaN : Date.parse(dryRun.completedAt);
+    if (dryRun.kind !== 'DRY_RUN' || dryRun.status !== 'APPROVAL_PENDING'
+      || !Number.isFinite(completedAt) || Date.parse(this.now()) - completedAt > DRY_RUN_APPROVAL_TTL_MS) {
+      throw new SfudError('APPROVAL_DENIED', 'dry-run 승인 유효시간 30분이 지났습니다. dry-run을 다시 실행하세요.');
+    }
+  }
+
   public async transition(
     id: string,
     nextStatus: DeploymentJobStatus,
@@ -243,11 +314,25 @@ export class DeploymentJobRepository {
     await runInImmediateTransaction(this.database, async (transaction) => {
       const current = await getRequired(transaction, id);
       assertTransition(current, nextStatus);
+      if (details.attemptId !== undefined || details.attemptVersion !== undefined) {
+        if (details.attemptId === undefined || details.attemptVersion === undefined) {
+          throw new SfudError('INVALID_JOB_STATE', '완료 전환에 attempt ID와 버전이 함께 필요합니다.');
+        }
+        const attempt = await transaction.get<{ version: number }>(`
+          SELECT version FROM deployment_attempts
+          WHERE id = ? AND job_id = ?
+            AND id = (SELECT active_attempt_id FROM deployment_jobs WHERE id = ?)
+        `, details.attemptId, id, id);
+        if (attempt?.version !== details.attemptVersion) {
+          throw new SfudError('INVALID_JOB_STATE', '완료 저장 전에 Salesforce attempt가 변경되었습니다.');
+        }
+      }
       const timestamp = this.now();
       const startedAt = nextStatus === 'DRY_RUN_RUNNING' || nextStatus === 'DEPLOYING'
         ? timestamp
         : current.startedAt ?? null;
-      const completedAt = nextStatus === 'APPROVAL_PENDING' || nextStatus === 'SUCCEEDED' || nextStatus === 'FAILED'
+      const completedAt = nextStatus === 'APPROVAL_PENDING' || nextStatus === 'VALIDATED_PENDING_EXECUTION'
+        || nextStatus === 'SUCCEEDED' || nextStatus === 'FAILED'
         ? details.completedAt ?? timestamp
         : null;
       const result = await transaction.run(`
@@ -305,8 +390,8 @@ export class DeploymentJobRepository {
     await runInImmediateTransaction(this.database, async (transaction) => {
       const result = await transaction.run(`
         UPDATE deployment_jobs
-        SET payload_checksum = ?, run_directory = ?, is_prepared = 1,
-            comparison_result_json = NULL, comparison_artifact_path = ?,
+        SET payload_checksum = ?, payload_digest_version = 2, run_directory = ?, is_prepared = 1,
+            comparison_result_json = NULL, comparison_artifact_path = ?, comparison_limit_json = ?,
             test_plan_json = ?, dry_run_result_json = NULL, dry_run_artifact_path = ?,
             summary_added = ?, summary_removed = ?, summary_modified = ?,
             summary_identical = ?, summary_total = ?, summary_different = ?, test_coverage = ?, updated_at = ?
@@ -315,6 +400,7 @@ export class DeploymentJobRepository {
       input.payloadChecksum,
       input.runDirectory,
       comparisonArtifactPath,
+      input.comparisonResult.comparisonLimit === undefined ? null : JSON.stringify(input.comparisonResult.comparisonLimit),
       JSON.stringify(input.testPlan),
       dryRunArtifactPath,
       input.comparisonResult.summary.added,
@@ -344,17 +430,22 @@ export class DeploymentJobRepository {
       throw new SfudError('APPROVAL_DENIED', '실제 배포 확인 문구가 일치하지 않습니다.');
     }
     assertChecksum(input.payloadChecksum);
+    await assertJobAccess(this.database, 'deployment', input.dryRunJobId, input.approvedBy, 'EXECUTE');
     const dryRunArtifacts = await this.getRequired(input.dryRunJobId);
 
     let deployJobId = '';
     try {
       await runInImmediateTransaction(this.database, async (transaction) => {
+        await assertJobAccess(transaction, 'deployment', input.dryRunJobId, input.approvedBy, 'EXECUTE');
         const dryRun = await getRequired(transaction, input.dryRunJobId);
         if (dryRun.kind !== 'DRY_RUN' || dryRun.status !== 'APPROVAL_PENDING') {
           throw new SfudError('APPROVAL_DENIED', '승인 가능한 성공한 dry-run 작업이 아닙니다.');
         }
         if (dryRun.payloadChecksum !== input.payloadChecksum) {
           throw new SfudError('PAYLOAD_CHANGED', 'dry-run 이후 payload checksum이 변경되었습니다.');
+        }
+        if (dryRun.payloadDigestVersion !== 2) {
+          throw new SfudError('APPROVAL_DENIED', 'v1 payload digest로 기록된 dry-run은 승인에 재사용할 수 없습니다. dry-run을 다시 실행하세요.');
         }
         if (dryRun.targetAlias !== input.targetAlias) {
           throw new SfudError('APPROVAL_DENIED', '승인 대상 org 별칭이 dry-run 대상과 일치하지 않습니다.');
@@ -401,7 +492,7 @@ export class DeploymentJobRepository {
         deployJobId = this.createId();
         await transaction.run(`
         INSERT INTO deployment_jobs (
-          id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum,
+          id, kind, status, source, target_alias, manifest_path, scope, metadata_type, payload_checksum, payload_digest_version,
           run_directory, selected_components_json, dry_run_job_id, is_prepared,
           comparison_result_json, comparison_artifact_path, test_plan_json,
           dry_run_result_json, dry_run_artifact_path,
@@ -410,7 +501,7 @@ export class DeploymentJobRepository {
           source_org_identity_json, target_org_identity_json, created_by, created_at, updated_at
         ) VALUES (
           ?, 'DEPLOY', 'QUEUED',
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,
+          ?, ?, ?, ?, ?, ?, 2, ?, ?, ?, 1,
           ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?
@@ -448,6 +539,17 @@ export class DeploymentJobRepository {
         timestamp,
         timestamp,
       );
+        await transaction.run(`
+        UPDATE deployment_jobs SET access_owner_user_id = (
+          SELECT access_owner_user_id FROM deployment_jobs WHERE id = ?
+        ), source_provenance_json = (SELECT source_provenance_json FROM deployment_jobs WHERE id = ?),
+          comparison_limit_json = (SELECT comparison_limit_json FROM deployment_jobs WHERE id = ?) WHERE id = ?
+      `, dryRun.id, dryRun.id, dryRun.id, deployJobId);
+        await transaction.run(`
+          INSERT INTO job_access_grants (job_type, job_id, user_id, permission, granted_by, created_at)
+          SELECT job_type, ?, user_id, permission, granted_by, created_at
+          FROM job_access_grants WHERE job_type = 'deployment' AND job_id = ?
+        `, deployJobId, dryRun.id);
         await transaction.run(`
         INSERT INTO deployment_approvals (
           id, dry_run_job_id, deploy_job_id, approved_by,
@@ -516,12 +618,18 @@ export class DeploymentJobRepository {
   public async recordSalesforceProgress(
     id: string,
     progress: SalesforceDeploymentProgress,
+    attemptId?: string,
   ): Promise<void> {
+    if (attemptId !== undefined) {
+      await this.attempts.progress(id, attemptId, progress);
+      await this.notifyById(id);
+      return;
+    }
     const timestamp = this.now();
     const result = await this.database.run(`
       UPDATE deployment_jobs
       SET progress_json = ?, salesforce_deployment_id = ?, remote_status = ?, updated_at = ?
-      WHERE id = ? AND status IN ('DRY_RUN_RUNNING', 'DEPLOYING')
+      WHERE id = ? AND active_attempt_id IS NULL AND status IN ('DRY_RUN_RUNNING', 'DEPLOYING')
     `, JSON.stringify(progress), progress.deploymentId, remoteStatusFromProgress(progress), timestamp, id);
     if (result.changes !== 1) {
       throw new SfudError('INVALID_JOB_STATE', 'Salesforce 배포 진행 상태를 기록할 수 없는 작업 상태입니다.');
@@ -529,11 +637,15 @@ export class DeploymentJobRepository {
     await this.notifyById(id);
   }
 
-  public async recordSalesforceSubmission(id: string, deploymentId: string): Promise<void> {
+  public async recordSalesforceSubmission(id: string, deploymentId: string, attemptId?: string): Promise<void> {
+    if (attemptId !== undefined) {
+      await this.attempts.submitted(id, attemptId, deploymentId);
+      return;
+    }
     const result = await this.database.run(`
       UPDATE deployment_jobs
       SET salesforce_deployment_id = ?, remote_status = 'SUBMITTED', updated_at = ?
-      WHERE id = ? AND status IN ('DRY_RUN_RUNNING', 'DEPLOYING')
+      WHERE id = ? AND active_attempt_id IS NULL AND status IN ('DRY_RUN_RUNNING', 'DEPLOYING')
     `, deploymentId, this.now(), id);
     if (result.changes !== 1) {
       throw new SfudError('INVALID_JOB_STATE', 'Salesforce 배포 ID를 기록할 수 없는 작업 상태입니다.');
@@ -557,6 +669,8 @@ export class DeploymentJobRepository {
     report: unknown;
     progress: SalesforceDeploymentProgress;
     persistenceWarning?: string;
+    attemptId?: string;
+    attemptVersion?: number;
   }): Promise<DeploymentJob> {
     const timestamp = this.now();
     await runInImmediateTransaction(this.database, async (transaction) => {
@@ -564,10 +678,21 @@ export class DeploymentJobRepository {
       if (current.status !== 'RECONCILE_REQUIRED') {
         throw new SfudError('INVALID_JOB_STATE', '재확인 가능한 배포 작업이 아닙니다.');
       }
+      if (input.attemptId !== undefined) {
+        const updated = await transaction.run(`
+          UPDATE deployment_attempts SET report_json = ?, remote_status = ?,
+            submission_state = ?, completed_at = ?, version = version + 1
+          WHERE id = ? AND job_id = ? AND version = ?
+            AND id = (SELECT active_attempt_id FROM deployment_jobs WHERE id = ?)
+        `, JSON.stringify(input.report), remoteStatusFromProgress(input.progress),
+        input.progress.done ? 'TERMINAL' : 'SUBMITTED', input.progress.done ? timestamp : null,
+        input.attemptId, input.id, input.attemptVersion, input.id);
+        if (updated.changes !== 1) throw new SfudError('INVALID_JOB_STATE', '재확인 중 실행 기록이 변경되었습니다.');
+      }
       await transaction.run(`
         UPDATE deployment_jobs
         SET progress_json = ?, salesforce_deployment_id = ?, remote_status = ?,
-            deployment_result_json = CASE WHEN kind = 'DEPLOY' THEN ? ELSE deployment_result_json END,
+            deployment_result_json = CASE WHEN ? = 'DEPLOY' THEN ? ELSE deployment_result_json END,
             test_coverage = CASE WHEN kind = 'DRY_RUN' THEN ? ELSE test_coverage END,
             persistence_warning = COALESCE(?, persistence_warning), updated_at = ?
         WHERE id = ? AND status = 'RECONCILE_REQUIRED'
@@ -575,6 +700,7 @@ export class DeploymentJobRepository {
       JSON.stringify(input.progress),
       input.progress.deploymentId,
       remoteStatusFromProgress(input.progress),
+      input.progress.phase,
       JSON.stringify(input.report),
       apexCoverageSummary(input.report)?.minimumPercentage ?? null,
       input.persistenceWarning ?? null,
@@ -612,8 +738,8 @@ export class DeploymentJobRepository {
     await runInImmediateTransaction(this.database, async (transaction) => {
       const result = await transaction.run(`
         UPDATE deployment_jobs
-        SET payload_checksum = ?, run_directory = ?, is_prepared = 1,
-            comparison_result_json = NULL, comparison_artifact_path = ?, test_plan_json = ?,
+        SET payload_checksum = ?, payload_digest_version = 2, run_directory = ?, is_prepared = 1,
+            comparison_result_json = NULL, comparison_artifact_path = ?, comparison_limit_json = ?, test_plan_json = ?,
             dry_run_result_json = NULL, dry_run_artifact_path = ?,
             deployment_result_json = NULL, deployment_artifact_path = ?,
             summary_added = ?, summary_removed = ?, summary_modified = ?,
@@ -623,6 +749,7 @@ export class DeploymentJobRepository {
       input.payloadChecksum,
       input.runDirectory,
       comparisonArtifactPath,
+      input.comparisonResult.comparisonLimit === undefined ? null : JSON.stringify(input.comparisonResult.comparisonLimit),
       JSON.stringify(input.testPlan),
       dryRunArtifactPath ?? null,
       deploymentArtifactPath,
@@ -673,6 +800,26 @@ export class DeploymentJobRepository {
     return interrupted.length;
   }
 
+  /** 검증만 복구된 직접 배포는 제한된 시간 안에 명시적으로 다시 검증해야 한다. */
+  public async expireValidatedPendingExecutions(): Promise<number> {
+    const expiresBefore = new Date(Date.parse(this.now()) - DRY_RUN_APPROVAL_TTL_MS).toISOString();
+    const expired = await this.database.all<Array<{ id: string }>>(`
+      SELECT id FROM deployment_jobs
+      WHERE status = 'VALIDATED_PENDING_EXECUTION'
+        AND COALESCE(completed_at, updated_at) < ?
+      ORDER BY created_at, id
+    `, expiresBefore);
+    let count = 0;
+    for (const job of expired) {
+      await this.transition(job.id, 'FAILED', {
+        errorCode: 'VALIDATION_EXECUTION_EXPIRED',
+        errorMessage: '검증 후 실제 배포 재개 가능 시간이 만료되었습니다. dry-run을 다시 실행하세요.',
+      });
+      count += 1;
+    }
+    return count;
+  }
+
   public async listQueued(): Promise<DeploymentJob[]> {
     return (await this.database.all<DeploymentJobRow[]>(`
       SELECT * FROM deployment_jobs WHERE status = 'QUEUED' ORDER BY created_at, id
@@ -689,14 +836,32 @@ export class DeploymentJobRepository {
     return await Promise.all(jobs.map(hydrateArtifacts));
   }
 
-  public async listRecentSummary(limit = 50): Promise<DeploymentJob[]> {
+  public async listRecentSummary(limit = 50, userId?: string): Promise<DeploymentJob[]> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
       throw new SfudError('INVALID_ARGUMENT', '조회 개수는 1부터 200 사이여야 합니다.');
     }
     return (await this.database.all<DeploymentJobRow[]>(`
       SELECT ${DEPLOYMENT_JOB_SUMMARY_COLUMNS}
-      FROM deployment_jobs ORDER BY created_at DESC, id DESC LIMIT ?
-    `, limit)).map(mapDeploymentJob);
+      FROM deployment_jobs ${userId === undefined ? '' : `WHERE ${jobVisibilitySql('deployment')}`}
+      ORDER BY created_at DESC, id DESC LIMIT ?
+    `, ...(userId === undefined ? [] : [userId, userId]), limit)).map(mapDeploymentJob);
+  }
+
+  public async assertAccess(id: string, userId: string): Promise<void> {
+    await assertJobAccess(this.database, 'deployment', id, userId, 'EXECUTE');
+    const user = await this.database.get<{ role: string }>('SELECT role FROM users WHERE id = ?', userId);
+    if (user === undefined || !['DEPLOYER', 'ADMIN'].includes(user.role)) {
+      throw new SfudError('APPROVAL_DENIED', '실제 배포 권한이 없습니다.');
+    }
+  }
+
+  public async assertAdministrator(userId: string): Promise<void> {
+    const user = await this.database.get<{ role: string; disabled_at: string | null }>(
+      'SELECT role, disabled_at FROM users WHERE id = ?', userId,
+    );
+    if (user?.role !== 'ADMIN' || user.disabled_at !== null) {
+      throw new SfudError('APPROVAL_DENIED', '관리자 권한이 필요합니다.');
+    }
   }
 
   private async notifyById(id: string): Promise<DeploymentJob> {

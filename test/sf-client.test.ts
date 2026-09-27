@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   extractSfFailureMessage,
@@ -42,6 +42,17 @@ describe('Salesforce CLI output sanitization', () => {
     );
   });
 
+  it('Git 제공자 token과 OAuth callback query 및 Basic/Bearer credential을 마스킹한다', () => {
+    for (const value of [
+      'Authorization: Bearer sensitive-secret', 'Authorization: Basic sensitive-secret',
+      '{"access_token":"sensitive-secret","refresh_token":"sensitive-secret","client_secret":"sensitive-secret"}',
+      'https://github.com/a/b?code=sensitive-secret&state=sensitive-secret',
+      'https://oauth2:sensitive-secret@gitlab.com/group/project.git',
+    ]) expect(redactSensitiveText(value)).not.toContain('sensitive-secret');
+    expect(sanitizeSfOutput({ client_secret: 'secret', authorization: 'Basic secret' }))
+      .toEqual({ client_secret: '[REDACTED]', authorization: '[REDACTED]' });
+  });
+
   it('Metadata API component failure의 실제 원인을 추출한다', () => {
     const stdout = JSON.stringify({
       status: 1,
@@ -68,6 +79,16 @@ describe('Salesforce CLI output sanitization', () => {
 });
 
 describe('Salesforce CLI process limits', () => {
+  it('Salesforce 자식 프로세스에 Git 토큰·키 파일·credential bridge 환경을 전달하지 않는다', async () => {
+    const keys = ['SFUD_GIT_TOKEN_SECRET', 'SFUD_GIT_TOKEN_KEY_FILE', 'SFUD_GITHUB_CLIENT_SECRET_FILE', 'GH_TOKEN', 'GIT_ASKPASS', 'SFUD_GIT_BRIDGE_NONCE'];
+    for (const key of keys) vi.stubEnv(key, 'secret-fixture');
+    const fixture = await createNodeScript(`process.stdout.write(JSON.stringify({ status: 0, result: ${JSON.stringify(keys)}.some(key => process.env[key] !== undefined) }));`);
+    try {
+      expect(await new ProcessSfClient(process.execPath).runJson([fixture.script], { cwd: fixture.root }))
+        .toEqual({ status: 0, result: false });
+    } finally { vi.unstubAllEnvs(); await rm(fixture.root, { recursive: true, force: true }); }
+  });
+
   it('완전한 JSON 출력이 제한을 넘으면 정해진 오류로 종료한다', async () => {
     const fixture = await createNodeScript(
       `process.stdout.write(JSON.stringify({ status: 0, result: { data: 'x'.repeat(4096) } }));`,

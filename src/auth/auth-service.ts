@@ -3,10 +3,10 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import type { DatabaseExecutor, DatabaseHandle } from '../storage/database-executor.js';
 import { runInImmediateTransaction } from '../storage/transaction.js';
 import type { SfudUser, UserRole } from '../storage/user-repository.js';
-import { hashPassword, verifyPassword } from './password.js';
+import { hashPassword, passwordNeedsRehash, verifyPassword } from './password.js';
 
 const SESSION_LIFETIME_MS = 12 * 60 * 60 * 1_000;
-const FAKE_PASSWORD_DIGEST = 'scrypt$16384$8$1$MDEyMzQ1Njc4OWFiY2RlZg$3kLAKUwMy10P1x8fQiqWLxWgFa9tsv8KlTl9KlfPvqrYXZJtdQlkUdILMGQeKsgQHUl_VJusZ4QGtE8zpdlzLA';
+const FAKE_PASSWORD_DIGEST = 'scrypt$32768$8$1$MDEyMzQ1Njc4OWFiY2RlZg$wGUWwaS40LZ42Q8Fd65JImtzS0kpUzu-NsMmfFuNRLp-LWzEA1CZwf9aInwgukUgIvSodWn3FkBzM3KLsysR3w';
 
 export interface AuthenticatedSession {
   user: SfudUser;
@@ -111,6 +111,13 @@ export class AuthService {
     if (!valid || row === undefined || row.disabled_at !== null) {
       throw new AuthError('INVALID_CREDENTIALS', '이메일 또는 비밀번호가 올바르지 않습니다.');
     }
+    if (passwordNeedsRehash(row.password_digest)) {
+      const replacement = await hashPassword(password);
+      await this.database.run(`
+        UPDATE password_credentials SET password_digest = ?, updated_at = ?
+        WHERE user_id = ? AND password_digest = ?
+      `, replacement, this.now().toISOString(), row.user_id, row.password_digest);
+    }
     return this.createSession(row.user_id);
   }
 
@@ -126,6 +133,7 @@ export class AuthService {
   public async sessionState(sessionToken: string | undefined): Promise<{
     user: SfudUser;
     csrfTokenHash: string;
+    sessionWorkspaceId: string;
     expiresAt: string;
   } | undefined> {
     if (sessionToken === undefined || sessionToken.length === 0) return undefined;
@@ -136,7 +144,7 @@ export class AuthService {
       || row.expires_at <= this.now().toISOString()
       || row.csrf_token_hash === null
     ) return undefined;
-    return { user: mapUser(row), csrfTokenHash: row.csrf_token_hash, expiresAt: row.expires_at };
+    return { user: mapUser(row), sessionWorkspaceId: row.session_id, csrfTokenHash: row.csrf_token_hash, expiresAt: row.expires_at };
   }
 
   public async revoke(sessionToken: string): Promise<void> {

@@ -17,6 +17,9 @@ export function renderTerminalReport(
   result: ComparisonResult,
   options: TerminalReportOptions = {},
 ): string {
+  if (result.comparisonLimit?.exceeded === true) {
+    return `Salesforce Source 목록 · 비교하지 않음\n${result.warnings.join('\n')}\n${result.components.map((entry) => `SOURCE ${entry.type} ${entry.fullName}`).join('\n')}\n`;
+  }
   const color = options.color ?? process.stdout.isTTY;
   const paint = createPainter(color);
   const lines = [

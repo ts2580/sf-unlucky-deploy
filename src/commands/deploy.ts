@@ -1,15 +1,17 @@
+import type { JobSourceSnapshot } from '../sources/source-provenance.js';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { SfudError } from '../core/errors.js';
 import { salesforceWaitCommandTimeoutMs } from '../core/deadline.js';
-import { sha256Directory, writeJson } from '../core/files.js';
+import { sha256DirectoryV2, writeJson } from '../core/files.js';
 import { withRequestWorkspace } from '../core/request-workspace.js';
 import {
   selectApexTestPlan,
   type ApexTestPlan,
   type RequestedTestLevel,
 } from '../deploy/test-plan.js';
-import { requireMinimumApexCoverage } from '../deploy/test-coverage.js';
+import { payloadApexCoverageInventory, requireMinimumApexCoverage } from '../deploy/test-coverage.js';
 import { compareSnapshots, type ComparisonResult } from '../metadata/comparator.js';
 import { generateDeployableManifest } from '../metadata/deployable-manifest.js';
 import { renderTerminalReport } from '../reports/terminal.js';
@@ -28,6 +30,7 @@ import { createSnapshot } from '../sources/snapshot.js';
 import { createRunContext, writeRunMetadata } from './run-context.js';
 
 export interface DeployCommandOptions {
+  maximumComparisonFiles?: number;
   from: string;
   to: string;
   manifest?: string;
@@ -48,11 +51,14 @@ export interface DeployCommandOptions {
 }
 
 export interface DeployCommandDependencies {
+  sourceSnapshot?: JobSourceSnapshot;
   cwd?: string;
   sfClient?: SfClient;
   stdout?: (value: string) => void;
   requestWorkspacePath?: string;
-  beforeDeploymentSubmit?: (phase: 'DRY_RUN' | 'DEPLOY') => Promise<void> | void;
+  beforeDeploymentSubmit?: (phase: 'DRY_RUN' | 'DEPLOY', payload: {
+    payloadChecksum: string; runDirectory: string;
+  }) => Promise<void> | void;
   onDeploymentSubmitted?: (deploymentId: string, phase: 'DRY_RUN' | 'DEPLOY') => Promise<void> | void;
   onDeploymentProgress?: (progress: SalesforceDeploymentProgress) => Promise<void> | void;
   onDeploymentPersistenceError?: (
@@ -66,6 +72,7 @@ export interface DeployCommandDependencies {
 export interface DeployCommandResult {
   comparison: ComparisonResult;
   payloadSha256: string;
+  payloadDigestVersion: 2;
   reports: ReportPaths;
   runDirectory: string;
   dryRunResult?: unknown;
@@ -107,7 +114,7 @@ export async function runDeployCommand(
   const manifestPath = generatedManifest?.manifestPath
     ?? path.resolve(cwd, options.manifest ?? 'manifest/package.xml');
   const sourceManifests = generatedManifest?.sourceManifests;
-  await writeRunMetadata(context, 'deploy', targetSource, source.displayName, manifestPath);
+  await writeRunMetadata(context, 'deploy', targetSource, source.displayName, manifestPath, dependencies.sourceSnapshot);
 
   const [targetSnapshot, sourceSnapshot] = await Promise.all([
     createSnapshot({
@@ -127,6 +134,7 @@ export async function runDeployCommand(
     }),
     createSnapshot({
       source,
+      ...(dependencies.sourceSnapshot?.source?.provenance === undefined ? {} : { provenance: dependencies.sourceSnapshot.source.provenance }),
       manifestPath,
       ...(sourceManifests === undefined ? {} : {
         retrievalManifestPath: sourceManifests[1]!.manifestPath,
@@ -143,27 +151,18 @@ export async function runDeployCommand(
   ]);
 
   const comparison = await compareSnapshots(targetSnapshot, sourceSnapshot, {
+    ...(options.maximumComparisonFiles === undefined ? {} : { maximumFiles: options.maximumComparisonFiles }),
     strict: options.strict ?? false,
+    ...(options.metadataType === undefined ? {} : { metadataType: options.metadataType }),
   });
   if (comparison.summary.removed > 0) {
     comparison.warnings.push(
       'TARGET ONLY는 target에만 존재하는 차이이며 destructive manifest 없이는 실제로 삭제되지 않습니다.',
     );
   }
-  const deploymentSnapshot = generatedManifest === undefined
-    ? sourceSnapshot
-    : await createSnapshot({
-      source,
-      manifestPath: generatedManifest.sourceManifests[1]!.manifestPath,
-      outputDir: path.join(context.rootDirectory, 'deploy-payload'),
-      commandProjectPath,
-      sfClient,
-      waitMinutes: options.wait ?? 60,
-      commandTimeoutMs: snapshotCommandTimeoutMs,
-      ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
-      metadataTypes: generatedManifest.metadataTypes,
-      ...(generatedManifest.sourceManifests[1]!.empty ? { empty: true } : {}),
-    });
+  // generated manifest의 source-only retrieval 결과가 이미 sourceSnapshot에 고정되어 있다.
+  // 여기서 다시 retrieve하면 비교한 본문과 제출 본문이 달라질 수 있다.
+  const deploymentSnapshot = sourceSnapshot;
   const testPlan = await selectApexTestPlan(
     deploymentSnapshot.packageRoot,
     options.testLevel ?? 'auto',
@@ -187,6 +186,9 @@ export async function runDeployCommand(
 
   await assertPayloadUnchanged(deploymentSnapshot.packageRoot, deploymentSnapshot.payloadSha256);
   const deployArgs = buildDeployArgs(deploymentSnapshot.packageRoot, targetAlias, testPlan);
+  const coverageInventory = options.minimumCoverage === undefined
+    ? undefined
+    : payloadApexCoverageInventory(await readFile(manifestPath, 'utf8'), testPlan.tests);
   const payloadEmpty = generatedManifest?.sourceManifests[1]?.empty === true;
   const persistenceWarnings: string[] = [];
   const dryRunResult = options.skipDryRun === true
@@ -200,7 +202,9 @@ export async function runDeployCommand(
         commandProjectPath,
         options.wait,
         'DRY_RUN',
-        dependencies.beforeDeploymentSubmit,
+        async (phase) => { await dependencies.beforeDeploymentSubmit?.(phase, {
+          payloadChecksum: deploymentSnapshot.payloadSha256, runDirectory: context.rootDirectory,
+        }); },
         dependencies.onDeploymentSubmitted,
         dependencies.onDeploymentProgress,
         dependencies.onDeploymentPersistenceError,
@@ -214,7 +218,12 @@ export async function runDeployCommand(
     }
   }
   if (options.minimumCoverage !== undefined) {
-    requireMinimumApexCoverage(dryRunResult, options.minimumCoverage);
+    // This is an app policy layered over Salesforce validation. Restrict it to
+    // explicitly selected payload members so unrelated org coverage cannot block.
+    // Wildcard manifests have no exact local inventory and rely on Salesforce.
+    if (coverageInventory !== undefined && coverageInventory.length > 0) {
+      requireMinimumApexCoverage(dryRunResult, options.minimumCoverage, coverageInventory);
+    }
   }
 
   let deployResult: unknown;
@@ -229,7 +238,9 @@ export async function runDeployCommand(
         commandProjectPath,
         options.wait,
         'DEPLOY',
-        dependencies.beforeDeploymentSubmit,
+        async (phase) => { await dependencies.beforeDeploymentSubmit?.(phase, {
+          payloadChecksum: deploymentSnapshot.payloadSha256, runDirectory: context.rootDirectory,
+        }); },
         dependencies.onDeploymentSubmitted,
         dependencies.onDeploymentProgress,
         dependencies.onDeploymentPersistenceError,
@@ -245,6 +256,7 @@ export async function runDeployCommand(
   const result: DeployCommandResult = {
     comparison,
     payloadSha256: deploymentSnapshot.payloadSha256,
+    payloadDigestVersion: 2,
     reports,
     runDirectory: context.rootDirectory,
     ...(dryRunResult === undefined ? {} : { dryRunResult }),
@@ -364,7 +376,7 @@ function validateDeployOptions(options: DeployCommandOptions): void {
 }
 
 async function assertPayloadUnchanged(packageRoot: string, expectedSha256: string): Promise<void> {
-  const actualSha256 = await sha256Directory(packageRoot);
+  const actualSha256 = await sha256DirectoryV2(packageRoot);
   if (actualSha256 !== expectedSha256) {
     throw new SfudError(
       'PAYLOAD_CHANGED',

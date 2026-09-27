@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import { AuthError } from '../../auth/auth-service.js';
+import { MAX_PASSWORD_LENGTH } from '../../auth/password.js';
 import type { SfudUser } from '../../storage/user-repository.js';
 import type { UserRole } from '../../storage/user-repository.js';
 import type {
@@ -38,6 +40,7 @@ export async function registerAuthRoutes(
   const ipLimiter = new FailedAttemptLimiter(5, 15 * 60 * 1_000);
   const accountLimiter = new FailedAttemptLimiter(5, 30 * 60 * 1_000);
   const bootstrapLimiter = new FailedAttemptLimiter(5, 30 * 60 * 1_000);
+  const passwordSlots = new PasswordExecutionLimiter(5);
 
   app.get('/api/v1/auth/status', async (request): Promise<AuthStatusResponse> => {
     const user = await app.sfudRuntime.auth.authenticate(readCookie(request, SESSION_COOKIE));
@@ -52,8 +55,14 @@ export async function registerAuthRoutes(
     if (!hasAllowedOrigin(request, options.publicOrigin)) {
       return sendError(reply, 403, 'ORIGIN_DENIED', '허용되지 않은 요청 출처입니다.');
     }
-    if (!bootstrapLimiter.allowed(request.ip)) {
+    const attempt = bootstrapLimiter.reserve(request.ip);
+    if (attempt === undefined) {
       return sendError(reply, 429, 'TOO_MANY_ATTEMPTS', '초기 설정 시도가 너무 많습니다. 잠시 후 다시 시도하세요.');
+    }
+    const releaseSlot = passwordSlots.reserve();
+    if (releaseSlot === undefined) {
+      attempt.cancel();
+      return sendError(reply, 429, 'TOO_MANY_ATTEMPTS', '인증 처리량이 가득 찼습니다. 잠시 후 다시 시도하세요.');
     }
     try {
       const session = await app.sfudRuntime.auth.bootstrapAdmin({
@@ -62,11 +71,14 @@ export async function registerAuthRoutes(
         displayName: requiredString(request.body?.displayName, '표시 이름'),
         password: requiredString(request.body?.password, '비밀번호'),
       });
+      attempt.succeed();
       setAuthCookies(request, reply, session.sessionToken, session.csrfToken);
       return reply.code(201).send(toSessionResponse(session));
     } catch (error) {
-      bootstrapLimiter.recordFailure(request.ip);
+      attempt.fail();
       return sendAuthError(reply, error);
+    } finally {
+      releaseSlot();
     }
   });
 
@@ -76,21 +88,40 @@ export async function registerAuthRoutes(
     }
     const email = typeof request.body?.email === 'string' ? request.body.email : '';
     const accountKey = email.trim().toLowerCase().slice(0, 254);
-    if (!ipLimiter.allowed(request.ip) || !accountLimiter.allowed(accountKey)) {
+    const ipAttempt = ipLimiter.reserve(request.ip);
+    if (ipAttempt === undefined) {
       return sendError(reply, 429, 'TOO_MANY_ATTEMPTS', '로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요.');
     }
+    const accountAttempt = accountLimiter.reserve(accountKey);
+    if (accountAttempt === undefined) {
+      ipAttempt.cancel();
+      return sendError(reply, 429, 'TOO_MANY_ATTEMPTS', '로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요.');
+    }
+    const releaseSlot = passwordSlots.reserve();
+    if (releaseSlot === undefined) {
+      accountAttempt.cancel();
+      ipAttempt.cancel();
+      return sendError(reply, 429, 'TOO_MANY_ATTEMPTS', '인증 처리량이 가득 찼습니다. 잠시 후 다시 시도하세요.');
+    }
     try {
+      const requestPassword = requiredString(request.body?.password, '비밀번호');
+      if (requestPassword.length > MAX_PASSWORD_LENGTH) {
+        throw new AuthError('INVALID_CREDENTIALS', '이메일 또는 비밀번호가 올바르지 않습니다.');
+      }
       const session = await app.sfudRuntime.auth.login(
         requiredString(email, '이메일'),
-        requiredString(request.body?.password, '비밀번호'),
+        requestPassword,
       );
-      accountLimiter.clear(accountKey);
+      ipAttempt.succeed();
+      accountAttempt.succeed();
       setAuthCookies(request, reply, session.sessionToken, session.csrfToken);
       return reply.send(toSessionResponse(session));
     } catch (error) {
-      ipLimiter.recordFailure(request.ip);
-      accountLimiter.recordFailure(accountKey);
+      ipAttempt.fail();
+      accountAttempt.fail();
       return sendAuthError(reply, error);
+    } finally {
+      releaseSlot();
     }
   });
 
@@ -109,7 +140,7 @@ export async function requireAuthenticatedSession(
   request: FastifyRequest,
   reply: FastifyReply,
   options: { csrf?: boolean; roles?: UserRole[] } = {},
-): Promise<{ user: SfudUser } | undefined> {
+): Promise<{ user: SfudUser; sessionWorkspaceId: string } | undefined> {
   if (options.csrf === true && !hasAllowedOrigin(request, configuredPublicOrigins.get(app))) {
     sendError(reply, 403, 'ORIGIN_DENIED', '허용되지 않은 요청 출처입니다.');
     return undefined;
@@ -127,7 +158,11 @@ export async function requireAuthenticatedSession(
     sendError(reply, 403, 'AUTHORIZATION_DENIED', '이 작업을 실행할 권한이 없습니다.');
     return undefined;
   }
-  return { user: state.user };
+  return { user: state.user, sessionWorkspaceId: state.sessionWorkspaceId };
+}
+
+export async function isRequestSessionActive(app: FastifyInstance, request: FastifyRequest): Promise<boolean> {
+  return await app.sfudRuntime.auth.sessionState(readCookie(request, SESSION_COOKIE)) !== undefined;
 }
 
 function setAuthCookies(
@@ -218,7 +253,7 @@ function sendError(reply: FastifyReply, status: number, code: string, message: s
 }
 
 class FailedAttemptLimiter {
-  private readonly entries = new Map<string, { count: number; resetAt: number }>();
+  private readonly entries = new Map<string, FailedAttemptEntry>();
   private static readonly MAX_ENTRIES = 10_000;
 
   public constructor(
@@ -226,29 +261,77 @@ class FailedAttemptLimiter {
     private readonly windowMs: number,
   ) {}
 
-  public allowed(key: string, now = Date.now()): boolean {
+  public reserve(key: string, now = Date.now()): FailedAttemptReservation | undefined {
     this.pruneExpired(now);
-    const entry = this.entries.get(key);
-    if (entry !== undefined) return entry.count < this.maximumAttempts;
-    return this.entries.size < FailedAttemptLimiter.MAX_ENTRIES;
-  }
+    let entry = this.entries.get(key);
+    if (entry === undefined) {
+      if (this.entries.size >= FailedAttemptLimiter.MAX_ENTRIES) return undefined;
+      entry = { failures: [], reservations: new Map() };
+      this.entries.set(key, entry);
+    }
+    const activeFailures = entry.failures.filter((expiresAt) => expiresAt > now).length;
+    const activeReservations = [...entry.reservations.values()]
+      .filter((reservation) => reservation.reservedUntil > now).length;
+    if (activeFailures + activeReservations >= this.maximumAttempts) return undefined;
 
-  public recordFailure(key: string, now = Date.now()): void {
-    this.pruneExpired(now);
-    const entry = this.entries.get(key);
-    if (entry === undefined && this.entries.size >= FailedAttemptLimiter.MAX_ENTRIES) return;
-    this.entries.set(key, entry === undefined
-      ? { count: 1, resetAt: now + this.windowMs }
-      : { ...entry, count: entry.count + 1 });
-  }
-
-  public clear(key: string): void {
-    this.entries.delete(key);
+    const reservation = { id: randomUUID(), reservedUntil: now + this.windowMs };
+    entry.reservations.set(reservation.id, reservation);
+    return new FailedAttemptReservation(this, key, reservation.id);
   }
 
   private pruneExpired(now: number): void {
     for (const [key, entry] of this.entries) {
-      if (entry.resetAt <= now) this.entries.delete(key);
+      entry.failures = entry.failures.filter((expiresAt) => expiresAt > now);
+      if (entry.failures.length === 0 && entry.reservations.size === 0) this.entries.delete(key);
     }
+  }
+
+  public finish(key: string, reservationId: string, failed: boolean, now = Date.now()): void {
+    const entry = this.entries.get(key);
+    if (entry === undefined || !entry.reservations.delete(reservationId)) return;
+    if (failed) entry.failures.push(now + this.windowMs);
+    this.pruneExpired(now);
+  }
+}
+
+interface FailedAttemptEntry {
+  failures: number[];
+  reservations: Map<string, { id: string; reservedUntil: number }>;
+}
+
+class FailedAttemptReservation {
+  private finished = false;
+
+  public constructor(
+    private readonly limiter: FailedAttemptLimiter,
+    private readonly key: string,
+    private readonly id: string,
+  ) {}
+
+  public succeed(): void { this.finish(false); }
+  public fail(): void { this.finish(true); }
+  public cancel(): void { this.finish(false); }
+
+  private finish(failed: boolean): void {
+    if (this.finished) return;
+    this.finished = true;
+    this.limiter.finish(this.key, this.id, failed);
+  }
+}
+
+class PasswordExecutionLimiter {
+  private active = 0;
+
+  public constructor(private readonly maximum: number) {}
+
+  public reserve(): (() => void) | undefined {
+    if (this.active >= this.maximum) return undefined;
+    this.active += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.active -= 1;
+    };
   }
 }

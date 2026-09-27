@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 
-import { requireAuthenticatedSession } from './auth-routes.js';
+import { isRequestSessionActive, requireAuthenticatedSession } from './auth-routes.js';
 
 export type WorkflowResource = 'comparison' | 'deployment';
 
@@ -56,18 +56,37 @@ export async function registerWorkflowEventRoutes(app: FastifyInstance): Promise
     });
     reply.raw.write('event: ready\ndata: {"connected":true}\n\n');
 
-    const unsubscribe = app.sfudRuntime.workflowEvents.subscribe((event) => {
-      if (reply.raw.destroyed) return;
-      reply.raw.write(`id: ${event.id}\nevent: workflow\ndata: ${JSON.stringify(event)}\n\n`);
-    });
-    const heartbeat = setInterval(() => {
-      if (!reply.raw.destroyed) reply.raw.write(': heartbeat\n\n');
-    }, 15_000);
-    heartbeat.unref();
-
-    request.raw.once('close', () => {
+    let pending = Promise.resolve();
+    let pendingCount = 0;
+    let sequence = 0;
+    let closed = false;
+    const finish = () => {
+      if (closed) return;
+      closed = true;
       clearInterval(heartbeat);
       unsubscribe();
+      reply.raw.end();
+    };
+    const unsubscribe = app.sfudRuntime.workflowEvents.subscribe((event) => {
+      if (closed || reply.raw.destroyed) return;
+      // Bound pending authorization checks for slow clients; preserve event order.
+      if (++pendingCount > 100) { finish(); return; }
+      pending = pending.then(async () => {
+        if (closed) return;
+        if (!await isRequestSessionActive(app, request)) { finish(); return; }
+        if (!await app.sfudRuntime.jobAccess.canAccess(event.resource, event.jobId, session.user.id)) return;
+        if (closed || reply.raw.destroyed) return;
+        const visible = { ...event, id: ++sequence };
+        if (!reply.raw.write(`id: ${visible.id}\nevent: workflow\ndata: ${JSON.stringify(visible)}\n\n`)) finish();
+      }).catch(finish).finally(() => { pendingCount -= 1; });
     });
+    const heartbeat = setInterval(() => {
+      void isRequestSessionActive(app, request).then((active) => {
+        if (!active) finish();
+        else if (!closed && !reply.raw.destroyed && !reply.raw.write(': heartbeat\n\n')) finish();
+      }).catch(finish);
+    }, 15_000);
+    heartbeat.unref();
+    request.raw.once('close', finish);
   });
 }

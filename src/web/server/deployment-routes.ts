@@ -3,11 +3,13 @@ import type { FastifyInstance } from 'fastify';
 import {
   CreateDirectDeploymentRequestSchema,
   CreateDryRunRequestSchema,
+  BindDeploymentAttemptRequestSchema,
   DeploymentJobListResponseSchema,
   DeploymentJobResponseSchema,
   ExecuteDeploymentRequestSchema,
   type CreateDirectDeploymentRequest,
   type CreateDryRunRequest,
+  type BindDeploymentAttemptRequest,
   type ExecuteDeploymentRequest,
 } from '../../api/deployment-contracts.js';
 import { SfudError } from '../../core/errors.js';
@@ -60,8 +62,12 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
       return reply.code(202).send({ job: publicJob(app, job, false) });
     } catch (error) {
       const conflict = error instanceof SfudError && error.code === 'IDEMPOTENCY_CONFLICT';
-      return reply.code(conflict ? 409 : 400).send({ error: {
-        code: conflict ? 'IDEMPOTENCY_CONFLICT' : 'INVALID_DRY_RUN_REQUEST',
+      const userLimited = error instanceof SfudError && error.code === 'REQUEST_USER_LIMIT';
+      const capacityExceeded = error instanceof SfudError && error.code === 'REQUEST_CAPACITY_EXCEEDED';
+      return reply.code(conflict ? 409 : userLimited ? 429 : capacityExceeded ? 503 : 400).send({ error: {
+        code: conflict ? 'IDEMPOTENCY_CONFLICT'
+          : userLimited ? 'REQUEST_USER_LIMIT'
+            : capacityExceeded ? 'REQUEST_CAPACITY_EXCEEDED' : 'INVALID_DRY_RUN_REQUEST',
         message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
       } });
     }
@@ -86,6 +92,9 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
       } });
     }
     try {
+      if (!await app.sfudRuntime.jobAccess.canAccess('deployment', request.body?.dryRunJobId ?? '', session.user.id, 'EXECUTE')) {
+        return reply.code(404).send({ error: { code: 'DEPLOYMENT_JOB_NOT_FOUND', message: '배포 작업을 찾을 수 없습니다.' } });
+      }
       const job = await app.sfudRuntime.deployments.approveAndExecute({
         dryRunJobId: requiredString(request.body?.dryRunJobId, 'dry-run 작업'),
         payloadChecksum: requiredString(request.body?.payloadChecksum, 'payload checksum'),
@@ -148,8 +157,12 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
       return reply.code(result.created ? 202 : 200).send({ job: publicJob(app, result.job, false) });
     } catch (error) {
       const conflict = error instanceof SfudError && error.code === 'IDEMPOTENCY_CONFLICT';
-      return reply.code(conflict ? 409 : 400).send({ error: {
-        code: conflict ? 'IDEMPOTENCY_CONFLICT' : 'DIRECT_DEPLOYMENT_DENIED',
+      const userLimited = error instanceof SfudError && error.code === 'REQUEST_USER_LIMIT';
+      const capacityExceeded = error instanceof SfudError && error.code === 'REQUEST_CAPACITY_EXCEEDED';
+      return reply.code(conflict ? 409 : userLimited ? 429 : capacityExceeded ? 503 : 400).send({ error: {
+        code: conflict ? 'IDEMPOTENCY_CONFLICT'
+          : userLimited ? 'REQUEST_USER_LIMIT'
+            : capacityExceeded ? 'REQUEST_CAPACITY_EXCEEDED' : 'DIRECT_DEPLOYMENT_DENIED',
         message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
       } });
     }
@@ -160,7 +173,7 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
   }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
-    const jobs = await app.sfudRuntime.deploymentJobs.listRecentSummary();
+    const jobs = await app.sfudRuntime.deploymentJobs.listRecentSummary(50, session.user.id);
     return reply.send({ jobs: jobs.map((job) => publicJob(app, job, false)) });
   });
 
@@ -169,6 +182,9 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
   }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
+    if (!await app.sfudRuntime.jobAccess.canAccess('deployment', request.params.id, session.user.id)) {
+      return reply.code(404).send({ error: { code: 'DEPLOYMENT_JOB_NOT_FOUND', message: '배포 작업을 찾을 수 없습니다.' } });
+    }
     const job = await app.sfudRuntime.deploymentJobs.getSummary(request.params.id);
     if (job === undefined) {
       return reply.code(404).send({ error: { code: 'DEPLOYMENT_JOB_NOT_FOUND', message: '배포 작업을 찾을 수 없습니다.' } });
@@ -181,6 +197,9 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
   }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
+    if (!await app.sfudRuntime.jobAccess.canAccess('deployment', request.params.id, session.user.id)) {
+      return reply.code(404).send({ error: { code: 'DEPLOYMENT_JOB_NOT_FOUND', message: '배포 작업을 찾을 수 없습니다.' } });
+    }
     const job = await app.sfudRuntime.deploymentJobs.get(request.params.id);
     if (job === undefined) {
       return reply.code(404).send({ error: { code: 'DEPLOYMENT_JOB_NOT_FOUND', message: '배포 작업을 찾을 수 없습니다.' } });
@@ -198,6 +217,9 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
       });
       if (session === undefined) return;
       try {
+        if (!await app.sfudRuntime.jobAccess.canAccess('deployment', request.params.id, session.user.id, 'EXECUTE')) {
+          return reply.code(404).send({ error: { code: 'DEPLOYMENT_JOB_NOT_FOUND', message: '배포 작업을 찾을 수 없습니다.' } });
+        }
         const job = await app.sfudRuntime.deployments.reconcile(request.params.id, session.user.id);
         return reply.send({ job: publicJob(app, job, true) });
       } catch (error) {
@@ -208,10 +230,51 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
       }
     },
   );
+
+  app.post<{ Params: { id: string }; Body: BindDeploymentAttemptRequest }>(
+    '/api/v1/deployment-jobs/:id/manual-reconcile',
+    {
+      attachValidation: true,
+      schema: {
+        body: BindDeploymentAttemptRequestSchema,
+        response: { 200: DeploymentJobResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const session = await requireAuthenticatedSession(app, request, reply, {
+        csrf: true,
+        roles: ['ADMIN'],
+      });
+      if (session === undefined) return;
+      if (request.validationError !== undefined) {
+        return reply.code(400).send({ error: {
+          code: 'MANUAL_RECONCILIATION_DENIED',
+          message: redactSensitiveText(request.validationError.message),
+        } });
+      }
+      try {
+        const body = request.body!;
+        const job = await app.sfudRuntime.deployments.bindUnknownAttemptAndReconcile({
+          jobId: request.params.id,
+          actorUserId: session.user.id,
+          deploymentId: body.deploymentId,
+          operation: body.operation,
+          observedAt: body.observedAt,
+          evidence: body.evidence.trim(),
+        });
+        return reply.send({ job: publicJob(app, job, true) });
+      } catch (error) {
+        return reply.code(400).send({ error: {
+          code: 'MANUAL_RECONCILIATION_DENIED',
+          message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
+        } });
+      }
+    },
+  );
 }
 
 function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: boolean) {
-  const source = app.sfudRuntime.workspace.publicSource(job.source);
+  const source = job.sourceSnapshot?.source ?? app.sfudRuntime.workspace.publicSource(job.source);
   const target = app.sfudRuntime.workspace.publicSource(`org:${job.targetAlias}`);
   const comparison = includeArtifacts && job.comparisonResult !== undefined ? {
     ...job.comparisonResult,
@@ -226,7 +289,7 @@ function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: b
     target,
     manifest: job.scope === 'ALL'
       ? job.metadataType ?? '전체 메타데이터'
-      : app.sfudRuntime.workspace.publicManifest(
+      : job.sourceSnapshot?.manifest ?? app.sfudRuntime.workspace.publicManifest(
         job.source.startsWith('local:') ? job.source.slice('local:'.length) : process.cwd(),
         job.manifestPath,
       ),
@@ -235,12 +298,18 @@ function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: b
     ...(job.selectedComponents === undefined ? {} : { components: job.selectedComponents }),
     prepared: job.prepared,
     ...(job.prepared ? { payloadChecksum: job.payloadChecksum } : {}),
+    ...(job.payloadDigestVersion === undefined ? {} : { payloadDigestVersion: job.payloadDigestVersion }),
     ...(job.salesforceDeploymentId === undefined ? {} : { salesforceDeploymentId: job.salesforceDeploymentId }),
     remoteStatus: job.remoteStatus,
+    ...(job.executionEvidence === undefined ? {} : { executionEvidence: job.executionEvidence }),
+    ...(job.executionMode === undefined ? {} : { executionMode: job.executionMode }),
+    ...(job.reusedValidationId === undefined ? {} : { reusedValidationId: job.reusedValidationId }),
+    ...(job.executionReason === undefined ? {} : { executionReason: job.executionReason }),
     ...(job.persistenceWarning === undefined ? {} : { persistenceWarning: job.persistenceWarning }),
     ...(job.progress === undefined ? {} : { progress: job.progress }),
     ...(job.testPlan === undefined ? {} : { testPlan: job.testPlan }),
     ...(job.testCoverage === undefined ? {} : { testCoverage: job.testCoverage }),
+    ...(job.comparisonLimit === undefined ? {} : { comparisonLimit: job.comparisonLimit }),
     ...(job.comparisonSummary === undefined ? {} : { comparisonSummary: job.comparisonSummary }),
     ...(comparison === undefined ? {} : { comparison }),
     ...(includeArtifacts && job.dryRunResult !== undefined ? { dryRunResult: job.dryRunResult } : {}),

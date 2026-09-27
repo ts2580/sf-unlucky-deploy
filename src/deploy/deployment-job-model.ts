@@ -1,3 +1,4 @@
+import type { JobSourceSnapshot } from '../sources/source-provenance.js';
 import type { ComparisonResult, ComparisonSummary } from '../metadata/comparator.js';
 import type { ApexTestPlan, RequestedTestLevel } from './test-plan.js';
 import type { SelectedMetadataComponent } from './selected-manifest.js';
@@ -17,12 +18,23 @@ export type DeploymentJobStatus =
   | 'QUEUED'
   | 'DRY_RUN_RUNNING'
   | 'APPROVAL_PENDING'
+  | 'VALIDATED_PENDING_EXECUTION'
   | 'DEPLOYING'
   | 'SUCCEEDED'
   | 'FAILED'
   | 'RECONCILE_REQUIRED';
+export type DeploymentExecutionEvidence =
+  | 'NOT_STARTED'
+  | 'ATTEMPT_TRACKED'
+  | 'LEGACY_NO_EXTERNAL_ID'
+  | 'LEGACY_VALIDATION_ONLY'
+  | 'LEGACY_EXECUTION_REPORT_UNVERIFIED'
+  | 'LEGACY_UNVERIFIED';
+export type DeploymentExecutionMode = 'QUICK_DEPLOY' | 'STANDARD_DEPLOY' | 'REVALIDATION_REQUIRED' | 'RECONCILE_REQUIRED';
 
 export interface DeploymentJob {
+  comparisonLimit?: NonNullable<ComparisonResult['comparisonLimit']>;
+  sourceSnapshot?: JobSourceSnapshot;
   id: string;
   kind: DeploymentJobKind;
   status: DeploymentJobStatus;
@@ -32,6 +44,7 @@ export interface DeploymentJob {
   scope: DeploymentScope;
   metadataType?: string;
   payloadChecksum: string;
+  payloadDigestVersion?: number;
   runDirectory?: string;
   salesforceDeploymentId?: string;
   dryRunJobId?: string;
@@ -59,9 +72,15 @@ export interface DeploymentJob {
   sourceOrgIdentity?: OrgIdentitySnapshot;
   targetOrgIdentity?: OrgIdentitySnapshot;
   artifactsExpired?: boolean;
+  executionEvidence?: DeploymentExecutionEvidence;
+  executionMode?: DeploymentExecutionMode;
+  reusedValidationId?: string;
+  executionReason?: string;
 }
 
 export interface CreateDryRunJobInput {
+  sourceSnapshot?: JobSourceSnapshot;
+  accessOwnerUserId?: string;
   source: string;
   targetAlias: string;
   manifestPath: string;
@@ -108,6 +127,8 @@ export interface TransitionDetails {
   errorMessage?: string;
   remoteStatus?: RemoteDeploymentStatus;
   persistenceWarning?: string;
+  attemptId?: string;
+  attemptVersion?: number;
 }
 
 export interface ApproveDeploymentInput {
@@ -119,6 +140,8 @@ export interface ApproveDeploymentInput {
 }
 
 export interface DeploymentJobRow {
+  comparison_limit_json?: string | null;
+  source_provenance_json?: string | null;
   id: string;
   kind: DeploymentJobKind;
   status: DeploymentJobStatus;
@@ -128,6 +151,7 @@ export interface DeploymentJobRow {
   scope: DeploymentScope;
   metadata_type: string | null;
   payload_checksum: string;
+  payload_digest_version?: number | null;
   run_directory: string | null;
   salesforce_deployment_id: string | null;
   dry_run_job_id: string | null;
@@ -159,6 +183,10 @@ export interface DeploymentJobRow {
   summary_total: number | null;
   summary_different: number | null;
   test_coverage: number | null;
+  execution_evidence?: DeploymentExecutionEvidence | null;
+  execution_mode?: DeploymentExecutionMode | null;
+  reused_validation_id?: string | null;
+  execution_reason?: string | null;
 }
 
 export function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
@@ -168,6 +196,7 @@ export function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
   const comparisonSummary = summaryFromRow(row) ?? comparisonResult?.summary;
   return {
     id: row.id,
+    ...(row.source_provenance_json == null ? {} : { sourceSnapshot: JSON.parse(row.source_provenance_json) as JobSourceSnapshot }),
     kind: row.kind,
     status: row.status,
     source: row.source,
@@ -176,6 +205,7 @@ export function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
     scope: row.scope,
     ...(row.metadata_type === null ? {} : { metadataType: row.metadata_type }),
     payloadChecksum: row.payload_checksum,
+    ...(row.payload_digest_version == null ? {} : { payloadDigestVersion: row.payload_digest_version }),
     ...(row.run_directory === null ? {} : { runDirectory: row.run_directory }),
     ...(row.salesforce_deployment_id === null
       ? {}
@@ -198,6 +228,7 @@ export function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
     ...(row.deployment_artifact_path == null
       ? {}
       : { deploymentArtifactPath: row.deployment_artifact_path }),
+    ...(row.comparison_limit_json == null ? {} : { comparisonLimit: JSON.parse(row.comparison_limit_json) as NonNullable<ComparisonResult['comparisonLimit']> }),
     ...(comparisonSummary === undefined ? {} : { comparisonSummary }),
     ...(row.test_coverage === null ? {} : { testCoverage: row.test_coverage }),
     ...(comparisonResult === undefined ? {} : { comparisonResult }),
@@ -220,6 +251,10 @@ export function mapDeploymentJob(row: DeploymentJobRow): DeploymentJob {
     ...(row.target_org_identity_json == null
       ? {}
       : { targetOrgIdentity: JSON.parse(row.target_org_identity_json) as OrgIdentitySnapshot }),
+    ...(row.execution_evidence == null ? {} : { executionEvidence: row.execution_evidence }),
+    ...(row.execution_mode == null ? {} : { executionMode: row.execution_mode }),
+    ...(row.reused_validation_id == null ? {} : { reusedValidationId: row.reused_validation_id }),
+    ...(row.execution_reason == null ? {} : { executionReason: row.execution_reason }),
   };
 }
 

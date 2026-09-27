@@ -1,5 +1,11 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { access, chmod, lstat, mkdir, mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
+import type { GitRegistrationService } from '../../git/git-registration-service.js';
+import { gitMetadataTypes } from '../../api/git-metadata-types.js';
+import { requireGitMetadataType } from '../../git/git-metadata-selection.js';
+import type { GitImportService } from '../../git/git-import-service.js';
+import { createHash } from 'node:crypto';
+import type { WorkspaceProject, WorkspaceSource } from '../../api/workspace-contracts.js';
+import { ManagedProjectService } from './managed-project-service.js';
+import { access, chmod, lstat, mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -9,13 +15,13 @@ import type { SfClient } from '../../salesforce/sf-client.js';
 import type { OrgIdentitySnapshot } from '../../deploy/org-identity.js';
 import { discoverLocalMetadataTypes, resolveLocalPackageDirectories } from '../../metadata/local-metadata.js';
 
-const UPLOAD_TTL_MS = 4 * 60 * 60 * 1_000;
-const DEFAULT_USER_UPLOAD_QUOTA_BYTES = 500 * 1024 * 1024;
-const DEFAULT_SERVER_UPLOAD_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
+const IMPORT_TTL_MS = 4 * 60 * 60 * 1_000;
+const DEFAULT_USER_IMPORT_QUOTA_BYTES = 500 * 1024 * 1024;
+const DEFAULT_SERVER_IMPORT_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
 
 export interface WorkspaceServiceOptions {
-  userUploadQuotaBytes?: number;
-  serverUploadQuotaBytes?: number;
+  userImportQuotaBytes?: number;
+  serverImportQuotaBytes?: number;
 }
 
 export interface WorkspaceOrg {
@@ -29,17 +35,7 @@ export interface WorkspaceOrg {
   instanceUrlHash?: string;
 }
 
-export interface WorkspaceProject {
-  id: string;
-  displayName: string;
-  manifests: string[];
-}
 
-export interface UploadedProject extends AllowedProject {
-  ownerUserId: string;
-  expiresAt: number;
-  sizeBytes: number;
-}
 
 export interface WorkspaceMetadataType {
   name: string;
@@ -61,24 +57,21 @@ interface RawOrg {
 }
 
 export class WorkspaceService {
+  public gitImports?: GitImportService;
+  public gitRegistrations?: GitRegistrationService;
   private orgCache: { expiresAt: number; value: WorkspaceOrg[] } | undefined;
   private orgRequest: Promise<WorkspaceOrg[]> | undefined;
   private readonly metadataTypeCache = new Map<string, { expiresAt: number; value: WorkspaceMetadataType[] }>();
   private readonly metadataTypeRequests = new Map<string, Promise<WorkspaceMetadataType[]>>();
   private readonly apexTestClassCache = new Map<string, { expiresAt: number; value: string[] }>();
   private readonly apexTestClassRequests = new Map<string, Promise<string[]>>();
-  private readonly uploadedProjects = new Map<string, UploadedProject>();
-  private readonly uploadExpirationTimers = new Map<string, NodeJS.Timeout>();
-  private readonly uploadPins = new Map<string, number>();
-  private readonly pendingUploads = new Map<string, { ownerUserId: string; sizeBytes: number }>();
 
   private constructor(
     private readonly sfClient: SfClient,
     private readonly projects: AllowedProject[],
     private readonly commandProject: AllowedProject,
-    private readonly uploadRoot: string,
-    private readonly userUploadQuotaBytes: number,
-    private readonly serverUploadQuotaBytes: number,
+    private readonly importRoot: string,
+    public readonly managedProjects: ManagedProjectService,
   ) {}
 
   public static async create(
@@ -100,135 +93,34 @@ export class WorkspaceService {
         manifests: await findManifests(projectPath),
       });
     }
-    await scavengeStaleUploadRoots();
-    const createdUploadRoot = await mkdtemp(path.join(os.tmpdir(), `sfud-uploads-${process.pid}-`));
-    await chmod(createdUploadRoot, 0o700);
-    const uploadRoot = await realpath(createdUploadRoot);
+    await scavengeStaleProjectRoots();
+    const createdImportRoot = await mkdtemp(path.join(os.tmpdir(), `sfud-imports-${process.pid}-`));
+    await chmod(createdImportRoot, 0o700);
+    const importRoot = await realpath(createdImportRoot);
     return new WorkspaceService(sfClient, projects, {
       id: 'command-workspace',
       displayName: 'sfud command workspace',
       realPath: commandProjectPath,
       manifests: [],
-    }, uploadRoot,
+    }, importRoot, new ManagedProjectService(importRoot,
     configuredQuota(
-      options.userUploadQuotaBytes,
-      process.env.SFUD_USER_UPLOAD_QUOTA_BYTES,
-      DEFAULT_USER_UPLOAD_QUOTA_BYTES,
+      options.userImportQuotaBytes,
+      process.env.SFUD_USER_IMPORT_QUOTA_BYTES ?? process.env.SFUD_USER_UPLOAD_QUOTA_BYTES,
+      DEFAULT_USER_IMPORT_QUOTA_BYTES,
     ),
     configuredQuota(
-      options.serverUploadQuotaBytes,
-      process.env.SFUD_SERVER_UPLOAD_QUOTA_BYTES,
-      DEFAULT_SERVER_UPLOAD_QUOTA_BYTES,
-    ));
+      options.serverImportQuotaBytes,
+      process.env.SFUD_SERVER_IMPORT_QUOTA_BYTES ?? process.env.SFUD_SERVER_UPLOAD_QUOTA_BYTES,
+      DEFAULT_SERVER_IMPORT_QUOTA_BYTES,
+    ), IMPORT_TTL_MS, 'Git 프로젝트'));
   }
 
   public listProjects(): WorkspaceProject[] {
     return this.projects.map(({ id, displayName, manifests }) => ({ id, displayName, manifests }));
   }
 
-  public listUploadedProjects(ownerUserId: string): WorkspaceProject[] {
-    this.removeExpiredUploads();
-    return [...this.uploadedProjects.values()]
-      .filter((project) => project.ownerUserId === ownerUserId)
-      .map(({ id, displayName, manifests }) => ({ id, displayName, manifests }))
-      .sort((left, right) => left.displayName.localeCompare(right.displayName));
-  }
-
-  public async beginProjectUpload(ownerUserId: string): Promise<{ id: string; directory: string }> {
-    const id = randomUUID();
-    const directory = path.join(this.uploadRoot, id);
-    await mkdir(directory, { mode: 0o700 });
-    this.pendingUploads.set(id, { ownerUserId, sizeBytes: 0 });
-    return { id, directory };
-  }
-
-  public recordProjectUploadBytes(id: string, bytes: number): void {
-    const upload = this.pendingUploads.get(id);
-    if (upload === undefined) throw new Error('진행 중인 업로드를 찾을 수 없습니다.');
-    const nextSize = upload.sizeBytes + bytes;
-    const completed = [...this.uploadedProjects.values()];
-    const pending = [...this.pendingUploads.entries()];
-    const userTotal = completed
-      .filter((project) => project.ownerUserId === upload.ownerUserId)
-      .reduce((total, project) => total + project.sizeBytes, 0)
-      + pending
-        .filter(([pendingId, entry]) => pendingId !== id && entry.ownerUserId === upload.ownerUserId)
-        .reduce((total, [, entry]) => total + entry.sizeBytes, 0)
-      + nextSize;
-    const serverTotal = completed.reduce((total, project) => total + project.sizeBytes, 0)
-      + pending
-        .filter(([pendingId]) => pendingId !== id)
-        .reduce((total, [, entry]) => total + entry.sizeBytes, 0)
-      + nextSize;
-    if (userTotal > this.userUploadQuotaBytes) {
-      throw new UploadQuotaError('사용자별 업로드 저장 공간 한도를 초과했습니다.');
-    }
-    if (serverTotal > this.serverUploadQuotaBytes) {
-      throw new UploadQuotaError('서버 전체 업로드 저장 공간 한도를 초과했습니다.');
-    }
-    upload.sizeBytes = nextSize;
-  }
-
-  public async completeProjectUpload(
-    id: string,
-    ownerUserId: string,
-    requestedLabel?: string,
-  ): Promise<UploadedProject> {
-    assertUploadId(id);
-    const pending = this.pendingUploads.get(id);
-    if (pending === undefined || pending.ownerUserId !== ownerUserId) {
-      throw new Error('진행 중인 업로드를 찾을 수 없습니다.');
-    }
-    const directory = path.join(this.uploadRoot, id);
-    const configurationPaths = (await readdir(directory, { recursive: true, withFileTypes: true }))
-      .filter((entry) => entry.isFile() && entry.name === 'sfdx-project.json')
-      .map((entry) => path.join(entry.parentPath, entry.name));
-    if (configurationPaths.length !== 1) {
-      throw new Error('업로드에는 하나의 sfdx-project.json이 필요합니다.');
-    }
-    const projectPath = await realpath(path.dirname(configurationPaths[0]!));
-    if (!isInside(this.uploadRoot, projectPath)) throw new Error('업로드 프로젝트 경로가 올바르지 않습니다.');
-    await validatePackageDirectories(projectPath, configurationPaths[0]!);
-    const label = normalizeUploadLabel(requestedLabel) ?? path.basename(projectPath);
-    const project: UploadedProject = {
-      id,
-      displayName: label,
-      realPath: projectPath,
-      manifests: await findManifests(projectPath),
-      ownerUserId,
-      expiresAt: Date.now() + UPLOAD_TTL_MS,
-      sizeBytes: pending.sizeBytes,
-    };
-    this.pendingUploads.delete(id);
-    this.uploadedProjects.set(id, project);
-    this.scheduleUploadExpiration(project);
-    return project;
-  }
-
-  public async discardProjectUpload(id: string, ownerUserId?: string): Promise<void> {
-    assertUploadId(id);
-    const project = this.uploadedProjects.get(id);
-    if (ownerUserId !== undefined && (project === undefined || project.ownerUserId !== ownerUserId)) {
-      throw new Error('사용할 수 없는 업로드 프로젝트입니다.');
-    }
-    if ((this.uploadPins.get(id) ?? 0) > 0) {
-      throw new Error('작업에서 사용 중인 업로드 프로젝트는 제거할 수 없습니다.');
-    }
-    const timer = this.uploadExpirationTimers.get(id);
-    if (timer !== undefined) clearTimeout(timer);
-    this.uploadExpirationTimers.delete(id);
-    this.pendingUploads.delete(id);
-    this.uploadedProjects.delete(id);
-    await rm(path.join(this.uploadRoot, id), { recursive: true, force: true });
-  }
-
   public async close(): Promise<void> {
-    for (const timer of this.uploadExpirationTimers.values()) clearTimeout(timer);
-    this.uploadExpirationTimers.clear();
-    this.uploadPins.clear();
-    this.pendingUploads.clear();
-    this.uploadedProjects.clear();
-    await rm(this.uploadRoot, { recursive: true, force: true });
+    await this.managedProjects.close();
   }
 
   public async listOrgs(): Promise<WorkspaceOrg[]> {
@@ -263,7 +155,12 @@ export class WorkspaceService {
     sourceIds: readonly string[],
     ownerUserId?: string,
   ): Promise<WorkspaceMetadataType[]> {
-    const resolvedSources = await Promise.all(sourceIds.map((sourceId) =>
+    const registered = sourceIds.filter((id) => id.startsWith('git-registered:'));
+    for (const id of registered) {
+      if (ownerUserId === undefined || this.gitRegistrations === undefined) throw new Error('등록 브랜치를 사용할 수 없습니다.');
+      await this.gitRegistrations.get(id.slice('git-registered:'.length), ownerUserId);
+    }
+    const resolvedSources = await Promise.all(sourceIds.filter((id) => !id.startsWith('git-registered:')).map((sourceId) =>
       this.resolveSource(sourceId, ownerUserId)));
     const aliases = [...new Set(resolvedSources.flatMap((source) =>
       source.startsWith('org:') ? [source.slice('org:'.length)] : []))];
@@ -279,7 +176,17 @@ export class WorkspaceService {
         }))),
     ]);
     const unique = new Map<string, WorkspaceMetadataType>();
+    if (registered.length > 0) for (const type of gitMetadataTypes) unique.set(type.name, { name: type.name, directoryName: type.directoryName });
     for (const value of values.flat()) unique.set(value.name, value);
+    // An explicitly fetched type remains a valid (possibly empty) source. This
+    // permits meaningful comparisons against components only present in target.
+    for (const source of resolvedSources) {
+      const name = this.publicSource(source).provenance?.metadataType;
+      if (name !== undefined) {
+        const type = requireGitMetadataType(name);
+        unique.set(name, { name, directoryName: type.directoryName });
+      }
+    }
     return [...unique.values()].sort((left, right) => left.name.localeCompare(right.name));
   }
 
@@ -390,7 +297,11 @@ export class WorkspaceService {
     return value;
   }
 
-  public async resolveProject(projectId: string): Promise<AllowedProject> {
+  public async resolveProject(projectId: string, ownerUserId?: string): Promise<AllowedProject> {
+    if (projectId.startsWith('git:')) {
+      if (this.gitImports === undefined) throw new Error('Git 프로젝트를 사용할 수 없습니다.');
+      return this.gitImports.resolve(projectId.slice(4), ownerUserId);
+    }
     const project = this.projects.find((candidate) => candidate.id === projectId);
     if (project === undefined) throw new Error('허용되지 않은 Salesforce DX 프로젝트입니다.');
     return project;
@@ -404,7 +315,7 @@ export class WorkspaceService {
     for (const source of sources) {
       if (!source.startsWith('local:')) continue;
       const localPath = source.slice('local:'.length);
-      const project = [...this.projects, ...this.uploadedProjects.values()]
+      const project = [...this.projects, ...this.managedProjects.list()]
         .find((candidate) => candidate.realPath === localPath);
       if (project !== undefined) return project;
     }
@@ -412,43 +323,13 @@ export class WorkspaceService {
   }
 
   public pinSources(sourceIds: readonly string[], ownerUserId: string): () => void {
-    const uploadIds = [...new Set(sourceIds.flatMap((sourceId) =>
-      sourceId.startsWith('upload:') ? [sourceId.slice('upload:'.length)] : []))];
-    for (const id of uploadIds) {
-      const project = this.uploadedProjects.get(id);
-      if (project === undefined || project.ownerUserId !== ownerUserId) {
-        throw new Error('사용할 수 없는 업로드 프로젝트입니다.');
-      }
-    }
-    for (const id of uploadIds) {
-      const timer = this.uploadExpirationTimers.get(id);
-      if (timer !== undefined) clearTimeout(timer);
-      this.uploadExpirationTimers.delete(id);
-      this.uploadPins.set(id, (this.uploadPins.get(id) ?? 0) + 1);
-    }
-
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      for (const id of uploadIds) {
-        const count = this.uploadPins.get(id) ?? 0;
-        if (count > 1) {
-          this.uploadPins.set(id, count - 1);
-          continue;
-        }
-        this.uploadPins.delete(id);
-        const project = this.uploadedProjects.get(id);
-        if (project !== undefined) {
-          project.expiresAt = Date.now() + UPLOAD_TTL_MS;
-          this.scheduleUploadExpiration(project);
-        }
-      }
-    };
+    const managedIds = sourceIds.flatMap((sourceId) =>
+      sourceId.startsWith('git:') ? [sourceId.slice(sourceId.indexOf(':') + 1)] : []);
+    return this.managedProjects.pin(managedIds, ownerUserId);
   }
 
-  public async resolveManifest(projectId: string, manifest: string): Promise<{ project: AllowedProject; path: string }> {
-    const project = await this.resolveProject(projectId);
+  public async resolveManifest(projectId: string, manifest: string, ownerUserId?: string): Promise<{ project: AllowedProject; path: string }> {
+    const project = await this.resolveProject(projectId, ownerUserId);
     if (!project.manifests.includes(manifest)) throw new Error('허용되지 않은 manifest입니다.');
     const manifestPath = await realpath(path.join(project.realPath, manifest));
     if (!isInside(project.realPath, manifestPath)) throw new Error('프로젝트 외부 manifest는 사용할 수 없습니다.');
@@ -460,15 +341,8 @@ export class WorkspaceService {
       const project = await this.resolveProject(sourceId.slice('project:'.length));
       return `local:${project.realPath}`;
     }
-    if (sourceId.startsWith('upload:')) {
-      this.removeExpiredUploads();
-      const id = sourceId.slice('upload:'.length);
-      const project = this.uploadedProjects.get(id);
-      if (project === undefined || ownerUserId === undefined || project.ownerUserId !== ownerUserId) {
-        throw new Error('사용할 수 없는 업로드 프로젝트입니다.');
-      }
-      project.expiresAt = Date.now() + UPLOAD_TTL_MS;
-      this.scheduleUploadExpiration(project);
+    if (sourceId.startsWith('git:')) {
+      const project = await this.resolveProject(sourceId, ownerUserId);
       return `local:${project.realPath}`;
     }
     if (sourceId.startsWith('org:')) {
@@ -482,67 +356,41 @@ export class WorkspaceService {
     throw new Error('지원하지 않는 비교 소스입니다.');
   }
 
-  public publicSource(source: string): { id: string; kind: 'org' | 'local'; label: string } {
+  public async resolveSourceSnapshot(sourceId: string, ownerUserId?: string): Promise<{ source: string; snapshot: WorkspaceSource }> {
+    const source = await this.resolveSource(sourceId, ownerUserId);
+    return { source, snapshot: structuredClone(this.publicSource(source)) };
+  }
+
+  public publicSource(source: string): WorkspaceSource {
     if (source.startsWith('org:')) {
       const alias = source.slice('org:'.length);
       return { id: source, kind: 'org', label: alias };
     }
     if (source.startsWith('local:')) {
       const realPath = source.slice('local:'.length);
+      const gitSource = this.gitImports?.sourceForPath(realPath);
+      if (gitSource !== undefined) return gitSource;
       const project = this.projects.find((candidate) => candidate.realPath === realPath);
       if (project !== undefined) {
         return { id: `project:${project.id}`, kind: 'local', label: project.displayName };
       }
-      const upload = [...this.uploadedProjects.values()].find((candidate) => candidate.realPath === realPath);
-      if (upload !== undefined) {
-        return { id: `upload:${upload.id}`, kind: 'local', label: upload.displayName };
-      }
-      if (isInside(this.uploadRoot, realPath) || isUploadStoragePath(realPath)) {
+      // Retain redacted labels for historical jobs after temporary storage expires.
+      if (isManagedStoragePath(realPath, 'uploads')) {
         return { id: 'upload:expired', kind: 'local', label: '만료된 업로드 프로젝트' };
+      }
+      if (isInside(this.importRoot, realPath) || isManagedStoragePath(realPath, 'imports')) {
+        return { id: 'git:expired', kind: 'local', label: '만료된 Git 프로젝트' };
       }
     }
     return { id: 'unknown', kind: 'local', label: '허용 목록 외 프로젝트' };
   }
 
   public publicManifest(projectPath: string, manifestPath: string): string {
-    const project = [...this.projects, ...this.uploadedProjects.values()].find((candidate) =>
+    const project = [...this.projects, ...this.managedProjects.list()].find((candidate) =>
       candidate.realPath === projectPath || isInside(candidate.realPath, manifestPath));
-    return project === undefined ? path.basename(manifestPath) : path.relative(project.realPath, manifestPath);
+    return portablePath(project === undefined ? path.basename(manifestPath) : path.relative(project.realPath, manifestPath));
   }
 
-  private removeExpiredUploads(): void {
-    const now = Date.now();
-    for (const [id, project] of this.uploadedProjects) {
-      if (project.expiresAt <= now && (this.uploadPins.get(id) ?? 0) === 0) {
-        void this.discardProjectUpload(id);
-      }
-    }
-  }
-
-  private scheduleUploadExpiration(project: UploadedProject): void {
-    const current = this.uploadExpirationTimers.get(project.id);
-    if (current !== undefined) clearTimeout(current);
-    if ((this.uploadPins.get(project.id) ?? 0) > 0) {
-      this.uploadExpirationTimers.delete(project.id);
-      return;
-    }
-    const timer = setTimeout(() => {
-      void this.discardProjectUpload(project.id).catch(() => undefined);
-    }, Math.max(0, project.expiresAt - Date.now()));
-    timer.unref();
-    this.uploadExpirationTimers.set(project.id, timer);
-  }
-}
-
-async function validatePackageDirectories(projectPath: string, configurationPath: string): Promise<void> {
-  const [configurationRealPath, expectedRealPath] = await Promise.all([
-    realpath(configurationPath),
-    realpath(path.join(projectPath, 'sfdx-project.json')),
-  ]);
-  if (!samePath(configurationRealPath, expectedRealPath)) {
-    throw new Error('sfdx-project.json 경로가 올바르지 않습니다.');
-  }
-  await resolveLocalPackageDirectories(projectPath);
 }
 
 async function listLocalApexTestClasses(projectPath: string): Promise<string[]> {
@@ -562,26 +410,13 @@ function normalizeApexClassCandidates(values: readonly string[]): string[] {
     /^[A-Za-z_][A-Za-z0-9_]*$/u.test(value)))].sort((left, right) => left.localeCompare(right));
 }
 
-function normalizeUploadLabel(value: string | undefined): string | undefined {
-  const label = value?.trim();
-  if (label === undefined || label.length === 0) return undefined;
-  if (label.length > 80 || /[\u0000-\u001f]/u.test(label)) throw new Error('업로드 프로젝트 이름이 올바르지 않습니다.');
-  return label;
-}
-
-function assertUploadId(id: string): void {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(id)) {
-    throw new Error('업로드 프로젝트 식별자가 올바르지 않습니다.');
-  }
-}
-
-export async function findManifests(projectPath: string): Promise<string[]> {
+async function findManifests(projectPath: string): Promise<string[]> {
   const manifestDirectory = path.join(projectPath, 'manifest');
   try {
     const entries = await readdir(manifestDirectory, { recursive: true, withFileTypes: true });
     return entries
       .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.xml'))
-      .map((entry) => path.relative(projectPath, path.join(entry.parentPath, entry.name)))
+      .map((entry) => portablePath(path.relative(projectPath, path.join(entry.parentPath, entry.name))))
       .sort((left, right) => left.localeCompare(right));
   } catch (error) {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return [];
@@ -589,13 +424,13 @@ export async function findManifests(projectPath: string): Promise<string[]> {
   }
 }
 
-export async function scavengeStaleUploadRoots(
+export async function scavengeStaleProjectRoots(
   temporaryDirectory = os.tmpdir(),
   now = Date.now(),
 ): Promise<number> {
   let removed = 0;
   for (const entry of await readdir(temporaryDirectory, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.isSymbolicLink() || !/^sfud-uploads-(?:\d+-)?[A-Za-z0-9_-]+$/u.test(entry.name)) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !/^sfud-(?:imports|uploads)-(?:\d+-)?[A-Za-z0-9_-]+$/u.test(entry.name)) {
       continue;
     }
     const candidate = path.join(temporaryDirectory, entry.name);
@@ -604,10 +439,10 @@ export async function scavengeStaleUploadRoots(
       if (!candidateStat.isDirectory()
         || (process.platform !== 'win32' && (candidateStat.mode & 0o777) !== 0o700)
         || (typeof process.getuid === 'function' && candidateStat.uid !== process.getuid())
-        || now - candidateStat.mtimeMs <= UPLOAD_TTL_MS) {
+        || now - candidateStat.mtimeMs <= IMPORT_TTL_MS) {
         continue;
       }
-      const pid = Number(entry.name.match(/^sfud-uploads-(\d+)-/u)?.[1]);
+      const pid = Number(entry.name.match(/^sfud-(?:imports|uploads)-(\d+)-/u)?.[1]);
       if (Number.isInteger(pid) && pid > 0 && processExists(pid)) continue;
       const resolved = await realpath(candidate);
       if (path.dirname(resolved) !== await realpath(temporaryDirectory)) continue;
@@ -625,16 +460,14 @@ function isInside(parent: string, child: string): boolean {
   return relative.length > 0 && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
 }
 
-function samePath(left: string, right: string): boolean {
-  return process.platform === 'win32'
-    ? left.toLowerCase() === right.toLowerCase()
-    : left === right;
+function portablePath(value: string): string {
+  return value.split(path.sep).join('/');
 }
 
-function isUploadStoragePath(candidate: string): boolean {
+function isManagedStoragePath(candidate: string, kind: 'imports' | 'uploads'): boolean {
   const relative = path.relative(os.tmpdir(), candidate);
   if (relative.startsWith(`..${path.sep}`) || relative === '..' || path.isAbsolute(relative)) return false;
-  return relative.split(path.sep)[0]?.startsWith('sfud-uploads-') === true;
+  return relative.split(path.sep)[0]?.startsWith(`sfud-${kind}-`) === true;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -665,15 +498,8 @@ function processExists(pid: number): boolean {
 
 function configuredQuota(value: number | undefined, environmentValue: string | undefined, fallback: number): number {
   const quota = value ?? (environmentValue === undefined ? fallback : Number(environmentValue));
-  if (!Number.isSafeInteger(quota) || quota < 1) throw new Error('업로드 quota는 1 이상의 정수여야 합니다.');
+  if (!Number.isSafeInteger(quota) || quota < 1) throw new Error('Git 가져오기 quota는 1 이상의 정수여야 합니다.');
   return quota;
-}
-
-export class UploadQuotaError extends Error {
-  public constructor(message: string) {
-    super(message);
-    this.name = 'UploadQuotaError';
-  }
 }
 
 export function maskOrgId(value: string): string {

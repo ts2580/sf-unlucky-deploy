@@ -1,3 +1,4 @@
+import type { WorkspaceSource } from '../../../src/api/workspace-contracts';
 import { useEffect, useState } from 'react';
 
 import { ComparisonFileDiff } from '../ComparisonFileDiff';
@@ -6,12 +7,6 @@ import type { ComparisonComponent, ComparisonJobResponse } from './api';
 
 const METADATA_RESULTS_PER_PAGE = 20;
 
-interface WorkspaceSource {
-  id: string;
-  kind: 'org' | 'local';
-  label: string;
-  detail: string;
-}
 
 export function WorkspaceSourceSelect({
   side,
@@ -31,13 +26,21 @@ export function WorkspaceSourceSelect({
     <label className={`source-panel source-${tone} source-select`}>
       <span className="source-side">{side}</span>
       <span className="source-logo"><Icon name={selected?.kind === 'local' ? 'folder' : 'cloud'} /></span>
-      <span><strong>{selected?.label ?? '소스 조회 중'}</strong><small>{selected?.detail ?? '연결 상태를 확인하고 있습니다.'}</small></span>
+      <span><strong>{selected?.label ?? '소스 조회 중'}</strong><small>{selected === undefined ? '연결 상태를 확인하고 있습니다.' : sourceDescription(selected)}</small></span>
       <Icon name="chevron" />
       <select aria-label={`${side} 비교 소스`} value={value} onChange={(event) => onChange(event.target.value)} disabled={sources.length === 0}>
-        {sources.map((source) => <option key={source.id} value={source.id}>{source.label} · {source.detail}</option>)}
+        {value === '' && <option value="" disabled>소스를 선택하세요.</option>}
+        {sources.map((source) => <option key={source.id} value={source.id}>{source.label} · {sourceDescription(source)}</option>)}
       </select>
     </label>
   );
+}
+
+function sourceDescription(source: WorkspaceSource): string {
+  if (source.location === 'git' && source.provenance !== undefined) {
+    return `Git · ${source.provenance.refName} · ${source.provenance.commitSha.slice(0, 12)}`;
+  }
+  return source.detail ?? (source.kind === 'local' ? '프로젝트 소스' : '연결된 org');
 }
 
 export function ComparisonResultPanel({
@@ -46,17 +49,19 @@ export function ComparisonResultPanel({
   selectedKeys = new Set<string>(),
   onSelectionChange,
   selectionDisabled = false,
+  comparisonOnly = false,
 }: {
   job: ComparisonJobResponse;
   deploymentView?: boolean;
   selectedKeys?: ReadonlySet<string>;
   onSelectionChange?: (component: ComparisonComponent, selected: boolean) => void;
   selectionDisabled?: boolean;
+  comparisonOnly?: boolean;
 }) {
   const [resultPage, setResultPage] = useState(1);
   useEffect(() => setResultPage(1), [job.id]);
-  const sourceOnly = deploymentView && job.mode === 'source';
-  const displaySource = deploymentView ? job.right : job.left;
+  const sourceOnly = job.result?.comparisonLimit?.exceeded === true || (deploymentView && job.mode === 'source');
+  const displaySource = deploymentView || sourceOnly ? job.right : job.left;
   const displayTarget = deploymentView ? job.left : job.right;
   if (job.status === 'QUEUED' || job.status === 'RUNNING') {
     return <section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{sourceOnly ? (job.status === 'QUEUED' ? '메타데이터 수집 대기 중' : 'Source 메타데이터 받는 중') : (job.status === 'QUEUED' ? '비교 대기 중' : '메타데이터 비교 중')}</strong><p>{sourceOnly ? `${displaySource.label} · ${job.manifest}` : `${displaySource.label} → ${displayTarget.label} · ${job.manifest}`}</p></div></section>;
@@ -74,8 +79,11 @@ export function ComparisonResultPanel({
     <section className="comparison-result" aria-labelledby="comparison-result-title">
       <div className="comparison-result-head">
         <div><p className="eyebrow">{sourceOnly ? 'SOURCE METADATA' : 'COMPARISON COMPLETE'}</p><h2 id="comparison-result-title">{sourceOnly ? displaySource.label : `${displaySource.label} → ${displayTarget.label}`}</h2><small>{job.manifest}</small></div>
-        <span className="result-success"><Icon name="check" />{sourceOnly ? '받아오기 완료' : '비교 완료'}</span>
+        <span className="result-success"><Icon name="check" />{job.result.comparisonLimit?.exceeded === true ? '비교 제한 초과 · 배포 목록 준비 완료' : sourceOnly ? '받아오기 완료' : '비교 완료'}</span>
       </div>
+      {[job.right, ...(sourceOnly ? [] : [job.left])].filter((source) => source.provenance !== undefined).map((source) =>
+        <p className="git-sha" key={source.id}>비교 기준: {source.label} · {source.provenance!.refName} · <code>{source.provenance!.commitSha}</code>
+          {' · '}동기화 <time dateTime={source.provenance!.importedAt}>{new Date(source.provenance!.importedAt).toLocaleString('ko-KR')}</time></p>)}
       {sourceOnly
         ? <div className="comparison-summary source-metadata-summary"><div className="summary-added"><span>SOURCE</span><strong>{summary.total}</strong></div></div>
         : <div className="comparison-summary">
@@ -85,7 +93,7 @@ export function ComparisonResultPanel({
             <div><span>IDENTICAL</span><strong>{summary.identical}</strong></div>
           </div>}
       {job.result.warnings.map((warning) => <p className="comparison-warning" key={warning}><Icon name="shield" />{warning}</p>)}
-      {deploymentView && !sourceOnly && summary.removed > 0 && <p className="comparison-warning"><Icon name="shield" />TARGET ONLY 항목은 destructive manifest 없이는 target org에서 삭제되지 않습니다.</p>}
+      {deploymentView && !comparisonOnly && !sourceOnly && summary.removed > 0 && <p className="comparison-warning"><Icon name="shield" />TARGET ONLY 항목은 destructive manifest 없이는 target org에서 삭제되지 않습니다.</p>}
       <div className="component-results">
         {job.result.components.length === 0
           ? <p className="empty-result">{sourceOnly ? 'Source에서 받아온 메타데이터가 없습니다.' : '표시할 차이가 없습니다. 두 소스가 동일합니다.'}</p>
@@ -113,7 +121,7 @@ export function ComparisonResultPanel({
 }
 
 
-function deploymentDiffStatusLabel(status: 'ADDED' | 'REMOVED' | 'MODIFIED' | 'IDENTICAL'): string {
+function deploymentDiffStatusLabel(status: ComparisonComponent['status']): string {
   if (status === 'ADDED') return 'NEW';
   if (status === 'REMOVED') return 'TARGET ONLY';
   return status;

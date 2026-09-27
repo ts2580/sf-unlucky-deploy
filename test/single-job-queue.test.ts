@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { SingleJobQueue } from '../src/deploy/single-job-queue.js';
+import { JobQueueCapacityError, SingleJobQueue } from '../src/deploy/single-job-queue.js';
 
 describe('단일 배포 작업 큐', () => {
   it('여러 작업이 동시에 실행되지 않도록 직렬화한다', async () => {
@@ -69,5 +69,17 @@ describe('단일 배포 작업 큐', () => {
     await aborted;
     expect(await queue.waitForIdle(100)).toBe(true);
     expect(queue.status()).toEqual({ queuedCount: 0, accepting: false });
+  });
+
+  it('준비 전에 대기 슬롯을 예약하고 enqueue 또는 실패에서 한 번만 반납한다', async () => {
+    const queue = new SingleJobQueue(1, 1);
+    const reservation = queue.reserve();
+    expect(() => queue.reserve()).toThrow(JobQueueCapacityError);
+    const task = queue.enqueue('job-1', async () => 'completed', reservation);
+    await expect(task).resolves.toBe('completed');
+    const next = queue.reserve();
+    next.release();
+    next.release();
+    expect(queue.reserve()).toBeDefined();
   });
 });

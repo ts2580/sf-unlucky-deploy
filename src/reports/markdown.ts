@@ -2,18 +2,19 @@ import type { ComparisonResult, FileDifference } from '../metadata/comparator.js
 
 export function renderMarkdownReport(result: ComparisonResult): string {
   const lines = [
-    '# Salesforce 메타데이터 비교 결과',
+    result.comparisonLimit?.exceeded === true ? '# Salesforce Source 목록 · 비교하지 않음' : '# Salesforce 메타데이터 비교 결과',
     '',
     `- 생성 시각: ${result.generatedAt}`,
     `- LEFT: \`${escapeInlineCode(result.left.displayName)}\``,
     `- RIGHT: \`${escapeInlineCode(result.right.displayName)}\``,
-    `- 비교 모드: ${result.strict ? 'strict' : 'metadata-aware'}`,
+    `- 비교 모드: ${result.comparisonLimit?.exceeded === true ? '파일 수 제한 초과로 비교 생략' : result.strict ? 'strict' : 'metadata-aware'}`,
     '',
     '## 요약',
     '',
-    '| 전체 | 추가 | 삭제 | 변경 | 동일 |',
-    '|---:|---:|---:|---:|---:|',
-    `| ${result.summary.total} | ${result.summary.added} | ${result.summary.removed} | ${result.summary.modified} | ${result.summary.identical} |`,
+    ...(result.comparisonLimit?.exceeded === true
+      ? [`Source 컴포넌트 ${result.summary.total}개 · 차이 판정 없음`]
+      : ['| 전체 | 추가 | 삭제 | 변경 | 동일 |', '|---:|---:|---:|---:|---:|',
+        `| ${result.summary.total} | ${result.summary.added} | ${result.summary.removed} | ${result.summary.modified} | ${result.summary.identical} |`]),
     '',
   ];
 
@@ -36,10 +37,10 @@ export function renderMarkdownReport(result: ComparisonResult): string {
     lines.push('');
   }
 
-  lines.push('## 변경된 컴포넌트', '');
+  lines.push(result.comparisonLimit?.exceeded === true ? '## Source 컴포넌트' : '## 변경된 컴포넌트', '');
   const changed = result.components.filter((component) => component.status !== 'IDENTICAL');
   if (changed.length === 0) {
-    lines.push('차이가 없습니다.', '');
+    lines.push(result.comparisonLimit?.exceeded === true ? 'Source 메타데이터가 없습니다.' : '차이가 없습니다.', '');
   }
 
   for (const component of changed) {
@@ -75,7 +76,7 @@ function renderFileDifference(file: FileDifference): string[] {
     lines.push('```diff', file.unifiedDiff.trimEnd(), '```', '');
   }
 
-  if (file.kind === 'binary') {
+  if (file.kind === 'binary' && file.status !== 'SOURCE') {
     lines.push(
       `- LEFT: ${file.leftSha256 ?? '없음'} (${file.leftSize ?? 0} bytes)`,
       `- RIGHT: ${file.rightSha256 ?? '없음'} (${file.rightSize ?? 0} bytes)`,
