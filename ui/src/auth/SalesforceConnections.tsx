@@ -56,11 +56,12 @@ export function SalesforceConnections() {
   const [loadState, setLoadState] = useState<'initial' | 'ready' | 'refreshing' | 'error'>('initial');
   const [loadError, setLoadError] = useState('');
   const completedOAuthFlow = useRef<string | undefined>(undefined);
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = false) => {
     setLoadState((current) => current === 'ready' ? 'refreshing' : 'initial');
     setLoadError('');
     try {
-      setData(await apiRequest<ConnectionList>('/api/v1/salesforce/connections'));
+      setData(await apiRequest<ConnectionList>(`/api/v1/salesforce/connections${force ? '/refresh' : ''}`,
+        force ? { method: 'POST', csrf: true } : {}));
       setLoadState('ready');
     } catch (cause) {
       const detail = cause instanceof Error ? cause.message : 'Salesforce 연결을 불러오지 못했습니다.';
@@ -267,7 +268,7 @@ export function SalesforceConnections() {
     {message && <p className="salesforce-feedback" role="status">{message}</p>}{error && <p className="salesforce-feedback salesforce-feedback-error" role="alert">{error}</p>}
     </ConnectionDialog>}
     <ConnectionTable label="Salesforce 연결 목록" emptyMessage="연결된 Salesforce Org가 없습니다."
-      refreshing={loadState === 'refreshing'} disabled={busy} onRefresh={() => void refresh().catch(() => undefined)}
+      refreshing={loadState === 'refreshing'} disabled={busy} onRefresh={() => void refresh(true).catch(() => undefined)}
       rows={data.connections.map((connection) => ({
         id: connection.id,
         onEdit: () => editConnection(connection),

@@ -94,6 +94,33 @@ export async function registerSalesforceConnectionRoutes(
       ...(localLoginAttempt.error === undefined ? {} : { error: localLoginAttempt.error }) });
   });
 
+  const connectionList = async (ownerUserId: string) => {
+    if (app.sfudRuntime.localMode) {
+      const orgs = await app.sfudRuntime.workspace.listOrgs();
+      return { localMode: true, storageStatus: 'cli', callbackPort: await WebOAuthServer.determineOauthPort(),
+        connections: orgs.map((org) => ({ id: org.id, alias: org.alias, orgId: org.orgId, username: org.username,
+          status: org.connected ? 'CONNECTED' : 'REAUTH_REQUIRED' })) };
+    }
+    return { localMode: false, storageStatus: app.sfudRuntime.sfTokenStorageStatus,
+      oauth: oauth.readiness(app.sfudRuntime.sfTokenStorageStatus === 'ready'),
+      connections: await app.sfudRuntime.sfConnections.list(ownerUserId) };
+  };
+  app.get('/api/v1/salesforce/connections', async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply);
+    if (session === undefined) return;
+    try { return reply.send(await connectionList(session.user.id)); }
+    catch (error) { return sendConnectionError(reply, error); }
+  });
+  app.post('/api/v1/salesforce/connections/refresh', async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply, { csrf: true });
+    if (session === undefined) return;
+    try {
+      app.sfudRuntime.workspace.clearOrgCache(session.user.id);
+      if (!app.sfudRuntime.localMode) await app.sfudRuntime.workspace.listOrgs();
+      return reply.send(await connectionList(session.user.id));
+    } catch (error) { return sendConnectionError(reply, error); }
+  });
+
   app.post<{ Body: { alias: string; instanceUrl: string; connectionId?: string } }>('/api/v1/salesforce/oauth/start',
     { schema: { body: OAuthStartBody } }, async (request, reply) => {
       const session = await requireAuthenticatedSession(app, request, reply, { csrf: true });

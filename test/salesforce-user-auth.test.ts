@@ -47,6 +47,26 @@ class FakeSfClient implements SfClient {
 }
 
 describe('사용자별 Salesforce CLI 인증 격리', () => {
+  it('연결 이름과 Org 교체는 소유자·generation을 검사하고 충돌 시 기존 인증을 보존한다', async () => {
+    const store = await openSqliteStore({ databasePath: ':memory:' }); stores.push(store);
+    const user = await new UserRepository(store.database).create({ email: 'edit-sf@example.com', displayName: 'Edit', role: 'DEPLOYER' });
+    const repository = new SalesforceConnectionRepository(store.database, new TokenVault(new Map([[1, Buffer.alloc(32, 5)]]), 1));
+    const identity = { orgId: '00D000000000001', username: user.email, instanceUrl: 'https://my.salesforce.com/' };
+    const original = await repository.upsert(user.id, 'original-org', identity, authUrl);
+    expect(await repository.rename('another-owner', original.id, 'forbidden')).toBeUndefined();
+    const renamed = (await repository.rename(user.id, original.id, 'renamed-org'))!;
+    expect(renamed).toMatchObject({ id: original.id, generation: original.generation + 1 });
+    expect(await repository.authUrl(user.id, original.id, renamed.generation)).toBe(authUrl);
+    await expect(repository.upsert(user.id, 'renamed-org', identity, rotatedUrl, original)).rejects.toMatchObject({ code: 'ORG_IDENTITY_CHANGED' });
+    await repository.upsert(user.id, 'another-org', identity, authUrl);
+    await expect(repository.upsert(user.id, 'another-org', identity, rotatedUrl, renamed)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(await repository.authUrl(user.id, original.id, renamed.generation)).toBe(authUrl);
+    const changed = await repository.upsert(user.id, 'renamed-org', { ...identity, orgId: '00D000000000002', username: 'other@example.com' }, rotatedUrl, renamed);
+    expect(changed).toMatchObject({ id: original.id, username: 'other@example.com', generation: renamed.generation + 1 });
+    expect(await repository.authUrl(user.id, original.id, changed.generation)).toBe(rotatedUrl);
+    await expect(repository.authUrl(user.id, original.id, renamed.generation)).rejects.toMatchObject({ code: 'ORG_IDENTITY_CHANGED' });
+  });
+
   it('일시 실패 뒤 재시도하며 확정 invalid_grant만 재인증 상태로 바꾼다', async () => {
     const store = await openSqliteStore({ databasePath: ':memory:' });
     stores.push(store);
@@ -240,7 +260,7 @@ describe('사용자별 Salesforce CLI 인증 격리', () => {
     expect(imported[0]?.args).toContain('alice-org');
     expect(imported[0]?.options.stdin).toContain(authUrl);
     expect(imported[0]?.options.environment?.HOME).not.toBe(process.env.HOME);
-    expect(imported[0]?.options.environment?.SFUD_SF_TOKEN_SECRET).toBeUndefined();
+    expect(imported[0]?.options.environment?.SFUD_TOKEN_SECRET).toBeUndefined();
     expect(await repository.authUrl(alice.id, aliceConnection.id, aliceConnection.generation)).toBe(rotatedUrl);
 
     await runAsSalesforceUser(alice.id, async () => {
@@ -261,8 +281,8 @@ describe('사용자별 Salesforce CLI 인증 격리', () => {
   });
 
   it('HTTP 세션의 사용자 컨텍스트와 Salesforce 연결 API를 두 사용자 사이에 격리한다', async () => {
-    const previousSecret = process.env.SFUD_SF_TOKEN_SECRET;
-    process.env.SFUD_SF_TOKEN_SECRET = 'c'.repeat(64);
+    const previousSecret = process.env.SFUD_TOKEN_SECRET;
+    process.env.SFUD_TOKEN_SECRET = 'c'.repeat(64);
     let server: Awaited<ReturnType<typeof createWebServer>> | undefined;
     try {
       server = await createWebServer({ host: '127.0.0.1', port: 27_546, assetsDirectory: '/missing',
@@ -295,10 +315,23 @@ describe('사용자별 Salesforce CLI 인증 격리', () => {
       expect((await app.inject({ url: `/api/v1/salesforce/connections/${connectionId}`, headers: bobHeaders })).statusCode).toBe(404);
       expect((await app.inject({ method: 'DELETE', url: `/api/v1/salesforce/connections/${connectionId}`, headers: bobHeaders })).statusCode).toBe(404);
       expect((await app.inject({ url: `/api/v1/salesforce/connections/${connectionId}`, headers: aliceHeaders })).statusCode).toBe(200);
+      const original = await app.sfudRuntime.sfConnections.get(aliceSession.user.id, connectionId);
+      expect((await app.inject({ method: 'PATCH', url: `/api/v1/salesforce/connections/${connectionId}`, headers: bobHeaders, payload: { alias: 'forbidden' } })).statusCode).toBe(404);
+      expect((await app.inject({ method: 'PUT', url: `/api/v1/salesforce/connections/${connectionId}`, headers: bobHeaders, payload: { alias: 'forbidden', sfdxAuthUrl: authUrl } })).statusCode).toBe(404);
+      const renamed = await app.inject({ method: 'PATCH', url: `/api/v1/salesforce/connections/${connectionId}`, headers: aliceHeaders, payload: { alias: 'alice-renamed' } });
+      expect(renamed.statusCode, renamed.body).toBe(200);
+      const replaced = await app.inject({ method: 'PUT', url: `/api/v1/salesforce/connections/${connectionId}`, headers: aliceHeaders, payload: { alias: 'alice-renamed', sfdxAuthUrl: authUrl } });
+      expect(replaced.statusCode, replaced.body).toBe(200);
+      expect(replaced.json().connection).toMatchObject({ id: connectionId, alias: 'alice-renamed', generation: original!.generation + 2 });
+      expect(replaced.body).not.toContain(rotatedUrl);
+      const failed = await app.inject({ method: 'PUT', url: `/api/v1/salesforce/connections/${connectionId}`, headers: aliceHeaders, payload: { alias: 'alice-renamed', sfdxAuthUrl: 'invalid-auth-url-fixture'.repeat(3) } });
+      expect(failed.statusCode).toBe(400);
+      expect((await app.sfudRuntime.sfConnections.get(aliceSession.user.id, connectionId))?.generation).toBe(original!.generation + 2);
+
     } finally {
       if (server !== undefined) await server.close();
-      if (previousSecret === undefined) delete process.env.SFUD_SF_TOKEN_SECRET;
-      else process.env.SFUD_SF_TOKEN_SECRET = previousSecret;
+      if (previousSecret === undefined) delete process.env.SFUD_TOKEN_SECRET;
+      else process.env.SFUD_TOKEN_SECRET = previousSecret;
     }
   });
 
@@ -321,7 +354,7 @@ describe('사용자별 Salesforce CLI 인증 격리', () => {
       expect(await runAsSalesforceUser(alice.id, () => workspace.getOrgIdentity('alice-source')))
         .toMatchObject({ connectionId: aliceConnection.id, connectionGeneration: aliceConnection.generation });
       const replacement = await repository.upsert(alice.id, 'alice-source', identity, rotatedUrl);
-      workspace.clearOrgCache(alice.id);
+      // A connection changed by another session invalidates the snapshot without a UI refresh.
       expect(await runAsSalesforceUser(alice.id, () => workspace.getOrgIdentity('alice-source')))
         .toMatchObject({ connectionId: replacement.id, connectionGeneration: replacement.generation });
       await expect(runAsSalesforceUser(bob.id, () => workspace.resolveSource('org:alice-source', bob.id)))

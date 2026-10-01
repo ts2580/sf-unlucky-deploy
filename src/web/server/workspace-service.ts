@@ -67,7 +67,7 @@ interface RawOrg {
 export class WorkspaceService {
   public gitImports?: GitImportService;
   public gitRegistrations?: GitRegistrationService;
-  private readonly orgCache = new Map<string, { expiresAt: number; value: WorkspaceOrg[] }>();
+  private readonly orgCache = new Map<string, { fingerprint: string | undefined; value: WorkspaceOrg[] }>();
   private readonly orgRequests = new Map<string, Promise<WorkspaceOrg[]>>();
   private readonly orgCacheEpoch = new Map<string, number>();
   private readonly metadataTypeCache = new Map<string, { expiresAt: number; value: WorkspaceMetadataType[] }>();
@@ -136,8 +136,10 @@ export class WorkspaceService {
 
   public async listOrgs(): Promise<WorkspaceOrg[]> {
     const key = currentSalesforceUserId() ?? 'local';
+    const fingerprint = await this.connectionFingerprint(key);
     const cached = this.orgCache.get(key);
-    if (cached !== undefined && cached.expiresAt > Date.now()) return this.pinConnections(cached.value);
+    if (cached !== undefined && cached.fingerprint === fingerprint) return this.pinConnections(cached.value);
+    if (cached !== undefined) this.clearOrgCache(key);
     const epoch = this.orgCacheEpoch.get(key) ?? 0;
     let request = this.orgRequests.get(key);
     if (request === undefined) {
@@ -147,7 +149,7 @@ export class WorkspaceService {
     try {
       const value = await request;
       if ((this.orgCacheEpoch.get(key) ?? 0) === epoch) {
-        this.orgCache.set(key, { expiresAt: Date.now() + 5_000, value });
+        this.orgCache.set(key, { fingerprint, value });
       }
       // Each caller has a distinct ALS store even when sharing the same CLI request.
       return this.pinConnections(value);
@@ -337,10 +339,19 @@ export class WorkspaceService {
 
   private async refreshOrgs(): Promise<WorkspaceOrg[]> {
     const key = currentSalesforceUserId() ?? 'local';
+    const fingerprint = await this.connectionFingerprint(key);
     const epoch = this.orgCacheEpoch.get(key) ?? 0;
     const value = await this.loadOrgs();
-    if ((this.orgCacheEpoch.get(key) ?? 0) === epoch) this.orgCache.set(key, { expiresAt: Date.now() + 5_000, value });
+    if ((this.orgCacheEpoch.get(key) ?? 0) === epoch) this.orgCache.set(key, { fingerprint, value });
     return this.pinConnections(value);
+  }
+
+  private async connectionFingerprint(ownerUserId: string): Promise<string | undefined> {
+    if (this.connections === undefined) return undefined;
+    // Persisted credentials stay in the repository. Cache only public Org metadata,
+    // shared by the same user across browser sessions and invalidated on DB changes.
+    const connections = await this.connections.list(ownerUserId);
+    return JSON.stringify(connections.map(({ id, generation, status }) => [id, generation, status]));
   }
 
   public clearOrgCache(ownerUserId: string): void {
