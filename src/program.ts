@@ -13,6 +13,7 @@ import {
   startWebUi,
 } from './web/server/start.js';
 import { gitHostPolicyFromAddresses, gitHostPolicyFromEnvironment } from './git/git-network.js';
+import { getHomeConfigPaths, initializeHomeConfiguration } from './config/user-config.js';
 
 export const CLI_VERSION = '0.4.0';
 
@@ -33,6 +34,19 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
     .description('Salesforce 메타데이터 비교·검증·배포 CLI')
     .version(CLI_VERSION)
     .showHelpAfterError();
+
+  const config = program.command('config').description('사용자 홈 설정을 관리합니다.');
+  config.command('path')
+    .description('사용자 설정 파일 경로를 표시합니다.')
+    .action(() => {
+      process.stdout.write(`${getHomeConfigPaths().configFile}\n`);
+    });
+  config.command('init')
+    .description('개인 LOCAL 모드의 사용자 설정을 처음 생성합니다.')
+    .action(async () => {
+      const paths = await initializeHomeConfiguration();
+      process.stdout.write(`설정을 생성했습니다: ${paths.configFile}\n`);
+    });
 
   program
     .command('compare')
@@ -87,7 +101,7 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
   program
     .command('ui')
     .description('로컬 웹 UI를 시작합니다.')
-    .option('--host <host>', 'bind 주소', DEFAULT_UI_HOST)
+    .option('--host <host>', 'bind 주소')
     .option(
       '--port <port>',
       'bind 포트',
@@ -121,7 +135,7 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
         throw new SfudError('INVALID_LOCAL_MODE', 'LOCAL 환경변수는 true 또는 false여야 합니다.');
       }
       await startWebUi({
-        host: options.host as string,
+        host: (options.host as string | undefined) ?? process.env.SFUD_UI_HOST ?? DEFAULT_UI_HOST,
         port: port ?? parsePort(process.env.SFUD_UI_PORT ?? String(DEFAULT_UI_PORT)),
         allowRemote: options.allowRemote === true,
         localMode: localValue === 'true',

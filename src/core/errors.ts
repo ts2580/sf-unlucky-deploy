@@ -23,7 +23,8 @@ export type SfudErrorCode =
   | 'REQUEST_USER_LIMIT'
   | 'REQUEST_CAPACITY_EXCEEDED'
   | 'ORG_IDENTITY_CHANGED'
-  | 'APPROVAL_DENIED';
+  | 'APPROVAL_DENIED'
+  | 'CONFIGURATION_ERROR';
 
 export class SfudError extends Error {
   public readonly code: SfudErrorCode;
