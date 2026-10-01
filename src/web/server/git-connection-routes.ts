@@ -45,7 +45,11 @@ export async function registerGitConnectionRoutes(app: FastifyInstance): Promise
   }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply, mutation);
     if (session === undefined) return;
-    try { return reply.send({ connection: publicConnection(await app.sfudRuntime.gitTokens.register(session.user.id, request.body, request.params.id)) }); }
+    try {
+      const connection = await app.sfudRuntime.gitTokens.register(session.user.id, request.body, request.params.id);
+      await app.sfudRuntime.gitImports.cancelConnection(session.user.id, request.params.id);
+      return reply.send({ connection: publicConnection(connection) });
+    }
     catch (error) { return tokenFailure(reply, error); }
   });
   app.post('/api/v1/git/connections/environment', { errorHandler: tokenRequestError, schema: { response: { 200: GitEnvironmentResponseSchema } } }, async (request, reply) => {

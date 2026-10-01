@@ -9,7 +9,7 @@ const PUBLIC_ORIGIN = 'https://deploy.example.test';
 const CLIENT_ID = 'clientIdentifier1234567890';
 const CLIENT_SECRET = 'clientSecret1234567890';
 const previousEnvironment = new Map<string, string | undefined>();
-const environmentKeys = ['SFUD_SF_TOKEN_SECRET', 'SFUD_SF_OAUTH_CLIENT_ID', 'SFUD_SF_OAUTH_CLIENT_SECRET'];
+const environmentKeys = ['SFUD_TOKEN_SECRET', 'SFUD_SF_OAUTH_CLIENT_ID', 'SFUD_SF_OAUTH_CLIENT_SECRET'];
 
 beforeAll(() => saveEnvironment());
 afterEach(() => {
@@ -126,7 +126,7 @@ describe('Salesforce browser OAuth flow service', () => {
 describe('Salesforce browser OAuth API', () => {
   it('completes browser callback without the Strict session cookie and saves only to the starter account', async () => {
     saveEnvironment();
-    process.env.SFUD_SF_TOKEN_SECRET = 'o'.repeat(64);
+    process.env.SFUD_TOKEN_SECRET = 'o'.repeat(64);
     process.env.SFUD_SF_OAUTH_CLIENT_ID = CLIENT_ID;
     process.env.SFUD_SF_OAUTH_CLIENT_SECRET = CLIENT_SECRET;
     const authUrls: string[] = [];
@@ -210,12 +210,26 @@ describe('Salesforce browser OAuth API', () => {
         headers: { cookie: `sfud_session=${encodeURIComponent(bobLogin.sessionToken)}; sfud_csrf=${encodeURIComponent(bobLogin.csrfToken)}`,
           'x-sfud-csrf': bobLogin.csrfToken, origin: PUBLIC_ORIGIN }, payload: { flowId: startBody.id } });
       expect(otherUser.statusCode).toBe(409);
+      const reauth = await startApiFlow(server, alice.headers, { connectionId: storedConnection.id, alias: 'renamed-org' });
+      await callbackApiFlow(server, reauth.authorizationUrl, reauth.cookie);
+      const replaced = await server.inject({ method: 'POST', url: '/api/v1/salesforce/oauth/complete',
+        headers: { ...alice.headers, origin: PUBLIC_ORIGIN }, payload: { flowId: reauth.id } });
+      expect(replaced.statusCode, replaced.body).toBe(201);
+      expect(replaced.json().connection).toMatchObject({ id: storedConnection.id, alias: 'renamed-org', generation: storedConnection.generation + 1 });
+      const racing = await startApiFlow(server, alice.headers, { connectionId: storedConnection.id, alias: 'renamed-org' });
+      await callbackApiFlow(server, racing.authorizationUrl, racing.cookie);
+      await server.sfudRuntime.sfConnections.rename(alice.user.id, storedConnection.id, 'latest-org');
+      const late = await server.inject({ method: 'POST', url: '/api/v1/salesforce/oauth/complete',
+        headers: { ...alice.headers, origin: PUBLIC_ORIGIN }, payload: { flowId: racing.id } });
+      expect(late.statusCode).toBe(400);
+      expect((await server.sfudRuntime.sfConnections.list(alice.user.id)).map((item) => item.alias)).toEqual(['latest-org']);
+
     } finally { await server.close(); }
   });
 
   it('does not save a connection when the starting session is revoked during token exchange', async () => {
     saveEnvironment();
-    process.env.SFUD_SF_TOKEN_SECRET = 'r'.repeat(64);
+    process.env.SFUD_TOKEN_SECRET = 'r'.repeat(64);
     process.env.SFUD_SF_OAUTH_CLIENT_ID = CLIENT_ID;
     process.env.SFUD_SF_OAUTH_CLIENT_SECRET = CLIENT_SECRET;
     let finishExchange: (response: Response) => void = () => undefined;
@@ -264,7 +278,7 @@ describe('Salesforce browser OAuth API', () => {
 
   it('keeps provider response details out of the API response', async () => {
     saveEnvironment();
-    process.env.SFUD_SF_TOKEN_SECRET = 'e'.repeat(64);
+    process.env.SFUD_TOKEN_SECRET = 'e'.repeat(64);
     process.env.SFUD_SF_OAUTH_CLIENT_ID = CLIENT_ID;
     process.env.SFUD_SF_OAUTH_CLIENT_SECRET = CLIENT_SECRET;
     const server = await createWebServer({ host: '127.0.0.1', port: 27_546, assetsDirectory: '/missing',
@@ -320,9 +334,9 @@ async function login(server: Awaited<ReturnType<typeof createWebServer>>, email:
   throw new Error(`Fixture bootstrap failed: ${response.statusCode}`);
 }
 
-async function startApiFlow(server: Awaited<ReturnType<typeof createWebServer>>, headers: Record<string, string>) {
+async function startApiFlow(server: Awaited<ReturnType<typeof createWebServer>>, headers: Record<string, string>, replacement?: { connectionId: string; alias: string }) {
   const response = await server.inject({ method: 'POST', url: '/api/v1/salesforce/oauth/start',
-    headers: { ...headers, origin: PUBLIC_ORIGIN }, payload: { alias: 'my-org', instanceUrl: 'https://login.salesforce.com' } });
+    headers: { ...headers, origin: PUBLIC_ORIGIN }, payload: { alias: 'my-org', instanceUrl: 'https://login.salesforce.com', ...replacement } });
   expect(response.statusCode).toBe(200);
   const body = response.json<{ id: string; authorizationUrl: string }>();
   return { ...body, cookie: String(response.headers['set-cookie']).split(';')[0]! };

@@ -6,6 +6,7 @@ import type { FastifyInstance } from 'fastify';
 
 import { SfudError } from '../../core/errors.js';
 import { redactSensitiveText } from '../../salesforce/sf-client.js';
+import { isOrgIdentifier } from '../../salesforce/org-identifier.js';
 import { isRequestSessionActive, requireAuthenticatedSession } from './auth-routes.js';
 import { SalesforceOAuthError, SalesforceOAuthFlowService, salesforceOAuthCookieName,
   type SalesforceOAuthDependencies } from './salesforce-oauth.js';
@@ -14,6 +15,7 @@ const RegistrationBody = Type.Object({
   alias: Type.String({ minLength: 1, maxLength: 120 }),
   sfdxAuthUrl: Type.String({ minLength: 40, maxLength: 16_384 }),
 }, { additionalProperties: false });
+const AliasBody = Type.Object({ alias: Type.String({ minLength: 1, maxLength: 120 }) }, { additionalProperties: false });
 
 const LocalLoginBody = Type.Object({
   alias: Type.String({ minLength: 1, maxLength: 120 }),
@@ -21,6 +23,7 @@ const LocalLoginBody = Type.Object({
 }, { additionalProperties: false });
 
 const OAuthStartBody = Type.Object({
+  connectionId: Type.Optional(Type.String({ format: 'uuid' })),
   alias: Type.String({ minLength: 1, maxLength: 120 }),
   instanceUrl: Type.String({ minLength: 20, maxLength: 512 }),
 }, { additionalProperties: false });
@@ -56,7 +59,7 @@ export async function registerSalesforceConnectionRoutes(
         return reply.code(409).send({ error: { code: 'SALESFORCE_LOGIN_PENDING', message: '진행 중인 Salesforce 로그인을 완료하거나 잠시 기다리세요.' } });
       }
       const alias = request.body.alias.trim();
-      if (alias.length === 0) return reply.code(400).send({ error: { code: 'INVALID_ALIAS', message: '연결 별칭을 입력하세요.' } });
+      if (!isOrgIdentifier(alias)) return reply.code(400).send({ error: { code: 'INVALID_ALIAS', message: '연결 별칭을 입력하세요.' } });
       let loginUrl: string;
       try { loginUrl = salesforceLoginUrl(request.body.instanceUrl); }
       catch (error) { return sendConnectionError(reply, error); }
@@ -91,25 +94,7 @@ export async function registerSalesforceConnectionRoutes(
       ...(localLoginAttempt.error === undefined ? {} : { error: localLoginAttempt.error }) });
   });
 
-  app.get('/api/v1/salesforce/connections', async (request, reply) => {
-    const session = await requireAuthenticatedSession(app, request, reply);
-    if (session === undefined) return;
-    if (app.sfudRuntime.localMode) {
-      try {
-        const orgs = await app.sfudRuntime.workspace.listOrgs();
-        return reply.send({ localMode: true, storageStatus: 'cli',
-          callbackPort: await WebOAuthServer.determineOauthPort(), connections: orgs.map((org) => ({
-          id: org.id, alias: org.alias, orgId: org.orgId, username: org.username,
-          status: org.connected ? 'CONNECTED' : 'REAUTH_REQUIRED',
-        })) });
-      } catch (error) { return sendConnectionError(reply, error); }
-    }
-    return reply.send({ localMode: false, storageStatus: app.sfudRuntime.sfTokenStorageStatus,
-      oauth: oauth.readiness(app.sfudRuntime.sfTokenStorageStatus === 'ready'),
-      connections: await app.sfudRuntime.sfConnections.list(session.user.id) });
-  });
-
-  app.post<{ Body: { alias: string; instanceUrl: string } }>('/api/v1/salesforce/oauth/start',
+  app.post<{ Body: { alias: string; instanceUrl: string; connectionId?: string } }>('/api/v1/salesforce/oauth/start',
     { schema: { body: OAuthStartBody } }, async (request, reply) => {
       const session = await requireAuthenticatedSession(app, request, reply, { csrf: true });
       if (session === undefined) return;
@@ -117,7 +102,12 @@ export async function registerSalesforceConnectionRoutes(
       const readiness = oauth.readiness(app.sfudRuntime.sfTokenStorageStatus === 'ready');
       if (!readiness.ready) return reply.code(503).send({ error: { code: 'SALESFORCE_OAUTH_UNAVAILABLE', message: oauthUnavailableMessage(readiness.reason) } });
       try {
-        const started = oauth.start({ userId: session.user.id, sessionWorkspaceId: session.sessionWorkspaceId,
+        const previous = request.body.connectionId === undefined ? undefined
+          : await app.sfudRuntime.sfConnections.get(session.user.id, request.body.connectionId);
+        if (request.body.connectionId !== undefined && previous === undefined) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: '연결을 찾을 수 없습니다.' } });
+        const started = oauth.start({
+          ...(previous === undefined ? {} : { replacement: { id: previous.id, generation: previous.generation } }),
+          userId: session.user.id, sessionWorkspaceId: session.sessionWorkspaceId,
           alias: request.body.alias, instanceUrl: request.body.instanceUrl,
           ...(request.headers.origin === undefined ? {} : { requestOrigin: request.headers.origin }),
           requestHost: request.host, requestProtocol: request.protocol });
@@ -167,7 +157,7 @@ export async function registerSalesforceConnectionRoutes(
           attempt.alias, authUrl, app.sfudRuntime.workspace.defaultProject().realPath);
         if (!await isRequestSessionActive(app, request)) return oauthFailure(reply);
         const connection = await app.sfudRuntime.sfConnections.upsert(
-          session.user.id, attempt.alias, identity, identity.authUrl);
+          session.user.id, attempt.alias, identity, identity.authUrl, attempt.replacement);
         app.sfudRuntime.workspace.clearOrgCache(session.user.id);
         return reply.code(201).send({ connection });
       } catch (error) { return sendOAuthError(reply, error); }
@@ -198,6 +188,59 @@ export async function registerSalesforceConnectionRoutes(
           session.user.id, request.body.alias, identity, identity.authUrl);
         app.sfudRuntime.workspace.clearOrgCache(session.user.id);
         return reply.code(201).send({ connection });
+      } catch (error) { return sendConnectionError(reply, error); }
+    });
+
+  app.put<{ Params: { id: string }; Body: { alias: string; sfdxAuthUrl: string } }>('/api/v1/salesforce/connections/:id',
+    { schema: { body: RegistrationBody } }, async (request, reply) => {
+      const session = await requireAuthenticatedSession(app, request, reply, { csrf: true });
+      if (session === undefined) return;
+      if (app.sfudRuntime.localMode) return reply.code(403).send({ error: { code: 'LOCAL_MODE', message: '로컬 모드에서는 브라우저로 다시 로그인하세요.' } });
+      if (request.protocol !== 'https' && !['127.0.0.1', '::1'].includes(request.hostname)) {
+        return reply.code(403).send({ error: { code: 'HTTPS_REQUIRED', message: 'Salesforce 인증 URL 등록에는 HTTPS가 필요합니다.' } });
+      }
+      const previous = await app.sfudRuntime.sfConnections.get(session.user.id, request.params.id);
+      if (previous === undefined) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: '연결을 찾을 수 없습니다.' } });
+      try {
+        const identity = await app.sfudRuntime.sfConnectionClient.validateAuthUrl(
+          request.body.alias, request.body.sfdxAuthUrl, app.sfudRuntime.workspace.defaultProject().realPath);
+        if (!await isRequestSessionActive(app, request)) return oauthFailure(reply);
+        const connection = await app.sfudRuntime.sfConnections.upsert(session.user.id, request.body.alias, identity,
+          identity.authUrl, { id: previous.id, generation: previous.generation });
+        app.sfudRuntime.workspace.clearOrgCache(session.user.id);
+        return reply.send({ connection });
+      } catch (error) { return sendConnectionError(reply, error); }
+    });
+
+  app.patch<{ Params: { id: string }; Body: { alias: string } }>('/api/v1/salesforce/connections/:id',
+    { schema: { body: AliasBody } }, async (request, reply) => {
+      const session = await requireAuthenticatedSession(app, request, reply, { csrf: true });
+      if (session === undefined) return;
+      const alias = request.body.alias.trim();
+      if (!isOrgIdentifier(alias)) return reply.code(400).send({ error: { code: 'INVALID_ARGUMENT', message: 'Salesforce 연결 별칭이 올바르지 않습니다.' } });
+      try {
+        if (app.sfudRuntime.localMode) {
+          if (localLoginAttempt?.status === 'PENDING') return reply.code(409).send({ error: { code: 'SALESFORCE_LOGIN_PENDING', message: '진행 중인 Salesforce 로그인을 먼저 완료하세요.' } });
+          app.sfudRuntime.workspace.clearOrgCache(session.user.id);
+          const orgs = await app.sfudRuntime.workspace.listOrgs();
+          const connection = orgs.find((org) => org.id === request.params.id);
+          if (!connection?.username) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: '연결을 찾을 수 없습니다.' } });
+          if (orgs.some((org) => org.alias === alias && org.id !== connection.id)) {
+            return reply.code(409).send({ error: { code: 'ALIAS_EXISTS', message: '이미 사용 중인 Salesforce 별칭입니다.' } });
+          }
+          if (alias !== connection.alias) {
+            const cwd = app.sfudRuntime.workspace.defaultProject().realPath;
+            await app.sfudRuntime.sfClient.runJson(['alias', 'set', `${alias}=${connection.username}`], { cwd });
+            if (connection.alias !== connection.username) await app.sfudRuntime.sfClient.runJson(['alias', 'unset', connection.alias], { cwd });
+          }
+          app.sfudRuntime.workspace.clearOrgCache(session.user.id);
+          return reply.send({ connection: { id: `org:${alias}`, alias, orgId: connection.orgId, username: connection.username,
+            status: connection.connected ? 'CONNECTED' : 'REAUTH_REQUIRED' } });
+        }
+        const connection = await app.sfudRuntime.sfConnections.rename(session.user.id, request.params.id, alias);
+        if (connection === undefined) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: '연결을 찾을 수 없습니다.' } });
+        app.sfudRuntime.workspace.clearOrgCache(session.user.id);
+        return reply.send({ connection });
       } catch (error) { return sendConnectionError(reply, error); }
     });
 

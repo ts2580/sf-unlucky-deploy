@@ -31,6 +31,7 @@ interface StartAttempt {
   userId: string;
   sessionWorkspaceId: string;
   alias: string;
+  replacement?: { id: string; generation: number };
   loginUrl: URL;
   createdAt: number;
   code?: string;
@@ -76,6 +77,7 @@ export class SalesforceOAuthFlowService {
     sessionWorkspaceId: string;
     alias: string;
     instanceUrl: string;
+    replacement?: { id: string; generation: number };
     requestOrigin?: string;
     requestHost: string;
     requestProtocol: string;
@@ -108,6 +110,7 @@ export class SalesforceOAuthFlowService {
     const attempt: StartAttempt = {
       id, state, verifier, browserProofHash: digest(browserProof), userId: input.userId,
       sessionWorkspaceId: input.sessionWorkspaceId, alias, loginUrl,
+      ...(input.replacement === undefined ? {} : { replacement: input.replacement }),
       createdAt: currentTime, completing: false, consumed: false,
     };
     this.attempts.set(state, attempt);

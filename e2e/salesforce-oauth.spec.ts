@@ -13,11 +13,11 @@ import { createWebServer, resolveDefaultAssetsDirectory } from '../src/web/serve
 
 test('실제 교차 사이트 브라우저 callback은 Strict 세션 없이 Lax 확인 쿠키로 돌아와 로그인 세션으로 완료한다', async ({ browser }) => {
   const previous = {
-    token: process.env.SFUD_SF_TOKEN_SECRET,
+    token: process.env.SFUD_TOKEN_SECRET,
     clientId: process.env.SFUD_SF_OAUTH_CLIENT_ID,
     clientSecret: process.env.SFUD_SF_OAUTH_CLIENT_SECRET,
   };
-  process.env.SFUD_SF_TOKEN_SECRET = 'e2e-salesforce-token-secret'.repeat(3);
+  process.env.SFUD_TOKEN_SECRET = 'e2e-salesforce-token-secret'.repeat(3);
   process.env.SFUD_SF_OAUTH_CLIENT_ID = 'e2eClientIdentifier1234567890';
   process.env.SFUD_SF_OAUTH_CLIENT_SECRET = 'e2eClientSecret1234567890';
   const certificateDirectory = await mkdtemp(path.join(os.tmpdir(), 'sfud-oauth-https-'));
@@ -102,7 +102,7 @@ test('실제 교차 사이트 브라우저 callback은 Strict 세션 없이 Lax 
     if (httpsServer !== undefined) await new Promise<void>((resolve) => httpsServer!.close(() => resolve()));
     if (app !== undefined) await app.close();
     await rm(certificateDirectory, { recursive: true, force: true });
-    restoreEnvironment('SFUD_SF_TOKEN_SECRET', previous.token);
+    restoreEnvironment('SFUD_TOKEN_SECRET', previous.token);
     restoreEnvironment('SFUD_SF_OAUTH_CLIENT_ID', previous.clientId);
     restoreEnvironment('SFUD_SF_OAUTH_CLIENT_SECRET', previous.clientSecret);
   }

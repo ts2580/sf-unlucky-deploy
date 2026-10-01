@@ -47,6 +47,33 @@ describe('로컬 Salesforce 브라우저 로그인', () => {
     } finally { await server.close(); }
   });
 
+  it('로컬 연결 별칭을 변경하며 인증·CSRF·대상 충돌을 검사한다', async () => {
+    const runJson = vi.fn(async (args: readonly string[]) => args[0] === 'org'
+      ? { status: 0, result: { nonScratchOrgs: [
+        { alias: 'old-org', username: 'old@example.com', orgId: '00D000000000001', connectedStatus: 'Connected' },
+        { alias: 'taken-org', username: 'taken@example.com', orgId: '00D000000000002', connectedStatus: 'Connected' },
+      ] } } : { status: 0, result: {} });
+    const server = await createWebServer({ host: '127.0.0.1', port: 27_546, localMode: true,
+      assetsDirectory: '/missing', databasePath: ':memory:', sfClient: { runJson } });
+    try {
+      const host = '127.0.0.1:27546';
+      const session = await server.inject({ url: '/api/v1/auth/status', headers: { host } });
+      const cookies = (session.headers['set-cookie'] as string[]).map((item) => item.split(';')[0]).join('; ');
+      const csrf = cookies.match(/(?:^|; )sfud_csrf=([^;]+)/u)![1]!;
+      const headers = { host, origin: 'http://127.0.0.1:27546', cookie: cookies, 'x-sfud-csrf': decodeURIComponent(csrf) };
+      const url = '/api/v1/salesforce/connections/org%3Aold-org';
+      expect((await server.inject({ method: 'PATCH', url, headers: { host, cookie: cookies }, payload: { alias: 'new-org' } })).statusCode).toBe(403);
+      expect((await server.inject({ method: 'PATCH', url, headers, payload: { alias: 'taken-org' } })).statusCode).toBe(409);
+      expect(runJson.mock.calls.some(([args]) => args[0] === 'alias')).toBe(false);
+      const renamed = await server.inject({ method: 'PATCH', url, headers, payload: { alias: 'new-org' } });
+      expect(renamed.statusCode, renamed.body).toBe(200);
+      expect(renamed.json().connection).toMatchObject({ id: 'org:new-org', alias: 'new-org', username: 'old@example.com' });
+      expect(runJson.mock.calls.filter(([args]) => args[0] === 'alias').map(([args]) => args)).toEqual([
+        ['alias', 'set', 'new-org=old@example.com'], ['alias', 'unset', 'old-org'],
+      ]);
+    } finally { await server.close(); }
+  });
+
   it('Salesforce 이외의 로그인 주소는 OAuth 서버를 열지 않는다', async () => {
     const server = await createWebServer({ host: '127.0.0.1', port: 27_546, localMode: true,
       assetsDirectory: '/missing', databasePath: ':memory:' });

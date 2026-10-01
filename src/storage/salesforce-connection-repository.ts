@@ -66,28 +66,42 @@ export class SalesforceConnectionRepository {
 
   public async upsert(ownerUserId: string, alias: string, identity: {
     orgId: string; username: string; instanceUrl: string;
-  }, authUrl: string): Promise<SalesforceConnection> {
+  }, authUrl: string, expected?: { id: string; generation: number }): Promise<SalesforceConnection> {
     if (this.vault === undefined) throw new SfudError('STORAGE_ERROR', 'Salesforce 인증 암호화 키가 없습니다.');
     if (!isOrgIdentifier(alias) || alias.length > 120) throw new SfudError('INVALID_ARGUMENT', 'Salesforce 연결 별칭이 올바르지 않습니다.');
     const normalizedOrgId = normalizeSalesforceOrgId(identity.orgId);
     const vault = this.vault;
     return this.database.transaction(async (db) => {
-      const existing = await db.get<ConnectionRow>(
+      const duplicate = await db.get<ConnectionRow>(
         'SELECT * FROM salesforce_connections WHERE owner_user_id = ? AND alias = ?', ownerUserId, alias);
+      const existing = expected === undefined ? duplicate : await db.get<ConnectionRow>(
+        'SELECT * FROM salesforce_connections WHERE id = ? AND owner_user_id = ?', expected.id, ownerUserId);
+      if (expected !== undefined && (existing === undefined || existing.generation !== expected.generation)) {
+        throw new SfudError('ORG_IDENTITY_CHANGED', '실행 중 Salesforce 연결이 변경되었습니다. 다시 시작하세요.');
+      }
+      if (expected !== undefined && duplicate !== undefined && duplicate.id !== expected.id) {
+        throw new SfudError('INVALID_ARGUMENT', '이미 사용 중인 Salesforce 별칭입니다.');
+      }
       const id = existing?.id ?? randomUUID();
       const generation = (existing?.generation ?? 0) + 1;
       const encrypted = vault.encrypt(authUrl, context(ownerUserId, id));
       const now = new Date().toISOString();
-      await db.run(`
-        INSERT INTO salesforce_connections (id, owner_user_id, alias, org_id, username, instance_url,
-          encrypted_auth_url, status, created_at, updated_at, generation)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'CONNECTED', ?, ?, ?)
-        ON CONFLICT(owner_user_id, alias) DO UPDATE SET
-          org_id = excluded.org_id, username = excluded.username, instance_url = excluded.instance_url,
-          encrypted_auth_url = excluded.encrypted_auth_url, status = 'CONNECTED', updated_at = excluded.updated_at,
-          generation = excluded.generation
-      `, id, ownerUserId, alias, normalizedOrgId, identity.username, identity.instanceUrl, encrypted,
-      existing?.created_at ?? now, now, generation);
+      if (expected !== undefined) {
+        await db.run(`UPDATE salesforce_connections SET alias = ?, org_id = ?, username = ?, instance_url = ?,
+          encrypted_auth_url = ?, status = 'CONNECTED', updated_at = ?, generation = ? WHERE id = ? AND owner_user_id = ?`,
+        alias, normalizedOrgId, identity.username, identity.instanceUrl, encrypted, now, generation, id, ownerUserId);
+      } else {
+        await db.run(`
+          INSERT INTO salesforce_connections (id, owner_user_id, alias, org_id, username, instance_url,
+            encrypted_auth_url, status, created_at, updated_at, generation)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'CONNECTED', ?, ?, ?)
+          ON CONFLICT(owner_user_id, alias) DO UPDATE SET
+            org_id = excluded.org_id, username = excluded.username, instance_url = excluded.instance_url,
+            encrypted_auth_url = excluded.encrypted_auth_url, status = 'CONNECTED', updated_at = excluded.updated_at,
+            generation = excluded.generation
+        `, id, ownerUserId, alias, normalizedOrgId, identity.username, identity.instanceUrl, encrypted,
+        existing?.created_at ?? now, now, generation);
+      }
       return toPublic((await db.get<ConnectionRow>(
         'SELECT * FROM salesforce_connections WHERE owner_user_id = ? AND alias = ?', ownerUserId, alias))!);
     });
@@ -100,6 +114,20 @@ export class SalesforceConnectionRepository {
       updated_at = ? WHERE id = ? AND owner_user_id = ? AND generation = ?`, encrypted,
     new Date().toISOString(), id, ownerUserId, expectedGeneration);
     return (result.changes ?? 0) === 1;
+  }
+
+  public async rename(ownerUserId: string, id: string, alias: string): Promise<SalesforceConnection | undefined> {
+    if (!isOrgIdentifier(alias) || alias.length > 120) throw new SfudError('INVALID_ARGUMENT', 'Salesforce 연결 별칭이 올바르지 않습니다.');
+    return this.database.transaction(async (db) => {
+      const existing = await db.get<ConnectionRow>('SELECT * FROM salesforce_connections WHERE id = ? AND owner_user_id = ?', id, ownerUserId);
+      if (existing === undefined) return undefined;
+      if (existing.alias === alias) return toPublic(existing);
+      const duplicate = await db.get<{ id: string }>('SELECT id FROM salesforce_connections WHERE owner_user_id = ? AND alias = ?', ownerUserId, alias);
+      if (duplicate !== undefined) throw new SfudError('INVALID_ARGUMENT', '이미 사용 중인 Salesforce 별칭입니다.');
+      await db.run('UPDATE salesforce_connections SET alias = ?, generation = generation + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?',
+        alias, new Date().toISOString(), id, ownerUserId);
+      return toPublic((await db.get<ConnectionRow>('SELECT * FROM salesforce_connections WHERE id = ? AND owner_user_id = ?', id, ownerUserId))!);
+    });
   }
 
   public async markReauthRequired(ownerUserId: string, id: string, expectedGeneration: number): Promise<boolean> {

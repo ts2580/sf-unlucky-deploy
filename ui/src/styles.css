@@ -404,6 +404,10 @@ button:focus-visible, a:focus-visible { outline: 3px solid #60a5fa; outline-offs
 .connection-table thead th { padding-block: 11px; color: #61768a; background: #f5f8fc; font-size: .72rem; font-weight: 700; }
 .connection-table tbody th, .connection-table tbody td { border-top: 1px solid #e9eef4; color: #30475f; font-weight: 400; }
 .connection-table tbody tr:hover { background: #fbfdff; }
+.connection-editable-row { cursor: pointer; }
+.connection-name-button { width: 100%; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.connection-name-button:focus-visible { outline: 2px solid #55a7e7; outline-offset: 4px; border-radius: 3px; }
+.connection-name-button:disabled { cursor: default; }
 .connection-cell-content { display: grid; justify-items: start; gap: 5px; min-width: 0; }
 .connection-cell-content > strong { font-size: .78rem; font-weight: 700; }
 .connection-cell-secondary { color: #7a8da0; font-size: .7rem; }

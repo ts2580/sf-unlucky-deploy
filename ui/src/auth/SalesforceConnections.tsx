@@ -10,6 +10,7 @@ interface SalesforceConnection {
   alias: string;
   orgId?: string;
   username?: string;
+  instanceUrl?: string;
   status: 'CONNECTED' | 'REAUTH_REQUIRED';
 }
 
@@ -39,6 +40,8 @@ interface SalesforceOAuthStart {
 }
 
 export function SalesforceConnections() {
+  const [editingConnection, setEditingConnection] = useState<SalesforceConnection>();
+  const [editedAlias, setEditedAlias] = useState('');
   const [registrationOpen, setRegistrationOpen] = useState(false);
   const [data, setData] = useState<ConnectionList>();
   const [alias, setAlias] = useState('');
@@ -142,8 +145,8 @@ export function SalesforceConnections() {
     setAuthUrl('');
     setBusy(true); setError(''); setMessage('');
     try {
-      await apiRequest('/api/v1/salesforce/connections', {
-        method: 'POST', csrf: true, timeoutMs: 90_000,
+      await apiRequest(`/api/v1/salesforce/connections${editingConnection ? `/${encodeURIComponent(editingConnection.id)}` : ''}`, {
+        method: editingConnection ? 'PUT' : 'POST', csrf: true, timeoutMs: 90_000,
         body: { alias: alias.trim(), sfdxAuthUrl: submittedUrl },
       });
       setMessage(`${alias.trim()} Salesforce 연결을 등록했습니다.`);
@@ -157,16 +160,35 @@ export function SalesforceConnections() {
     event.preventDefault();
     setBusy(true); setError(''); setMessage('');
     try {
-      const result = await apiRequest<SalesforceOAuthStart, { alias: string; instanceUrl: string }>(
+      const result = await apiRequest<SalesforceOAuthStart, { alias: string; instanceUrl: string; connectionId?: string }>(
         '/api/v1/salesforce/oauth/start', {
           method: 'POST', csrf: true,
-          body: { alias: alias.trim(), instanceUrl: instanceUrl.trim() },
+          body: { alias: alias.trim(), instanceUrl: instanceUrl.trim(), ...(editingConnection ? { connectionId: editingConnection.id } : {}) },
         });
       window.location.assign(result.authorizationUrl);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Salesforce 로그인을 시작하지 못했습니다.');
       setBusy(false);
     }
+  };
+
+  const editConnection = (connection: SalesforceConnection) => {
+    if (busy || localLoginId !== undefined) return;
+    setEditingConnection(connection); setEditedAlias(connection.alias); setAlias(connection.alias); setLocalAlias(connection.alias);
+    setAuthUrl(''); setInstanceUrl(connection.instanceUrl ?? 'https://login.salesforce.com');
+    setError(''); setMessage(''); setRegistrationOpen(true);
+  };
+  const rename = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!editingConnection || busy) return;
+    setBusy(true); setError(''); setMessage('');
+    try {
+      const result = await apiRequest<{ connection: SalesforceConnection }, { alias: string }>(`/api/v1/salesforce/connections/${encodeURIComponent(editingConnection.id)}`,
+        { method: 'PATCH', csrf: true, body: { alias: editedAlias.trim() } });
+      setEditingConnection(result.connection); setAlias(result.connection.alias); setLocalAlias(result.connection.alias);
+      setMessage('연결 별칭을 저장했습니다.'); await refresh();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '별칭을 저장하지 못했습니다.'); }
+    finally { setBusy(false); }
   };
 
   const remove = async (connection: SalesforceConnection) => {
@@ -183,17 +205,24 @@ export function SalesforceConnections() {
     <div className="panel-heading"><span className="card-icon icon-blue"><Icon name="cloud" /></span><div>
       <h2 id="salesforce-connections-heading">Salesforce 인증</h2>
       {data && <p>{data.localMode ? '현재 OS 계정의 Salesforce CLI 인증을 사용합니다.' : '현재 사용자에게만 연결을 저장합니다.'}</p>}
-    </div><button type="button" className="button button-primary" disabled={!data || busy} onClick={() => { if (localLoginId === undefined) { setAlias(''); setLocalAlias(''); setMessage(''); } setAuthUrl(''); setError(''); setRegistrationOpen(true); }}>새 연결</button></div>
+    </div><button type="button" className="button button-primary" disabled={!data || busy} onClick={() => { if (localLoginId === undefined) { setEditingConnection(undefined); setInstanceUrl('https://login.salesforce.com'); setAlias(''); setLocalAlias(''); setMessage(''); } setAuthUrl(''); setError(''); setRegistrationOpen(true); }}>새 연결</button></div>
     {loadState === 'initial' && <div className="salesforce-load-state" role="status" aria-live="polite" aria-busy="true"><span className="salesforce-skeleton" />Salesforce 인증 정보를 불러오는 중……</div>}
     {loadState === 'error' && <div className="salesforce-load-error" role="alert"><span>{loadError}</span><button type="button" className="small-button" onClick={() => void refresh().catch(() => undefined)}>다시 시도</button></div>}
     {data && loadState !== 'initial' && <div className="salesforce-content" aria-busy={loadState === 'refreshing'}>
-    {registrationOpen && <ConnectionDialog title="Salesforce 새 연결" busy={busy} onClose={() => { setRegistrationOpen(false); setAuthUrl(''); setError(''); }}>
+    {registrationOpen && <ConnectionDialog title={editingConnection ? 'Salesforce 연결 설정' : 'Salesforce 새 연결'} busy={busy} onClose={() => { setRegistrationOpen(false); setAuthUrl(''); setError(''); }}>
+    {editingConnection && <>
+      <form className="salesforce-form" onSubmit={(event) => void rename(event)}>
+        <label>연결 별칭 변경<input required value={editedAlias} maxLength={120} autoComplete="off" disabled={busy || localLoginId !== undefined} onChange={(event) => setEditedAlias(event.target.value)} /></label>
+        <button type="submit" className="small-button" disabled={busy || localLoginId !== undefined || !editedAlias.trim()}>별칭 저장</button>
+      </form>
+      <p>로그인 주소를 선택한 뒤 원하는 Org로 다시 인증하면 연결 대상이 변경됩니다. 인증에 실패하면 기존 연결을 유지합니다.</p>
+    </>}
     {data.localMode
       ? <>
         <div className="salesforce-guide"><p>서버에 설치된 Salesforce CLI 기본 OAuth로 로그인합니다.</p><p>헤드리스 서버에서는 SSH 터널에 콜백 포트도 추가하세요.</p><code>-L {data.callbackPort ?? 1717}:localhost:{data.callbackPort ?? 1717}</code></div>
         <form className="salesforce-form" onSubmit={(event) => void startLocalLogin(event)}>
           <div className="salesforce-fields">
-          <label><span>연결 별칭</span><input required value={localAlias} maxLength={120} autoComplete="off" onChange={(event) => setLocalAlias(event.target.value)} disabled={busy || localLoginId !== undefined} /></label>
+          <label><span>연결 별칭</span><input required value={localAlias} maxLength={120} autoComplete="off" onChange={(event) => setLocalAlias(event.target.value)} disabled={busy || localLoginId !== undefined} readOnly={editingConnection !== undefined} /></label>
           <label><span>Salesforce 로그인 주소</span><input type="url" required value={instanceUrl} maxLength={512} list="sfud-salesforce-login-urls" onChange={(event) => setInstanceUrl(event.target.value)} disabled={busy || localLoginId !== undefined} /></label>
           <datalist id="sfud-salesforce-login-urls"><option value="https://login.salesforce.com" /><option value="https://test.salesforce.com" /></datalist>
           </div><div className="salesforce-actions"><button className="button button-primary" type="submit" disabled={busy || localLoginId !== undefined || !localAlias.trim()}>{localLoginId ? '브라우저 로그인 대기 중……' : '브라우저에서 Salesforce 로그인'}</button></div>
@@ -204,7 +233,7 @@ export function SalesforceConnections() {
         <div className="salesforce-guide"><p>Salesforce 승인 후 연결은 이 서버에 로그인한 사용자 계정에 저장됩니다.</p></div>
         {data.oauth?.ready && <form className="salesforce-form" onSubmit={(event) => void startRemoteOAuth(event)}>
           <div className="salesforce-fields">
-            <label><span>연결 별칭</span><input required value={alias} maxLength={120} autoComplete="off" onChange={(event) => setAlias(event.target.value)} disabled={busy} /></label>
+            <label><span>연결 별칭</span><input required value={alias} maxLength={120} autoComplete="off" onChange={(event) => setAlias(event.target.value)} disabled={busy} readOnly={editingConnection !== undefined} /></label>
             <label><span>Salesforce 로그인 주소</span><input type="url" required value={instanceUrl} maxLength={512} list="sfud-salesforce-login-urls-remote" onChange={(event) => setInstanceUrl(event.target.value)} disabled={busy} /></label>
             <datalist id="sfud-salesforce-login-urls-remote"><option value="https://login.salesforce.com" /><option value="https://test.salesforce.com" /></datalist>
           </div><div className="salesforce-actions"><button className="button button-primary" type="submit" disabled={busy || !alias.trim()}>{busy ? 'Salesforce로 이동 중……' : 'Salesforce 계정 연결'}</button></div>
@@ -228,7 +257,7 @@ export function SalesforceConnections() {
         </div>
         <form className="salesforce-form" onSubmit={(event) => void register(event)}>
           <div className="salesforce-fields">
-          <label><span>연결 별칭</span><input required value={alias} maxLength={120} autoComplete="off" onChange={(event) => setAlias(event.target.value)} disabled={busy} /></label>
+          <label><span>연결 별칭</span><input required value={alias} maxLength={120} autoComplete="off" onChange={(event) => setAlias(event.target.value)} disabled={busy} readOnly={editingConnection !== undefined} /></label>
           <label><span>SFDX 인증 URL</span><input type="password" required value={authUrl} maxLength={16384} autoComplete="new-password" spellCheck={false} onChange={(event) => setAuthUrl(event.target.value)} disabled={busy} /></label>
           </div><div className="salesforce-actions"><button className="button button-primary" type="submit" disabled={busy || data.storageStatus !== 'ready' || !authUrl || !alias.trim()}>{busy ? '연결 확인 중……' : '연결 등록 또는 재인증'}</button></div>
         </form>
@@ -241,11 +270,13 @@ export function SalesforceConnections() {
       refreshing={loadState === 'refreshing'} disabled={busy} onRefresh={() => void refresh().catch(() => undefined)}
       rows={data.connections.map((connection) => ({
         id: connection.id,
+        onEdit: () => editConnection(connection),
+        editDisabled: busy || localLoginId !== undefined,
         name: <><strong>{connection.alias}</strong><span className="connection-cell-secondary">Salesforce</span></>,
         target: <><span>{connection.username ?? '사용자 확인 필요'}</span><code className="connection-cell-secondary">{connection.orgId ?? 'Org ID 확인 필요'}</code></>,
         connected: connection.status === 'CONNECTED',
         status: connection.status === 'CONNECTED' ? '연결됨' : '재인증 필요',
-        actions: data.localMode ? <span className="connection-cell-secondary">CLI에서 관리</span>
+        actions: data.localMode ? <button type="button" className="small-button" disabled={busy || localLoginId !== undefined} onClick={() => editConnection(connection)}>설정 변경</button>
           : <button type="button" className="small-button" disabled={busy} onClick={() => void remove(connection)}>연결 해제</button>,
       }))} />
     {loadError && <p className="salesforce-feedback salesforce-feedback-error" role="alert">새로고침에 실패했습니다. 현재 표시된 연결은 마지막으로 불러온 정보입니다. {loadError}</p>}

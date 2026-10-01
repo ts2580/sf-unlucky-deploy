@@ -27,6 +27,7 @@ export const GitAliasInputSchema = Type.Object({
 
 export const GitTokenInputSchema = Type.Object({
   provider: GitProviderIdSchema,
+  changeTarget: Type.Optional(Type.Boolean()),
   token: Type.String({ minLength: 1, maxLength: 16384, pattern: '^[^\\s\\x00-\\x1f\\x7f]+$' }),
   apiUsername: Type.Optional(Type.String({ minLength: 1, maxLength: 254 })),
   expiresAt: Type.Optional(Type.String({ maxLength: 30 })),

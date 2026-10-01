@@ -281,3 +281,31 @@ async function mockAuthenticatedConsole(page: import('@playwright/test').Page, l
     return route.fulfill({ json: json[path] ?? {} });
   });
 }
+
+
+test('Salesforce 연결을 클릭해 별칭을 저장하고 같은 연결의 대상 Org 재인증을 시작한다', async ({ page }) => {
+  await mockAuthenticatedConsole(page, false);
+  let saved = { id: '11111111-1111-4111-8111-111111111111', alias: 'existing-org', username: 'user@example.com', orgId: '00D000000000001', status: 'CONNECTED' };
+  await page.route('**/api/v1/salesforce/connections', (route) => route.fulfill({ json: { ...remoteReadyConnections, connections: [saved] } }));
+  await page.route('**/api/v1/salesforce/connections/*', (route) => {
+    saved = { ...saved, alias: route.request().postDataJSON().alias };
+    return route.fulfill({ json: { connection: saved } });
+  });
+  const requests: Array<Record<string, unknown>> = [];
+  await page.route('**/api/v1/salesforce/oauth/start', (route) => {
+    requests.push(route.request().postDataJSON());
+    return route.fulfill({ status: 400, json: { error: { code: 'SALESFORCE_OAUTH_FAILED', message: 'fixture login failure' } } });
+  });
+  await page.goto('http://127.0.0.1:27546/auth');
+  await page.getByRole('button', { name: /^existing-org/u }).click();
+  const dialog = page.getByRole('dialog', { name: 'Salesforce 연결 설정' });
+  await dialog.getByLabel('연결 별칭 변경').fill('renamed-org');
+  await dialog.getByRole('button', { name: '별칭 저장', exact: true }).click();
+  await expect(dialog.getByRole('status')).toContainText('별칭을 저장했습니다.');
+  await dialog.getByLabel('Salesforce 로그인 주소').fill('https://test.salesforce.com');
+  await dialog.getByRole('button', { name: 'Salesforce 계정 연결', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toContainText('fixture login failure');
+  expect(requests[0]).toMatchObject({ connectionId: saved.id, alias: 'renamed-org', instanceUrl: 'https://test.salesforce.com' });
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('table', { name: 'Salesforce 연결 목록' })).toContainText('renamed-org');
+});

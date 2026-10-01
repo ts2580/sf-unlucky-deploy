@@ -8,6 +8,8 @@ interface ConnectionRow {
   status: string;
   statusDetail?: ReactNode;
   actions: ReactNode;
+  onEdit?: () => void;
+  editDisabled?: boolean;
 }
 
 export function ConnectionTable({ label, rows, emptyMessage, refreshing, disabled, onRefresh }: {
@@ -31,8 +33,15 @@ export function ConnectionTable({ label, rows, emptyMessage, refreshing, disable
         <thead><tr><th scope="col">연결 이름</th><th scope="col">대상</th><th scope="col">상태</th><th scope="col">관리</th></tr></thead>
         <tbody>{rows.length === 0
           ? <tr><td colSpan={4} className="connection-table-empty">{emptyMessage}</td></tr>
-          : rows.map((row) => <tr key={row.id}>
-            <th scope="row"><div className="connection-cell-content">{row.name}</div></th>
+          : rows.map((row) => <tr key={row.id} className={row.onEdit && !row.editDisabled ? 'connection-editable-row' : undefined}
+            onClick={(event) => {
+              if (disabled || row.editDisabled || !row.onEdit || !(event.target instanceof HTMLElement)
+                || event.target.closest('button, input, select, textarea, a, form')) return;
+              row.onEdit();
+            }}>
+            <th scope="row">{row.onEdit
+              ? <button type="button" className="connection-name-button connection-cell-content" disabled={disabled || row.editDisabled} onClick={row.onEdit}>{row.name}</button>
+              : <div className="connection-cell-content">{row.name}</div>}</th>
             <td><div className="connection-cell-content">{row.target}</div></td>
             <td><div className="connection-cell-content"><span className={`connection-state ${row.connected ? 'connection-state-ready' : 'connection-state-warning'}`}>{row.status}</span>{row.statusDetail}</div></td>
             <td><div className="connection-table-actions">{row.actions}</div></td>
