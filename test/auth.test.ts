@@ -19,7 +19,7 @@ describe('로컬 관리자 인증', () => {
       });
       expect(login.statusCode).toBe(200);
       expect(await server.sfudRuntime.store.database.get<{ password_digest: string }>('SELECT password_digest FROM password_credentials'))
-        .toMatchObject({ password_digest: expect.stringMatching(/^scrypt\$32768\$8\$1\$/u) });
+        .toMatchObject({ password_digest: expect.stringMatching(/^scrypt\$32768\$8\$3\$/u) });
     } finally {
       await server.close();
     }

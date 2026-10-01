@@ -65,6 +65,19 @@ export class AuthService {
     return this.bootstrapToken;
   }
 
+  public async ensureLocalOperator(): Promise<void> {
+    const timestamp = this.now().toISOString();
+    await this.database.run(`
+      INSERT INTO users (id, email, display_name, role, created_at, updated_at)
+      VALUES ('local-operator', 'local@sfud.invalid', '로컬 운영자', 'ADMIN', ?, ?)
+      ON CONFLICT(id) DO NOTHING
+    `, timestamp, timestamp);
+  }
+
+  public async createLocalSession(): Promise<AuthenticatedSession> {
+    return this.createSession('local-operator');
+  }
+
   public async bootstrapAdmin(input: {
     bootstrapToken: string;
     email: string;

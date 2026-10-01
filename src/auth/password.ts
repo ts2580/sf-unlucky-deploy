@@ -4,7 +4,7 @@ const LEGACY_COST = 16_384;
 const TARGET_COST = 32_768;
 const MAX_COST = TARGET_COST;
 const BLOCK_SIZE = 8;
-const PARALLELIZATION = 1;
+const PARALLELIZATION = 3;
 const MAX_MEMORY = 64 * 1024 * 1024;
 const SALT_ENCODED_LENGTH = 22;
 const KEY_ENCODED_LENGTH = 86;
@@ -21,7 +21,8 @@ export async function verifyPassword(password: string, digest: string): Promise<
   const parameters = parsePasswordDigest(digest);
   if (parameters === undefined) return false;
   try {
-    const actual = await derive(password, parameters.salt, parameters.cost, BLOCK_SIZE, PARALLELIZATION);
+    const actual = await derive(password, parameters.salt, parameters.cost,
+      parameters.blockSize, parameters.parallelization);
     return timingSafeEqual(actual, parameters.expected);
   } catch {
     return false;
@@ -31,7 +32,8 @@ export async function verifyPassword(password: string, digest: string): Promise<
 /** A valid legacy digest is retained only long enough to replace it after login. */
 export function passwordNeedsRehash(digest: string): boolean {
   const parameters = parsePasswordDigest(digest);
-  return parameters !== undefined && parameters.cost !== TARGET_COST;
+  return parameters !== undefined && (parameters.cost !== TARGET_COST
+    || parameters.blockSize !== BLOCK_SIZE || parameters.parallelization !== PARALLELIZATION);
 }
 
 function assertPassword(password: string): void {
@@ -62,6 +64,8 @@ async function derive(
 
 interface PasswordDigestParameters {
   cost: number;
+  blockSize: number;
+  parallelization: number;
   salt: Buffer;
   expected: Buffer;
 }
@@ -73,7 +77,8 @@ function parsePasswordDigest(digest: string): PasswordDigestParameters | undefin
   const blockSize = Number(parts[2]);
   const parallelization = Number(parts[3]);
   if (!Number.isInteger(cost) || !Number.isInteger(blockSize) || !Number.isInteger(parallelization)
-    || cost < LEGACY_COST || cost > MAX_COST || blockSize !== BLOCK_SIZE || parallelization !== PARALLELIZATION) {
+    || cost < LEGACY_COST || cost > MAX_COST || blockSize !== BLOCK_SIZE
+    || ![1, PARALLELIZATION].includes(parallelization)) {
     return undefined;
   }
   if (parts[1] !== String(cost) || parts[2] !== String(blockSize) || parts[3] !== String(parallelization)
@@ -82,5 +87,5 @@ function parsePasswordDigest(digest: string): PasswordDigestParameters | undefin
   const expected = Buffer.from(parts[5]!, 'base64url');
   if (salt.length !== 16 || expected.length !== KEY_LENGTH
     || salt.toString('base64url') !== parts[4] || expected.toString('base64url') !== parts[5]) return undefined;
-  return { cost, salt, expected };
+  return { cost, blockSize, parallelization, salt, expected };
 }

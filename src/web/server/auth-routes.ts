@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import { AuthError } from '../../auth/auth-service.js';
+import { enterSalesforceUserContext } from '../../salesforce/user-context.js';
 import { MAX_PASSWORD_LENGTH } from '../../auth/password.js';
 import type { SfudUser } from '../../storage/user-repository.js';
 import type { UserRole } from '../../storage/user-repository.js';
@@ -42,8 +43,16 @@ export async function registerAuthRoutes(
   const bootstrapLimiter = new FailedAttemptLimiter(5, 30 * 60 * 1_000);
   const passwordSlots = new PasswordExecutionLimiter(5);
 
-  app.get('/api/v1/auth/status', async (request): Promise<AuthStatusResponse> => {
-    const user = await app.sfudRuntime.auth.authenticate(readCookie(request, SESSION_COOKIE));
+  app.get('/api/v1/auth/status', async (request, reply): Promise<AuthStatusResponse> => {
+    let user = await app.sfudRuntime.auth.authenticate(readCookie(request, SESSION_COOKIE));
+    if (app.sfudRuntime.localMode) {
+      if (user === undefined) {
+        const session = await app.sfudRuntime.auth.createLocalSession();
+        setAuthCookies(request, reply, session.sessionToken, session.csrfToken);
+        user = session.user;
+      }
+      return { localMode: true, setupRequired: false, authenticated: true, user: toApiUser(user) };
+    }
     return {
       setupRequired: await app.sfudRuntime.auth.isSetupRequired(),
       authenticated: user !== undefined,
@@ -52,6 +61,7 @@ export async function registerAuthRoutes(
   });
 
   app.post<{ Body: BootstrapBody }>('/api/v1/auth/bootstrap', async (request, reply) => {
+    if (app.sfudRuntime.localMode) return sendError(reply, 403, 'LOCAL_MODE', '로컬 모드에서는 사용자 설정을 사용할 수 없습니다.');
     if (!hasAllowedOrigin(request, options.publicOrigin)) {
       return sendError(reply, 403, 'ORIGIN_DENIED', '허용되지 않은 요청 출처입니다.');
     }
@@ -83,6 +93,7 @@ export async function registerAuthRoutes(
   });
 
   app.post<{ Body: LoginBody }>('/api/v1/auth/login', async (request, reply) => {
+    if (app.sfudRuntime.localMode) return sendError(reply, 403, 'LOCAL_MODE', '로컬 모드에서는 로그인을 사용할 수 없습니다.');
     if (!hasAllowedOrigin(request, options.publicOrigin)) {
       return sendError(reply, 403, 'ORIGIN_DENIED', '허용되지 않은 요청 출처입니다.');
     }
@@ -126,6 +137,7 @@ export async function registerAuthRoutes(
   });
 
   app.post('/api/v1/auth/logout', async (request, reply) => {
+    if (app.sfudRuntime.localMode) return sendError(reply, 403, 'LOCAL_MODE', '로컬 모드에서는 로그아웃을 사용할 수 없습니다.');
     const session = await requireAuthenticatedSession(app, request, reply, { csrf: true });
     if (session === undefined) return;
     await app.sfudRuntime.auth.revoke(readCookie(request, SESSION_COOKIE)!);
@@ -158,6 +170,7 @@ export async function requireAuthenticatedSession(
     sendError(reply, 403, 'AUTHORIZATION_DENIED', '이 작업을 실행할 권한이 없습니다.');
     return undefined;
   }
+  enterSalesforceUserContext(state.user.id);
   return { user: state.user, sessionWorkspaceId: state.sessionWorkspaceId };
 }
 
