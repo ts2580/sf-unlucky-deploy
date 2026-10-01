@@ -38,6 +38,7 @@ describe('sfud CLI', () => {
       '--data-dir',
       '--no-open',
       '--allow-remote',
+      '--allow-git-ip',
     ]));
   });
 
@@ -67,5 +68,12 @@ describe('sfud CLI', () => {
     expect(createProgram().version()).toBe(CLI_VERSION);
     await expect(createProgram().parseAsync(['node', 'sfud', 'ui', '--no-open']))
       .rejects.toThrow(/포트는 1부터 65535/u);
+  });
+
+  it('대문자 LOCAL 환경변수를 UI 모드 설정으로 검증한다', async () => {
+    vi.stubEnv('LOCAL', 'invalid');
+
+    await expect(createProgram().parseAsync(['node', 'sfud', 'ui', '--no-open']))
+      .rejects.toThrow(/LOCAL 환경변수는 true 또는 false/u);
   });
 });
