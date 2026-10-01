@@ -114,7 +114,8 @@ export async function createWebRuntime(
     });
     let vault: TokenVault | undefined;
     let gitTokenStorageStatus: WebRuntime['gitTokenStorageStatus'] = 'not_configured';
-    const tokenSecret = process.env.SFUD_GIT_TOKEN_SECRET;
+    const sharedTokenSecret = process.env.SFUD_TOKEN_SECRET;
+    const tokenSecret = sharedTokenSecret ?? process.env.SFUD_GIT_TOKEN_SECRET;
     if (tokenSecret !== undefined || process.env.SFUD_GIT_TOKEN_KEY_FILE !== undefined) {
       try {
         const version = Number(process.env.SFUD_GIT_TOKEN_KEY_VERSION ?? '1');
@@ -134,7 +135,7 @@ export async function createWebRuntime(
     }
     let sfVault: TokenVault | undefined;
     let sfTokenStorageStatus: WebRuntime['sfTokenStorageStatus'] = 'not_configured';
-    const sfTokenSecret = process.env.SFUD_SF_TOKEN_SECRET;
+    const sfTokenSecret = sharedTokenSecret ?? process.env.SFUD_SF_TOKEN_SECRET;
     if (sfTokenSecret !== undefined) {
       try {
         await store.database.run('INSERT INTO salesforce_token_key_parameters (id, salt) VALUES (1, ?) ON CONFLICT(id) DO NOTHING',

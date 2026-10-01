@@ -168,7 +168,7 @@ describe('Salesforce CLI process limits', () => {
   });
 
   it('Salesforce 자식 프로세스에 Git 토큰·키 파일·credential bridge 환경을 전달하지 않는다', async () => {
-    const keys = ['SFUD_GIT_TOKEN_SECRET', 'SFUD_GIT_TOKEN_KEY_FILE', 'SFUD_GITHUB_CLIENT_SECRET_FILE', 'GH_TOKEN', 'GIT_ASKPASS', 'SFUD_GIT_BRIDGE_NONCE'];
+    const keys = ['SFUD_TOKEN_SECRET', 'SFUD_SF_TOKEN_SECRET', 'SFUD_GIT_TOKEN_SECRET', 'SFUD_GIT_TOKEN_KEY_FILE', 'SFUD_GITHUB_CLIENT_SECRET_FILE', 'GH_TOKEN', 'GIT_ASKPASS', 'SFUD_GIT_BRIDGE_NONCE'];
     for (const key of keys) vi.stubEnv(key, 'secret-fixture');
     const fixture = await createNodeScript(`process.stdout.write(JSON.stringify({ status: 0, result: ${JSON.stringify(keys)}.some(key => process.env[key] !== undefined) }));`);
     try {

@@ -211,7 +211,7 @@ export function SalesforceConnections() {
         </form>}
         {data.oauth?.ready !== true && <p className="salesforce-feedback salesforce-feedback-error">
           {data.oauth?.reason === 'storage_unavailable'
-            ? <>관리자가 <code>SFUD_SF_TOKEN_SECRET</code>을 설정해야 사용자별 연결을 저장할 수 있습니다.</>
+            ? <>관리자가 <code>SFUD_TOKEN_SECRET</code>을 설정해야 사용자별 연결을 저장할 수 있습니다.</>
             : data.oauth?.reason === 'https_required'
               ? '브라우저 OAuth를 사용하려면 HTTPS 공개 주소가 필요합니다.'
               : '관리자가 Salesforce OAuth 앱과 공개 HTTPS 주소를 설정해야 브라우저 로그인을 사용할 수 있습니다.'}
@@ -232,7 +232,7 @@ export function SalesforceConnections() {
           <label><span>SFDX 인증 URL</span><input type="password" required value={authUrl} maxLength={16384} autoComplete="new-password" spellCheck={false} onChange={(event) => setAuthUrl(event.target.value)} disabled={busy} /></label>
           </div><div className="salesforce-actions"><button className="button button-primary" type="submit" disabled={busy || data.storageStatus !== 'ready' || !authUrl || !alias.trim()}>{busy ? '연결 확인 중……' : '연결 등록 또는 재인증'}</button></div>
         </form>
-        {data.storageStatus !== 'ready' && <p className="salesforce-feedback salesforce-feedback-error">관리자가 <code>SFUD_SF_TOKEN_SECRET</code>을 설정해야 사용자별 Salesforce 인증 URL을 저장할 수 있습니다.</p>}
+        {data.storageStatus !== 'ready' && <p className="salesforce-feedback salesforce-feedback-error">관리자가 <code>SFUD_TOKEN_SECRET</code>을 설정해야 사용자별 Salesforce 인증 URL을 저장할 수 있습니다.</p>}
         </details>
       </>}
     {message && <p className="salesforce-feedback" role="status">{message}</p>}{error && <p className="salesforce-feedback salesforce-feedback-error" role="alert">{error}</p>}

@@ -252,7 +252,7 @@ function sendOAuthError(reply: { code(statusCode: number): { send(payload: unkno
 
 function oauthUnavailableMessage(reason: 'not_configured' | 'https_required' | 'storage_unavailable' | undefined): string {
   return reason === 'storage_unavailable'
-    ? '관리자가 SFUD_SF_TOKEN_SECRET을 설정해야 사용자별 Salesforce 연결을 저장할 수 있습니다.'
+    ? '관리자가 SFUD_TOKEN_SECRET을 설정해야 사용자별 Salesforce 연결을 저장할 수 있습니다.'
     : reason === 'https_required'
       ? 'Salesforce 브라우저 로그인에는 HTTPS 공개 주소가 필요합니다.'
       : '관리자가 Salesforce OAuth 앱과 공개 HTTPS 주소를 설정해야 합니다.';
