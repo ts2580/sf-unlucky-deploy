@@ -80,9 +80,10 @@ export function GitSettings({ user, section = 'projects' }: { user: ApiUser; sec
       const result = await apiRequest<{ connection: GitConnection }, GitTokenInput>(`/api/v1/git/connections${replacement ? `/${encodeURIComponent(replacement.id)}` : ''}`,
         { method: replacement ? 'PUT' : 'POST', csrf: true, body,
           requestSchema: GitTokenInputSchema, responseSchema: GitConnectionResponseSchema });
+      setAccounts((old) => [...old.filter((entry) => entry.id !== result.connection.id), result.connection]);
       setConnected(result.connection); setReplacement(undefined); setEmail(''); setExpiry('');
       setMessage(`${providerNames[result.connection.provider]} ${result.connection.repositoryPath ? '저장소 연결' : '토큰'}을 등록했습니다.`);
-      try { await refresh(); } finally { setRegistrationOpen(false); }
+      try { await refresh(); } finally { setRegistrationOpen(false); if (!result.connection.repositoryPath && !replacement) setImportOpen(true); }
     } catch (cause) { setError(errorMessage(cause)); }
     finally { setBusy(false); }
   };
@@ -128,6 +129,7 @@ export function GitSettings({ user, section = 'projects' }: { user: ApiUser; sec
       {registrationOpen && <ConnectionDialog title={replacement ? 'Git 연결 설정' : 'Git 새 연결'} busy={busy} onClose={closeRegistration}>
       {replacement && <GitAliasEditor key={replacement.id} alias={replacement.alias} initiallyEditing
         endpoint={`/api/v1/git/connections/${encodeURIComponent(replacement.id)}/alias`} disabled={busy} onSaved={refresh} />}
+      {replacement && !replacement.repositoryPath && <button type="button" className="small-button" disabled={busy || replacement.status !== 'ACTIVE'} onClick={() => { setConnected(replacement); closeRegistration(); setReimport(undefined); setImportOpen(true); }}>저장소 목록 조회</button>}
       <form onSubmit={(event) => void save(event)} className="git-token-form">
         <div className="git-form-grid">
           <label>연결 범위<select value={connectionMode} disabled={!canEdit || busy} onChange={(event) => {
@@ -177,16 +179,16 @@ export function GitSettings({ user, section = 'projects' }: { user: ApiUser; sec
       {!canEdit && <p>VIEWER 역할은 토큰을 등록하거나 변경할 수 없습니다.</p>}
       {loadState === 'refreshing' && <p className="git-load-refresh" role="status">Git 연결을 새로고침하는 중……</p>}
       {loadError && <p className="git-load-error" role="alert">새로고침에 실패했습니다. 마지막으로 불러온 연결을 표시합니다. {loadError}</p>}
-      {!registrationOpen && <>{message && <p role="status">{message}</p>}{error && <p className="settings-error" role="alert">{error}</p>}</>}
+      {!registrationOpen && <>{message && <p role="status">{message} <a href="/settings">Git 프로젝트 확인</a></p>}{error && <p className="settings-error" role="alert">{error}</p>}</>}
       </>}
     </section>}
     {section === 'projects' && <><section className="workflow-panel settings-wide git-panel git-import-launch" aria-labelledby="git-import-launch-heading">
       <div className="panel-heading"><span className="card-icon icon-violet"><Icon name="folder" /></span><div><h2 id="git-import-launch-heading">Git 프로젝트 가져오기</h2><p>저장소의 커밋을 고정해 비교와 배포에 사용합니다.</p></div>
         <button className="button button-primary" type="button" disabled={!canEdit || !configuration?.providers.some((entry) => entry.publicImport)} onClick={() => setImportOpen(true)}><Icon name="plus" />프로젝트 가져오기</button></div>
     </section>
-    {importOpen && <GitImportDialog userId={user.id} canEdit={canEdit} providers={configuration?.providers ?? []} connections={accounts}
-      connected={connected} reimport={reimport} onImported={() => { setRevision((value) => value + 1); setReimport(undefined); setImportOpen(false); }} onClose={() => { setReimport(undefined); setImportOpen(false); }} />}
     <GitRegisteredBranches canEdit={canEdit} revision={revision} />
     <GitProjectList canEdit={canEdit} revision={revision} onReimport={(item) => { setReimport({ ...item }); setImportOpen(true); }} /></>}
+    {importOpen && <GitImportDialog userId={user.id} canEdit={canEdit} providers={configuration?.providers ?? []} connections={accounts}
+      connected={connected} reimport={reimport} onImported={(kind) => { setMessage(kind === 'import' ? '저장소 가져오기를 시작했습니다. 설정에서 Git 프로젝트의 진행 상태를 확인하세요.' : '배포 브랜치를 등록했습니다. 설정에서 등록 브랜치를 확인하세요.'); setRevision((value) => value + 1); setReimport(undefined); setImportOpen(false); }} onClose={() => { setReimport(undefined); setImportOpen(false); }} />}
   </>;
 }

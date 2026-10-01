@@ -230,6 +230,7 @@ async function mockGitApis(page: Page, options: {
     if (method === 'DELETE') { accounts = []; return route.fulfill({ status: 204 }); }
     if (method === 'PUT') {
       const body = route.request().postDataJSON() as Record<string, unknown>;
+      if (tokenError !== undefined) { tokenRequests.push(body); return json(route, { error: tokenError }, 400); }
       csrfHeaders.push(route.request().headers()['x-sfud-csrf'] ?? '');
       tokenRequests.push(body);
       const account = connection({ ...(accounts[0] ?? {}),
@@ -1016,6 +1017,7 @@ test('PAT를 등록하고 교체하며 secret이 브라우저 저장소에 남�
   await openNewConnection(page);
   await expect(page.getByLabel('PAT / API Token')).toHaveValue('');
   expect(fixture.tokenRequests).toHaveLength(0);
+  await page.getByLabel('연결 범위').selectOption('account');
   fixture.setTokenError({ code: 'GIT_CONNECTION_FAILED', message: '토큰 검증 실패' });
   await page.getByLabel('PAT / API Token').fill('ghp-failing-token');
   await page.getByRole('button', { name: '토큰 검증 후 등록' }).click();
@@ -1030,14 +1032,51 @@ test('PAT를 등록하고 교체하며 secret이 브라우저 저장소에 남�
   expect(fixture.tokenRequests.at(-1)).toMatchObject({ provider: 'github', token });
   expect(fixture.csrfHeaders.every((header) => header.length > 0)).toBe(true);
   expect(await browserStorage(page)).not.toContain(token);
-  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: 'Git 프로젝트 가져오기' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'owner/project', exact: true })).toBeVisible();
+  expect(fixture.catalogRequests.length).toBeGreaterThan(0);
+  await page.keyboard.press('Escape');
 
-  await page.getByRole('button', { name: '토큰 교체' }).click();
+  await page.getByRole('region', { name: 'Git 계정 연결' }).getByRole('button', { name: /^github token account/u }).click();
   await expect(page.getByLabel('PAT / API Token')).toHaveValue('');
   await page.getByLabel('PAT / API Token').fill('ghp-e2e-replacement');
-  await page.getByRole('button', { name: '토큰 검증 후 교체' }).click();
+  await page.getByRole('button', { name: '검증 후 설정 저장' }).click();
   expect(fixture.tokenRequests.at(-1)).toMatchObject({ provider: 'github', token: 'ghp-e2e-replacement' });
   expect(await browserStorage(page)).not.toContain('ghp-e2e-replacement');
+});
+
+test('계정 연결 설정에서 목록을 다시 조회하고 저장소 선택을 가져오기로 이어간다', async ({ page }) => {
+  const fixture = await mockGitApis(page, { initialConnections: [connection({ displayName: '내 계정' })] });
+  await openConnections(page);
+  await page.getByRole('button', { name: /^내 계정/u }).click();
+  const settings = page.getByRole('dialog', { name: 'Git 연결 설정' });
+  await expect(settings).toBeVisible();
+  await expect(settings.getByLabel('PAT / API Token')).toHaveValue('');
+  await expect(settings.getByLabel('별칭', { exact: true })).not.toHaveAttribute('placeholder', '예: 커넥스 운영');
+  await settings.getByRole('button', { name: '저장소 목록 조회', exact: true }).click();
+  const picker = page.getByRole('dialog', { name: 'Git 프로젝트 가져오기' });
+  await expect(picker).toBeVisible();
+  await picker.getByRole('button', { name: 'owner/project', exact: true }).click();
+  await expect(picker.getByLabel('저장소 URL 또는 경로')).toHaveValue('owner/project');
+  await picker.getByRole('button', { name: '저장소 확인', exact: true }).click();
+  await expect(picker.getByLabel('브랜치 선택')).toHaveValue('main');
+  expect(fixture.catalogRequests.length).toBeGreaterThan(0);
+});
+
+test('등록된 저장소 연결을 클릭해 대상을 바꾸고 검증 실패 시 설정을 유지한다', async ({ page }) => {
+  const fixture = await mockGitApis(page, { initialConnections: [connection({ displayName: '기존 저장소', repositoryPath: 'owner/project' })] });
+  await openConnections(page);
+  await page.getByRole('button', { name: /^기존 저장소/u }).click();
+  const settings = page.getByRole('dialog', { name: 'Git 연결 설정' });
+  await settings.getByLabel('연결할 저장소 URL').fill('owner/changed');
+  fixture.setTokenError({ code: 'REPOSITORY_UNAVAILABLE', message: '대상 확인 실패' });
+  await settings.getByLabel('PAT / API Token').fill('replacement-fixture');
+  await settings.getByRole('button', { name: '검증 후 설정 저장' }).click();
+  await expect(settings.getByRole('alert')).toContainText('대상 확인 실패');
+  await expect(settings.getByLabel('PAT / API Token')).toHaveValue('');
+  expect(fixture.tokenRequests.at(-1)).toMatchObject({ changeTarget: true, repositoryPath: 'owner/changed' });
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('table', { name: 'Git 연결 목록' })).toContainText('owner/project');
 });
 
 test('GitHub fine-grained·classic PAT 붙여넣기의 앞뒤 공백과 개행을 정리하고 공유 계약을 통과한다', async ({ page }) => {
@@ -1063,11 +1102,15 @@ test('GitHub fine-grained·classic PAT 붙여넣기의 앞뒤 공백과 개행�
     if (index > 0) await page.getByRole('button', { name: '토큰 교체' }).click();
     await tokenInput.fill(value.pasted);
     if (value.expiry !== undefined) await page.getByLabel('만료일').fill(value.expiry);
-    await expect(page.getByRole('button', { name: index === 0 ? '토큰 검증 후 등록' : '토큰 검증 후 교체' })).toBeEnabled();
-    await page.getByRole('button', { name: index === 0 ? '토큰 검증 후 등록' : '토큰 검증 후 교체' }).click();
+    await expect(page.getByRole('button', { name: index === 0 ? '토큰 검증 후 등록' : '검증 후 설정 저장' })).toBeEnabled();
+    await page.getByRole('button', { name: index === 0 ? '토큰 검증 후 등록' : '검증 후 설정 저장' }).click();
     await expect(page.getByRole('region', { name: 'Git 계정 연결' }).getByText('github token account', { exact: true })).toBeVisible();
     expect(fixture.tokenRequests.at(-1)).toMatchObject({ provider: 'github', token: value.token,
       ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }) });
+    if (index === 0) {
+      await expect(page.getByRole('dialog', { name: 'Git 프로젝트 가져오기' })).toBeVisible();
+      await page.keyboard.press('Escape');
+    }
     await expect(page.getByRole('dialog')).toHaveCount(0);
   }
   expect(fixture.tokenRequests).toHaveLength(2);
@@ -1139,7 +1182,7 @@ test('세 제공자의 저장소 단위 연결은 계정 API·Bitbucket 이메�
       await page.getByRole('button', { name: '토큰 교체' }).click();
       await expect(page.getByLabel('연결할 저장소 URL')).toHaveValue(canonicalPath);
       await page.getByLabel('PAT / API Token').fill('ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
-      await page.getByRole('button', { name: '토큰 검증 후 교체' }).click();
+      await page.getByRole('button', { name: '검증 후 설정 저장' }).click();
       await expect(page.getByRole('dialog')).toHaveCount(0);
       expect(fixture.tokenRequests.at(-1)).toMatchObject({ provider: 'github', repositoryPath: canonicalPath });
     }

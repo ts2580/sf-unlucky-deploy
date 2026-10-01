@@ -22,7 +22,7 @@ function readDraft(userId: string): Draft {
 
 export function GitImportDialog({ userId, canEdit, providers, connections, connected, reimport, onImported, onClose }: {
   userId: string; canEdit: boolean; providers: GitProvidersResponse['providers']; connections: GitConnection[];
-  connected?: GitConnection; reimport?: GitImport; onImported(): void;
+  connected?: GitConnection; reimport?: GitImport; onImported(kind: 'import' | 'registration'): void;
   onClose(): void;
 }) {
   const [draft, setDraft] = useState(() => readDraft(userId));
@@ -50,7 +50,7 @@ export function GitImportDialog({ userId, canEdit, providers, connections, conne
   useEffect(() => {
     if (connected === undefined) return;
     setDraft((old) => ({ ...old, provider: connected.provider, connectionId: connected.id,
-      repositoryPath: connected.repositoryPath ?? old.repositoryPath }));
+      repositoryPath: connected.repositoryPath ?? '', kind: 'branch', name: '' }));
     setRepository(undefined); setRefPage({ refs: [] });
     setMessage('연결이 완료되었습니다. 저장소와 기준 커밋을 확인하세요.');
   }, [connected]);
@@ -99,7 +99,7 @@ export function GitImportDialog({ userId, canEdit, providers, connections, conne
       await createImport({ ...repositoryRequest(repository.cloneUrl), ref: { kind: draft.kind, name: draft.name }, expectedCommitSha: sha, metadataType: selectedMetadataType.name });
       setMessage('가져오기를 시작했습니다. 아래에서 진행 상태를 확인하세요.');
       try { sessionStorage.removeItem(`sfud:git-draft:${userId}`); } catch { /* Optional storage. */ }
-      onImported();
+      onImported('import');
     } catch (cause) { setError(errorMessage(cause)); }
     finally { setBusy(false); }
   };
@@ -114,7 +114,7 @@ export function GitImportDialog({ userId, canEdit, providers, connections, conne
       } });
       setMessage('배포 브랜치를 등록했습니다. 비교 시작 시 자동으로 동기화합니다.');
       try { sessionStorage.removeItem(`sfud:git-draft:${userId}`); } catch { /* Optional storage. */ }
-      onImported();
+      onImported('registration');
     } catch (cause) { setError(errorMessage(cause)); }
     finally { setBusy(false); }
   };
