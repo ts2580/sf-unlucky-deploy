@@ -6,6 +6,9 @@ import type {
 import type { WorkspaceResponse } from '../src/api/workspace-contracts.js';
 
 test.describe.configure({ mode: 'serial' });
+test.beforeEach(async ({ page }) => {
+  await page.route('**/api/v1/installed-packages**', (route) => route.fulfill({ json: { packages: [] } }));
+});
 
 const admin = { id: 'e2e-git-admin', email: 'git-ui@example.com', displayName: 'Git UI 관리자', role: 'ADMIN' as const };
 const viewer = { id: 'e2e-git-viewer', email: 'git-viewer@example.com', displayName: 'Git UI 조회자', role: 'VIEWER' as const };
@@ -127,6 +130,9 @@ async function mockAuth(page: Page, user: E2EUser = admin) {
     recoveredJobCount: 0, recoveredComparisonCount: 0,
   }));
   await page.route('**/api/v1/git/registrations', (route) => json(route, { registrations: [] }));
+  await page.route('**/api/v1/salesforce/connections', (route) => json(route, {
+    localMode: false, storageStatus: 'ready', connections: [],
+  }));
   await page.route('**/api/v1/settings', (route) => json(route, { settings: { testClassSuffix: '_Test' } }));
   // App loads these dashboard summaries immediately after authentication. Keep
   // the UI contract test isolated from the real queue state.
@@ -140,6 +146,7 @@ async function mockGitApis(page: Page, options: {
   extraSources?: WorkspaceResponse['sources']; comparisonComponents?: Array<Record<string, unknown>>;
 } = {}) {
   await mockAuth(page, options.user ?? admin);
+  await page.route('**/api/v1/admin/git-allowed-ips', (route) => json(route, { allowedIps: [] }));
   await page.route('**/api/v1/workflow/events', (route) => route.fulfill({
     status: 200, contentType: 'text/event-stream', body: ': connected\n\n',
   }));
@@ -262,7 +269,10 @@ async function mockGitApis(page: Page, options: {
     if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
     const id = importRequests.length === 1 ? importId : importRequests.length === 2 ? secondImportId : `55555555-5555-4555-8555-${String(importRequests.length).padStart(12, '0')}`;
     createdImportIds.push(id);
-    const item = imported('SELECTING', { id, repositoryPath: body.repositoryPath, ref: body.ref, expectedCommitSha: body.expectedCommitSha,
+    const requestedHost = body.repositoryPath.includes('://') ? new URL(body.repositoryPath).hostname : undefined;
+    const storedPath = requestedHost === undefined || ['github.com', 'gitlab.com', 'bitbucket.org'].includes(requestedHost)
+      ? canonicalRepositoryPath(body.repositoryPath) : body.repositoryPath;
+    const item = imported('SELECTING', { id, provider: body.provider, repositoryPath: storedPath, ref: body.ref, expectedCommitSha: body.expectedCommitSha,
       ...(body.metadataType === undefined ? {} : { metadataType: body.metadataType }),
       projectRoots: ['force-app', 'other'] });
     items = [...items, item];
@@ -322,21 +332,64 @@ async function mockGitApis(page: Page, options: {
   };
 }
 
-async function openSettings(page: Page) {
+async function openSettings(page: Page, openImport = true) {
   await page.goto('http://127.0.0.1:27546/settings');
-  await expect(page.getByRole('heading', { name: 'Git 계정 연결' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Git 프로젝트 가져오기' })).toBeVisible();
+  if (openImport && await page.getByRole('dialog').count() === 0) {
+    const open = page.getByRole('button', { name: '프로젝트 가져오기', exact: true });
+    await expect(open).toBeEnabled({ timeout: 1000 }).catch(() => undefined);
+    if (await open.isEnabled()) await open.click();
+  }
+  if (openImport && await page.getByRole('dialog').count() > 0) await expect(page.getByRole('dialog', { name: /Git 프로젝트 가져오기/u })).toBeVisible();
   await expect(page.getByRole('heading', { name: '내 Git 프로젝트' })).toBeVisible();
   await expect(page.locator('input[type="file"]')).toHaveCount(0);
   await expect(page.getByText('DX 프로젝트 업로드', { exact: true })).toHaveCount(0);
 }
 
-test('세 제공자 설정과 VIEWER token 작업 제한을 표시한다', async ({ page }) => {
+async function openConnections(page: Page) {
+  await page.goto('http://127.0.0.1:27546/auth');
+  await expect(page.getByRole('heading', { name: 'Git 계정 연결' })).toBeVisible();
+}
+
+async function openNewConnection(page: Page) {
+  if (!await page.getByRole('dialog').isVisible()) {
+    await page.getByRole('region', { name: 'Git 계정 연결' }).getByRole('button', { name: '새 연결', exact: true }).click();
+  }
+}
+
+test('Git 프로젝트 모달은 취소 초안을 폐기하고 요청 오류가 나면 계속 열린다', async ({ page }) => {
   await mockGitApis(page);
   await openSettings(page);
+  let failInspect = false;
+  await page.route('**/api/v1/git/repositories/inspect', async (route) => {
+    if (failInspect) return json(route, { error: { code: 'GIT_PROCESS_FAILED', message: '저장소 확인 실패' } }, 400);
+    return route.fallback();
+  });
+  const dialog = page.getByRole('dialog', { name: 'Git 프로젝트 가져오기' });
+  const url = page.getByLabel('저장소 URL 또는 경로');
+  await url.fill('owner/cancelled');
+  await dialog.getByRole('button', { name: '닫기', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '프로젝트 가져오기', exact: true })).toBeFocused();
+  expect(await page.evaluate(() => sessionStorage.getItem('sfud:git-draft:e2e-git-admin'))).toBeNull();
+  await page.getByRole('button', { name: '프로젝트 가져오기', exact: true }).click();
+  await expect(page.getByLabel('저장소 URL 또는 경로')).toHaveValue('');
+  await page.getByLabel('저장소 URL 또는 경로').fill('owner/project');
+  failInspect = true;
+  await page.getByRole('button', { name: '저장소 확인', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toContainText('저장소 확인 실패');
+  await expect(dialog).toBeVisible();
+  await expect(page.getByRole('dialog', { name: /^Git 프로젝트(?: 다시)? 가져오기$/u }).getByLabel('저장소 URL 또는 경로')).toHaveValue('owner/project');
+});
+
+test('세 제공자 설정과 VIEWER token 작업 제한을 표시한다', async ({ page }) => {
+  await mockGitApis(page);
+  await openConnections(page);
+  await openNewConnection(page);
   const providerSelect = page.getByLabel('토큰 제공자');
   await expect(providerSelect).toBeVisible();
   await expect(providerSelect.locator('option')).toHaveText(['GitHub', 'GitLab', 'Bitbucket']);
+  await openNewConnection(page);
   await page.getByLabel('연결 범위').selectOption('account');
   await expect(page.getByRole('button', { name: '토큰 검증 후 등록' })).toBeDisabled();
   await page.getByLabel('PAT / API Token').fill('e2e-placeholder-token');
@@ -345,15 +398,238 @@ test('세 제공자 설정과 VIEWER token 작업 제한을 표시한다', async
   await page.unroute('**/api/v1/auth/status');
   await mockAuth(page, viewer);
   await page.reload();
-  await expect(page.getByText('VIEWER 역할은 Git 계정 연결과 가져오기를 실행할 수 없습니다.')).toBeVisible();
-  await expect(page.getByRole('button', { name: '토큰 검증 후 등록' })).toBeDisabled();
-  await expect(page.getByRole('button', { name: '저장소 확인' })).toBeDisabled();
+  await expect(page.getByText('VIEWER 역할은 토큰을 등록하거나 변경할 수 없습니다.')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Git 계정 연결' }).getByRole('button', { name: '새 연결', exact: true })).toBeDisabled();
+  await openSettings(page);
+  await expect(page.getByRole('button', { name: '프로젝트 가져오기', exact: true })).toBeDisabled();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+});
+
+for (const [provider, url] of [
+  ['github', 'https://github.example.test:8443/context/team/project.git'],
+  ['gitlab', 'https://gitlab.example.test:9443/gitlab/team/sub/project.git'],
+  ['bitbucket', 'https://bitbucket.example.test:7990/bitbucket/scm/TEAM/project.git'],
+] as const) test(`${provider} 셀프호스트 도메인·포트·경로를 refs·import·브랜치 등록·다시 가져오기에 보존한다`, async ({ page }) => {
+  const saved = connection({ provider, providerHost: new URL(url).hostname, repositoryPath: url });
+  const fixture = await mockGitApis(page, { allProvidersConfigured: true, initialConnections: [saved] });
+  await page.route('**/api/v1/git/repositories/inspect', (route) => {
+    expect(route.request().postDataJSON()).toMatchObject({ provider, repositoryPath: url, connectionId });
+    return json(route, { repository: { provider, host: saved.providerHost, repositoryPath: canonicalRepositoryPath(url), cloneUrl: url,
+      repositoryId: 'selfhost-repo', private: true, defaultBranch: 'main' } });
+  });
+  const registrations: Array<Record<string, unknown>> = [];
+  await page.route('**/api/v1/git/registrations', (route) => {
+    if (route.request().method() === 'POST') { registrations.push(route.request().postDataJSON()); return json(route, { registration: {} }, 201); }
+    return json(route, { registrations: [] });
+  });
+  await openSettings(page);
+  const panel = page.getByRole('dialog', { name: /^Git 프로젝트(?: 다시)? 가져오기$/u });
+  await panel.getByRole('combobox', { name: 'Git 제공자', exact: true }).selectOption(provider);
+  await panel.getByRole('combobox', { name: '접근 계정', exact: true }).selectOption(connectionId);
+  await expect(panel.getByLabel('저장소 URL 또는 경로')).toHaveValue(url);
+  await panel.getByRole('button', { name: '저장소 확인', exact: true }).click();
+  await expect(panel.getByLabel('브랜치 선택')).toHaveValue('main');
+  expect(fixture.refRequests.at(-1)).toMatchObject({ provider, repositoryPath: url, connectionId });
+  await panel.getByRole('button', { name: '배포 브랜치 등록', exact: true }).click();
+  await expect.poll(() => registrations.length).toBe(1);
+  expect(registrations[0]).toMatchObject({ provider, repositoryPath: url, connectionId });
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.getByRole('button', { name: '프로젝트 가져오기', exact: true }).click();
+  await panel.getByLabel('Git 제공자').selectOption(provider);
+  await panel.getByLabel('접근 계정').selectOption(connectionId);
+  await expect(panel.getByLabel('저장소 URL 또는 경로')).toHaveValue(url);
+  await panel.getByRole('button', { name: '저장소 확인', exact: true }).click();
+  await expect(panel.getByLabel('브랜치 선택')).toHaveValue('main');
+  await panel.getByRole('button', { name: '이 커밋 가져오기', exact: true }).click();
+  await expect.poll(() => fixture.importRequests.length).toBe(1);
+  expect(fixture.importRequests[0]).toMatchObject({ provider, repositoryPath: url, connectionId });
+  fixture.setItems([imported('EXPIRED', { provider, repositoryPath: url })]);
+  await page.reload();
+  await page.getByRole('button', { name: '다시 가져오기', exact: true }).click();
+  await expect(panel.getByLabel('저장소 URL 또는 경로')).toHaveValue(url);
+  await panel.getByLabel('접근 계정').selectOption(connectionId);
+  await panel.getByRole('button', { name: '저장소 확인', exact: true }).click();
+  await expect(panel.getByLabel('브랜치 선택')).toHaveValue('main');
+  await panel.getByRole('button', { name: '이 커밋 가져오기', exact: true }).click();
+  await expect.poll(() => fixture.importRequests.length).toBe(2);
+});
+
+test('호스트를 복구하지 못한 과거 기록은 전체 URL을 다시 입력하도록 한다', async ({ page }) => {
+  await mockGitApis(page, { initialImports: [imported('FAILED', { errorCode: 'GIT_REPOSITORY_URL_REQUIRED', errorMessage: '전체 HTTPS 저장소 URL로 다시 등록하세요.' })] });
+  await openSettings(page, false);
+  await page.getByRole('button', { name: '다시 가져오기', exact: true }).click();
+  await expect(page.getByLabel('저장소 URL 또는 경로')).toHaveValue('');
+  await expect(page.getByRole('button', { name: '저장소 확인', exact: true })).toBeDisabled();
+});
+
+test('저장한 Git 연결과 등록 브랜치에 별칭을 저장하고 선택 목록에 표시한다', async ({ page }) => {
+  await mockGitApis(page);
+  const fullUrl = 'https://git.example.com/group/long-project-name.git';
+  let saved = connection({ repositoryPath: fullUrl, displayName: 'group/long-project-name' });
+  const registration = { id: '55555555-5555-4555-8555-555555555555', alias: undefined as string | undefined,
+    repositoryId: 'repo-1', request: { provider: 'github', repositoryPath: fullUrl, ref: { kind: 'branch', name: 'main' }, expectedCommitSha: sha }, status: 'READY' };
+  await page.route('**/api/v1/git/connections', (route) => json(route, { connections: [saved], tokenStorage: 'ready' }));
+  await page.route('**/api/v1/git/connections/*/alias', (route) => {
+    const alias = (route.request().postDataJSON() as { alias: string }).alias;
+    if (alias) saved = { ...saved, alias };
+    else { const { alias: _oldAlias, ...withoutAlias } = saved; saved = withoutAlias; }
+    return json(route, { connection: saved });
+  });
+  await page.route('**/api/v1/git/registrations', (route) => json(route, { registrations: [registration] }));
+  await page.route('**/api/v1/git/registrations/*/alias', (route) => {
+    registration.alias = (route.request().postDataJSON() as { alias: string }).alias || undefined;
+    return json(route, { registration });
+  });
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await openConnections(page);
+  const accounts = page.getByRole('region', { name: 'Git 계정 연결' });
+  await accounts.getByRole('button', { name: '별칭 설정' }).click();
+  await accounts.getByLabel('별칭', { exact: true }).fill('커넥스 운영');
+  await accounts.getByRole('button', { name: '별칭 저장' }).click();
+  await expect(accounts.getByText('커넥스 운영', { exact: true })).toBeVisible();
+  expect(saved.repositoryPath).toBe(fullUrl);
+  await openSettings(page, false);
+  const branches = page.getByRole('region', { name: '등록 배포 브랜치' });
+  await branches.getByRole('button', { name: '별칭 설정' }).click();
+  await branches.getByLabel('별칭', { exact: true }).fill('운영 배포');
+  await branches.getByRole('button', { name: '별칭 저장' }).click();
+  await expect(branches.getByText('운영 배포 · main', { exact: true })).toBeVisible();
+  await page.reload();
+  await openConnections(page);
+  await expect(accounts.getByText('커넥스 운영', { exact: true })).toBeVisible();
+  await openSettings(page, false);
+  await expect(branches.getByText('운영 배포 · main', { exact: true })).toBeVisible();
+  await openConnections(page);
+  await accounts.getByRole('button', { name: '별칭 변경' }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(accounts.getByLabel('별칭', { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await accounts.getByRole('button', { name: '취소', exact: true }).click();
+  await page.goto('http://127.0.0.1:27546/deploy');
+  const select = page.getByLabel('DESIRED SOURCE 비교 소스');
+  await expect(select.locator(`option[value="git-connection:${connectionId}"]`)).toContainText('커넥스 운영');
+  await select.selectOption(`git-connection:${connectionId}`);
+  await expect(page.locator('#source-git-branch-heading')).toContainText('커넥스 운영');
+  await openConnections(page);
+  await accounts.getByRole('button', { name: '별칭 변경' }).click();
+  await accounts.getByLabel('별칭', { exact: true }).fill('');
+  await accounts.getByRole('button', { name: '별칭 저장' }).click();
+  await expect(accounts.getByText('group/long-project-name', { exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test('메타데이터 상태 탭과 검색을 결합하고 동일 항목·페이지·배포 선택을 유지한다', async ({ page }) => {
+  const component = (fullName: string, status: string) => ({ key: `ApexClass:${fullName}`, type: 'ApexClass', fullName, status,
+    files: [{ path: `classes/${fullName}.cls`, status, kind: 'text' }] });
+  const all = [
+    ...Array.from({ length: 23 }, (_, i) => component(`New${String(i).padStart(2, '0')}`, 'ADDED')),
+    component('TargetOld', 'REMOVED'), component('Changed', 'MODIFIED'), component('Same', 'IDENTICAL'),
+  ];
+  await mockGitApis(page, { extraSources: [readySource()] });
+  const fullJob = comparisonFixture({ mode: 'compare', status: 'SUCCEEDED', rightSourceId: `git:${importId}`, components: all });
+  await page.route('**/api/v1/comparisons', (route) => route.request().method() === 'GET'
+    ? json(route, { jobs: [] }) : json(route, { job: { ...fullJob, result: { ...fullJob.result, components: all.filter((item) => item.status !== 'IDENTICAL') } } }, 202));
+  let identicalRequests = 0;
+  await page.route('**/api/v1/comparisons/comparison-e2e?includeIdentical=true', async (route) => {
+    identicalRequests++;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return json(route, { job: fullJob });
+  });
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+  await page.goto('http://127.0.0.1:27546/deploy');
+  await page.getByLabel('DESIRED SOURCE 비교 소스').selectOption(`git:${importId}`);
+  await page.getByRole('button', { name: '메타데이터 받아오기', exact: true }).click();
+  const result = page.locator('.comparison-result');
+  const rows = result.locator('.component-result');
+  await expect(rows).toHaveCount(20);
+  await result.getByRole('checkbox', { name: 'New00 배포 대상으로 선택' }).check();
+  await result.getByRole('button', { name: '다음 페이지' }).click();
+  await expect(rows).toHaveCount(5);
+  await result.getByRole('button', { name: /^NEW/u }).click();
+  await expect(rows).toHaveCount(20);
+  await expect(result.getByRole('checkbox', { name: 'New00 배포 대상으로 선택' })).toBeChecked();
+  await result.getByLabel('메타데이터 검색', { exact: true }).fill(' NEW22 ');
+  await expect(rows).toHaveCount(1);
+  await expect(rows).toContainText('New22');
+  await expect(result.getByRole('navigation')).toHaveCount(0);
+  await result.getByRole('button', { name: /^TARGET ONLY/u }).click();
+  await expect(rows).toHaveCount(0);
+  await result.getByLabel('메타데이터 검색', { exact: true }).fill('');
+  await expect(rows).toHaveCount(1);
+  await expect(result.getByRole('checkbox', { name: 'TargetOld 배포 대상으로 선택' })).toBeDisabled();
+  await result.getByRole('button', { name: /^MODIFIED/u }).click();
+  await expect(rows).toHaveCount(1);
+  await expect(rows).toContainText('Changed');
+  await result.getByLabel('메타데이터 검색', { exact: true }).fill('classes/changed.cls');
+  await expect(rows).toHaveCount(1);
+  await result.getByLabel('메타데이터 검색', { exact: true }).fill('apexclass');
+  await expect(rows).toHaveCount(1);
+  await result.getByRole('button', { name: /^IDENTICAL/u }).click();
+  await expect(result.getByText('동일 항목 불러오는 중…')).toBeVisible();
+  await expect(rows).toHaveCount(1);
+  await expect(rows).toContainText('Same');
+  await result.getByRole('checkbox', { name: 'Same 배포 대상으로 선택' }).check();
+  await result.getByRole('button', { name: '필터 초기화' }).click();
+  await expect(rows).toHaveCount(20);
+  await expect(result.getByRole('checkbox', { name: 'New00 배포 대상으로 선택' })).toBeChecked();
+  await result.getByRole('button', { name: /^IDENTICAL/u }).click();
+  await expect(result.getByRole('checkbox', { name: 'Same 배포 대상으로 선택' })).toBeChecked();
+  expect(identicalRequests).toBe(1);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(result.getByLabel('메타데이터 검색', { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+test('설정에서 브랜치·태그 로딩 표시가 응답 완료와 실패 후 해제된다', async ({ page }) => {
+  await mockGitApis(page);
+  await openSettings(page);
+  await page.getByLabel('저장소 URL 또는 경로').fill('owner/project');
+  for (const kind of ['branch', 'tag'] as const) {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    await page.route('**/api/v1/git/repositories/refs', async (route) => {
+      await gate;
+      return kind === 'branch' ? json(route, refs(kind)) : json(route, { error: { code: 'GIT_PROCESS_FAILED', message: '태그 조회 실패' } }, 400);
+    });
+    await page.getByLabel('기준 종류').selectOption(kind);
+    await page.getByRole('button', { name: '저장소 확인' }).click();
+    const status = page.getByRole('status').filter({ hasText: kind === 'branch' ? '브랜치 불러오는 중…' : '태그 불러오는 중…' });
+    try {
+      await expect(status).toBeVisible();
+      await expect(page.getByLabel('기준 종류')).toBeDisabled();
+    } finally { release(); }
+    await expect(status).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '저장소 확인' })).toBeEnabled();
+    if (kind === 'branch') await expect(page.getByLabel('브랜치 선택')).toHaveValue('main');
+    else await expect(page.getByRole('alert').filter({ hasText: '태그 조회 실패' })).toBeVisible();
+  }
+});
+
+test('비교 소스의 브랜치 조회 중 안내와 입력 비활성 상태를 표시한다', async ({ page }) => {
+  await mockGitApis(page, { initialConnections: [connection({ repositoryPath: 'owner/project' })] });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  await page.route('**/api/v1/git/repositories/refs', async (route) => { await gate; return json(route, refs('branch')); });
+  await page.goto('http://127.0.0.1:27546/deploy');
+  await page.getByLabel('DESIRED SOURCE 비교 소스').selectOption(`git-connection:${connectionId}`);
+  const status = page.getByRole('status').filter({ hasText: '브랜치 불러오는 중…' });
+  try {
+    await expect(status).toBeVisible();
+    await expect(page.getByLabel('브랜치 검색 및 선택')).toBeDisabled();
+  } finally { release(); }
+  await expect(status).toHaveCount(0);
+  await expect(page.getByLabel('브랜치 검색 및 선택')).toBeEnabled();
+  await expect(page.getByLabel('브랜치 검색 및 선택')).toHaveValue('main');
 });
 
 test('private 계정의 repository를 선택하고 public URL에서 branch/tag/commit을 확인한다', async ({ page }) => {
   const fixture = await mockGitApis(page);
   await openSettings(page);
-  const importPanel = page.getByRole('region', { name: 'Git 프로젝트 가져오기' });
+  const importPanel = page.getByRole('dialog', { name: /^Git 프로젝트(?: 다시)? 가져오기$/u });
   await page.getByLabel('접근 계정').selectOption(connectionId);
   await page.getByRole('button', { name: 'owner/project', exact: true }).click();
   await expect(page.getByLabel('저장소 URL 또는 경로')).toHaveValue('owner/project');
@@ -388,9 +664,9 @@ test('public import를 상태·루트 선택·READY source와 deploy 화면까�
   await page.getByLabel('저장소 URL 또는 경로').fill('owner/public');
   await page.getByRole('button', { name: '저장소 확인' }).click();
   await page.getByRole('button', { name: '이 커밋 가져오기' }).click();
-  await expect(page.getByRole('article', { name: /owner\/project 가져오기/u })).toContainText('프로젝트 선택 필요');
+  await expect(page.getByRole('table', { name: '내 Git 프로젝트' }).getByRole('row', { name: /owner\/project/u })).toContainText('프로젝트 선택 필요');
   await page.getByRole('button', { name: 'force-app 가져오기' }).click();
-  const project = page.getByRole('article', { name: /owner\/project 가져오기/u });
+  const project = page.getByRole('table', { name: '내 Git 프로젝트' }).getByRole('row', { name: /owner\/project/u });
   await expect(project).toContainText('사용 가능');
   await expect(project.locator('time')).toHaveAttribute('dateTime', '2026-09-20T00:00:00.000Z');
   await expect(project).toContainText('가져온 시각');
@@ -405,7 +681,7 @@ test('public import를 상태·루트 선택·READY source와 deploy 화면까�
 test('Settings에서 CustomField를 가져오고 다시 가져오기에서 metadata type을 복원한다', async ({ page }) => {
   const fixture = await mockGitApis(page);
   await openSettings(page);
-  const importPanel = page.getByRole('region', { name: 'Git 프로젝트 가져오기' });
+  const importPanel = page.getByRole('dialog', { name: /^Git 프로젝트(?: 다시)? 가져오기$/u });
   await importPanel.getByLabel('저장소 URL 또는 경로').fill('owner/project');
   await importPanel.getByRole('button', { name: '저장소 확인' }).click();
   const metadataTypeInput = importPanel.getByLabel('가져올 메타데이터 타입');
@@ -415,11 +691,11 @@ test('Settings에서 CustomField를 가져오고 다시 가져오기에서 metad
   await importPanel.getByRole('button', { name: '이 커밋 가져오기' }).click();
   await expect.poll(() => fixture.importRequests.length).toBe(1);
   expect(fixture.importRequests[0]).toMatchObject({
-    provider: 'github', repositoryPath: 'owner/project',
+    provider: 'github', repositoryPath: 'https://github.com/owner/project.git',
     ref: { kind: 'branch', name: 'main' }, expectedCommitSha: sha, metadataType: 'CustomField',
   });
 
-  const project = page.getByRole('article', { name: /owner\/project 가져오기/u });
+  const project = page.getByRole('table', { name: '내 Git 프로젝트' }).getByRole('row', { name: /owner\/project/u });
   await expect(project).toContainText('CustomField');
   await page.screenshot({ path: 'working/git-settings-custom-field.png', fullPage: true });
 
@@ -728,10 +1004,18 @@ test('재인증이 필요한 등록 저장소는 비교 및 배포 소스로 제
 
 test('PAT를 등록하고 교체하며 secret이 브라우저 저장소에 남지 않는다', async ({ page }) => {
   const fixture = await mockGitApis(page, { initialConnections: [] });
-  await openSettings(page);
+  await openConnections(page);
+  await openNewConnection(page);
   await page.getByLabel('연결 범위').selectOption('account');
   await page.getByLabel('토큰 제공자').selectOption('github');
   const token = 'ghp-e2e-token-value';
+  await page.getByLabel('PAT / API Token').fill('discarded-modal-token');
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Git 계정 연결' }).getByRole('button', { name: '새 연결', exact: true })).toBeFocused();
+  await openNewConnection(page);
+  await expect(page.getByLabel('PAT / API Token')).toHaveValue('');
+  expect(fixture.tokenRequests).toHaveLength(0);
   fixture.setTokenError({ code: 'GIT_CONNECTION_FAILED', message: '토큰 검증 실패' });
   await page.getByLabel('PAT / API Token').fill('ghp-failing-token');
   await page.getByRole('button', { name: '토큰 검증 후 등록' }).click();
@@ -746,9 +1030,10 @@ test('PAT를 등록하고 교체하며 secret이 브라우저 저장소에 남�
   expect(fixture.tokenRequests.at(-1)).toMatchObject({ provider: 'github', token });
   expect(fixture.csrfHeaders.every((header) => header.length > 0)).toBe(true);
   expect(await browserStorage(page)).not.toContain(token);
-  await expect(page.getByLabel('PAT / API Token')).toHaveValue('');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
 
   await page.getByRole('button', { name: '토큰 교체' }).click();
+  await expect(page.getByLabel('PAT / API Token')).toHaveValue('');
   await page.getByLabel('PAT / API Token').fill('ghp-e2e-replacement');
   await page.getByRole('button', { name: '토큰 검증 후 교체' }).click();
   expect(fixture.tokenRequests.at(-1)).toMatchObject({ provider: 'github', token: 'ghp-e2e-replacement' });
@@ -757,7 +1042,8 @@ test('PAT를 등록하고 교체하며 secret이 브라우저 저장소에 남�
 
 test('GitHub fine-grained·classic PAT 붙여넣기의 앞뒤 공백과 개행을 정리하고 공유 계약을 통과한다', async ({ page }) => {
   const fixture = await mockGitApis(page, { initialConnections: [] });
-  await openSettings(page);
+  await openConnections(page);
+  await openNewConnection(page);
   await page.getByLabel('연결 범위').selectOption('account');
   const tokenInput = page.getByLabel('PAT / API Token');
   const cases: Array<{ pasted: string; token: string; expiry?: string; expiresAt?: string }> = [
@@ -782,14 +1068,15 @@ test('GitHub fine-grained·classic PAT 붙여넣기의 앞뒤 공백과 개행�
     await expect(page.getByRole('region', { name: 'Git 계정 연결' }).getByText('github token account', { exact: true })).toBeVisible();
     expect(fixture.tokenRequests.at(-1)).toMatchObject({ provider: 'github', token: value.token,
       ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }) });
-    await expect(tokenInput).toHaveValue('');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
   }
   expect(fixture.tokenRequests).toHaveLength(2);
 });
 
 test('토큰 내부 공백은 구체적인 입력 오류를 보여주고 제공자 요청을 보내지 않는다', async ({ page }) => {
   const fixture = await mockGitApis(page, { initialConnections: [] });
-  await openSettings(page);
+  await openConnections(page);
+  await openNewConnection(page);
   await page.getByLabel('연결 범위').selectOption('account');
   await page.getByLabel('토큰 제공자').selectOption('github');
   await page.getByLabel('PAT / API Token').fill('github_pat_11AAAA AAAA');
@@ -801,7 +1088,8 @@ test('토큰 내부 공백은 구체적인 입력 오류를 보여주고 제공�
 
 test('Bitbucket token에는 Atlassian 이메일과 선택적 만료일을 함께 보낸다', async ({ page }) => {
   const fixture = await mockGitApis(page, { initialConnections: [] });
-  await openSettings(page);
+  await openConnections(page);
+  await openNewConnection(page);
   await page.getByLabel('연결 범위').selectOption('account');
   await page.getByLabel('토큰 제공자').selectOption('bitbucket');
   await expect(page.getByLabel('Atlassian 계정 이메일')).toBeVisible();
@@ -819,7 +1107,7 @@ test('Bitbucket token에는 Atlassian 이메일과 선택적 만료일을 함께
 
 test('세 제공자의 저장소 단위 연결은 계정 API·Bitbucket 이메일 없이 경로를 보존하고 가져오기에 자동 연결한다', async ({ page }) => {
   const fixture = await mockGitApis(page, { initialConnections: [], allProvidersConfigured: true });
-  await openSettings(page);
+  await openConnections(page);
   const cases = [
     { provider: 'github', path: 'https://github.com/acme/github-project.git', token: 'github_pat_11AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
     { provider: 'gitlab', path: 'https://gitlab.com/study-group8144838/git-project.git', token: 'glpat-AAAAAAAAAAAAAAAAAAAA' },
@@ -827,6 +1115,7 @@ test('세 제공자의 저장소 단위 연결은 계정 API·Bitbucket 이메�
   ] as const;
 
   for (const [index, value] of cases.entries()) {
+    await openNewConnection(page);
     await page.getByLabel('연결 범위').selectOption('repository');
     await page.getByLabel('토큰 제공자').selectOption(value.provider);
     await page.getByLabel('연결할 저장소 URL').fill(value.path);
@@ -838,15 +1127,20 @@ test('세 제공자의 저장소 단위 연결은 계정 API·Bitbucket 이메�
     expect(fixture.tokenRequests.at(-1)).toMatchObject({ provider: value.provider, token: value.token, repositoryPath: value.path });
     if (value.provider === 'bitbucket') expect(fixture.tokenRequests.at(-1)).not.toHaveProperty('apiUsername');
     expect(fixture.catalogRequests).toHaveLength(0);
-    const importPanel = page.getByRole('region', { name: 'Git 프로젝트 가져오기' });
+    await openSettings(page);
+    const importPanel = page.getByRole('dialog', { name: /^Git 프로젝트(?: 다시)? 가져오기$/u });
+    await importPanel.getByLabel('Git 제공자').selectOption(value.provider);
+    await importPanel.getByLabel('접근 계정').selectOption(connectionId);
     await expect(importPanel).toContainText(`이 연결은 ${canonicalPath} 저장소에서만 사용할 수 있습니다.`);
     await expect(importPanel.getByLabel('저장소 URL 또는 경로')).toHaveValue(canonicalPath);
+    await openConnections(page);
 
     if (index === 0) {
       await page.getByRole('button', { name: '토큰 교체' }).click();
       await expect(page.getByLabel('연결할 저장소 URL')).toHaveValue(canonicalPath);
       await page.getByLabel('PAT / API Token').fill('ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
       await page.getByRole('button', { name: '토큰 검증 후 교체' }).click();
+      await expect(page.getByRole('dialog')).toHaveCount(0);
       expect(fixture.tokenRequests.at(-1)).toMatchObject({ provider: 'github', repositoryPath: canonicalPath });
     }
   }
@@ -854,7 +1148,8 @@ test('세 제공자의 저장소 단위 연결은 계정 API·Bitbucket 이메�
 
 test('저장소 단위 연결은 URL 빈값·공백 상태에서 토큰을 입력해도 등록 버튼을 비활성화한다', async ({ page }) => {
   const fixture = await mockGitApis(page, { initialConnections: [] });
-  await openSettings(page);
+  await openConnections(page);
+  await openNewConnection(page);
   await page.getByLabel('연결 범위').selectOption('repository');
   const submit = page.getByRole('button', { name: '토큰 검증 후 등록' });
   await page.getByLabel('PAT / API Token').fill('github_pat_11AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
@@ -866,18 +1161,21 @@ test('저장소 단위 연결은 URL 빈값·공백 상태에서 토큰을 입�
   expect(fixture.tokenRequests).toHaveLength(0);
 });
 
-test('만료 연결과 저장 키 미설정 상태를 표시한다', async ({ page }) => {
+test('만료 연결을 표시하고 Git 저장 키 설정 안내는 숨긴다', async ({ page }) => {
   const expired = connection({ status: 'REAUTH_REQUIRED', expiresAt: '2026-01-01T00:00:00.000Z' });
   await mockGitApis(page, { initialConnections: [expired], tokenStorage: 'invalid_key', environmentAvailable: false });
-  await openSettings(page);
+  await openConnections(page);
   await expect(page.getByRole('region', { name: 'Git 계정 연결' }).getByText(/토큰 교체 필요/u)).toBeVisible();
-  await expect(page.getByText(/암호화 키/u)).toBeVisible();
+  await expect(page.getByText(/암호화 키 설정|토큰을 저장하려면 관리자가/u)).toHaveCount(0);
+  await openNewConnection(page);
+  await expect(page.getByText('서버의 토큰 저장 설정을 확인하세요.')).toHaveCount(0);
   await expect(page.getByRole('button', { name: '환경변수 토큰 등록' })).toHaveCount(0);
 });
 
 test('준비된 저장소의 환경변수 token import를 수행한다', async ({ page }) => {
   const fixture = await mockGitApis(page, { initialConnections: [], tokenStorage: 'ready', environmentAvailable: true });
-  await openSettings(page);
+  await openConnections(page);
+  await openNewConnection(page);
   await expect(page.getByRole('button', { name: '환경변수 토큰 등록' })).toBeVisible();
   await page.getByRole('button', { name: '환경변수 토큰 등록' }).click();
   await expect(page.getByRole('region', { name: 'Git 계정 연결' }).getByText('github token account', { exact: true })).toBeVisible();
@@ -893,12 +1191,14 @@ test('refchanged와 재연결 필요 오류를 표시하고 cancel/delete를 수
   await page.getByRole('button', { name: '저장소 확인' }).click();
   await page.getByRole('button', { name: '이 커밋 가져오기' }).click();
   await expect(page.getByRole('alert')).toContainText('기준 커밋이 변경되었습니다');
+  await page.getByRole('dialog').getByRole('button', { name: '닫기', exact: true }).click();
   await expect(page.getByRole('button', { name: '가져오기 취소' })).toBeVisible();
   await page.getByRole('button', { name: '가져오기 취소' }).click();
   await expect(page.getByText('취소됨', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '소스 삭제' }).click();
   await expect(page.getByText('가져온 Git 프로젝트가 없습니다.')).toBeVisible();
 
+  await openConnections(page);
   await expect(page.getByRole('button', { name: '토큰 교체' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Git 계정 연결' }).getByText('GitHub private account', { exact: true })).toBeVisible();
 });
@@ -1093,13 +1393,14 @@ test('desktop/mobile에서 Git settings가 overflow와 브라우저 오류 없�
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
   await mockGitApis(page, { initialImports: [imported('READY', { source: readySource() })] });
-  await openSettings(page);
-  await expect(page.getByRole('article', { name: /owner\/project 가져오기/u })).toContainText('가져온 시각');
-  for (const width of [1280, 390, 320]) {
+  await openSettings(page, false);
+  await expect(page.getByRole('table', { name: '내 Git 프로젝트' }).getByRole('row', { name: /owner\/project/u })).toContainText('가져온 시각');
+  for (const width of [1280, 430, 390, 320]) {
     await page.setViewportSize({ width, height: 844 });
     const metrics = await page.evaluate(() => ({
       overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
       clipped: [...document.querySelectorAll('button, input, select, a')].filter((element) => {
+        if (element.closest('.connection-table-scroll')) return false;
         const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0 && (rect.left < -1 || rect.right > innerWidth + 1);
       }).map((element) => element.textContent ?? element.getAttribute('aria-label')),
     }));
@@ -1126,7 +1427,8 @@ test('배포 브랜치를 설정에서 등록하고 동기화 상태·자동 비
   let syncs = 0;
   await page.route('**/api/v1/git/registrations', async (route) => {
     if (route.request().method() === 'POST') {
-      registration = { id: sourceId.slice('git-registered:'.length), request: route.request().postDataJSON(), status: 'READY', lastCommitSha: sha, lastSyncedAt: '2026-09-21T00:00:00.000Z' };
+      const request = route.request().postDataJSON();
+      registration = { id: sourceId.slice('git-registered:'.length), request: { ...request, repositoryPath: canonicalRepositoryPath(request.repositoryPath) }, status: 'READY', lastCommitSha: sha, lastSyncedAt: '2026-09-21T00:00:00.000Z' };
       return json(route, { registration }, 201);
     }
     return json(route, { registrations: registration ? [registration] : [] });

@@ -21,6 +21,8 @@ import { DeploymentPage } from './deployment/DeploymentPage';
 import { Icon, type IconName } from './components/Icon';
 import { PageIntro } from './components/PageIntro';
 import { GitSettings } from './git/GitSettings';
+import { GitAllowedIps } from './git/GitAllowedIps';
+import { SalesforceConnections } from './auth/SalesforceConnections';
 
 type HealthResponse = PublicHealthResponse
   & Partial<Omit<DiagnosticsResponse, keyof PublicHealthResponse>>;
@@ -41,17 +43,19 @@ interface DashboardRun {
   source: string;
   target: string;
   summary: string;
+  statusLabel: string;
   time: string;
   tone: string;
   createdAt: string;
 }
 
-type PageKey = 'home' | 'deploy' | 'runs' | 'settings' | 'admin';
+type PageKey = 'home' | 'deploy' | 'runs' | 'auth' | 'settings' | 'admin';
 
 const pageMeta: Record<PageKey, { eyebrow: string; title: string }> = {
   home: { eyebrow: 'METADATA WORKSPACE', title: '배포 대시보드' },
   deploy: { eyebrow: 'COMPARE & DEPLOY', title: '비교 및 배포' },
   runs: { eyebrow: 'RUN HISTORY', title: '실행 기록' },
+  auth: { eyebrow: 'CONNECTIONS', title: '인증 관리' },
   settings: { eyebrow: 'SERVER CONFIGURATION', title: '설정' },
   admin: { eyebrow: 'ACCESS CONTROL', title: '사용자 관리' },
 };
@@ -60,6 +64,7 @@ const navigation: Array<{ icon: IconName; label: string; page: PageKey; href: st
   { icon: 'home', label: '홈', page: 'home', href: '/' },
   { icon: 'deploy', label: '비교 및 배포', page: 'deploy', href: '/deploy' },
   { icon: 'history', label: '실행 기록', page: 'runs', href: '/runs' },
+  { icon: 'key', label: '인증 관리', page: 'auth', href: '/auth' },
 ];
 
 export function App() {
@@ -158,7 +163,7 @@ export function App() {
   const connectedOrgCount = dashboardWorkspace?.sources.filter((source) => source.kind === 'org').length ?? 0;
   const projectCount = dashboardWorkspace?.projects.length ?? 0;
   const latestRun = recentRuns[0];
-  const visibleNavigation = auth.user.role === 'ADMIN'
+  const visibleNavigation = auth.user.role === 'ADMIN' && !auth.localMode
     ? [...navigation, { icon: 'user' as const, label: '사용자 관리', page: 'admin' as const, href: '/admin' }]
     : navigation;
 
@@ -219,20 +224,19 @@ export function App() {
             />
             <StatusPill label={dashboardWorkspace === null ? 'Salesforce CLI 확인 중' : 'Salesforce CLI 연결됨'} state={dashboardWorkspace === null ? 'pending' : 'online'} />
             <div className="org-count"><Icon name="cloud" /><strong>{connectedOrgCount}</strong><span>ORG</span></div>
-            <div className="account-menu" title={auth.user.email}>
+            <div className={`account-menu${auth.localMode ? ' account-menu-local' : ''}`} title={auth.user.email}>
               <span><Icon name="user" /></span>
               <div><strong>{auth.user.displayName}</strong><small>{auth.user.role}</small></div>
-              <button type="button" onClick={() => void logout()} aria-label="로그아웃"><Icon name="logout" /></button>
+              {!auth.localMode && <button type="button" onClick={() => void logout()} aria-label="로그아웃"><Icon name="logout" /></button>}
             </div>
           </div>
         </header>
 
         <main id="main" className="content">
           {currentPage === 'home' && <>
-          <section className="hero" aria-labelledby="hero-title">
+          <section className="hero" aria-label="SAFE BY DEFAULT">
             <div className="hero-copy">
               <p className="eyebrow text-blue-700">SAFE BY DEFAULT</p>
-              <h2 id="hero-title">변경을 먼저 확인하고,<br />확신이 들 때 배포하세요.</h2>
               <div className="hero-actions">
                 <a className="button button-primary" href="/deploy">
                   <Icon name="compare" />비교 및 배포 시작<Icon name="arrow" />
@@ -316,6 +320,7 @@ export function App() {
           </>}
           {currentPage === 'deploy' && <DeploymentPage user={auth.user} />}
           {currentPage === 'runs' && <RunsPage runs={recentRuns} comparisons={recentComparisons} deployments={recentDeployments} />}
+          {currentPage === 'auth' && <div className="page-stack"><PageIntro kicker="CONNECTIONS" title="Salesforce와 Git 인증을 관리합니다." /><div className="settings-grid"><SalesforceConnections /><GitSettings key={auth.user.id} user={auth.user} section="connections" /></div></div>}
           {currentPage === 'settings' && <SettingsPage user={auth.user} health={health} remoteAccess={remoteAccess} workspace={dashboardWorkspace} />}
           {currentPage === 'admin' && (auth.user.role === 'ADMIN'
             ? <AdminPage currentUser={auth.user} />
@@ -332,6 +337,7 @@ function getCurrentPage(): PageKey {
     '/compare': 'deploy',
     '/deploy': 'deploy',
     '/runs': 'runs',
+    '/auth': 'auth',
     '/settings': 'settings',
     '/admin': 'admin',
   };
@@ -339,6 +345,11 @@ function getCurrentPage(): PageKey {
 }
 
 function RunsPage({ runs, comparisons, deployments }: { runs: DashboardRun[]; comparisons: ComparisonJobResponse[]; deployments: DryRunJobResponse[] }) {
+  const [filter, setFilter] = useState<'all' | 'comparison' | 'dry-run' | 'deployment'>('all');
+  const visibleRuns = runs.filter((run) => filter === 'all'
+    || (filter === 'comparison' && run.kind === '비교')
+    || (filter === 'dry-run' && run.kind === 'DRY-RUN')
+    || (filter === 'deployment' && run.kind === '배포'));
   const succeeded = comparisons.filter((job) => job.status === 'SUCCEEDED').length
     + deployments.filter((job) => ['APPROVAL_PENDING', 'SUCCEEDED'].includes(job.status)).length;
   return (
@@ -356,9 +367,19 @@ function RunsPage({ runs, comparisons, deployments }: { runs: DashboardRun[]; co
       <section className="history-panel" aria-labelledby="history-heading">
         <div className="history-toolbar">
           <div><h2 id="history-heading">모든 실행</h2></div>
-          <div className="filter-row"><button className="filter-active" type="button">전체</button><button type="button">비교</button><button type="button">Dry-run</button><button type="button">실제 배포</button></div>
+          <div className="filter-row" aria-label="실행 종류 필터">
+            {([['all', '전체'], ['comparison', '비교'], ['dry-run', 'Dry-run'], ['deployment', '실제 배포']] as const).map(([value, label]) =>
+              <button className={filter === value ? 'filter-active' : ''} aria-pressed={filter === value} type="button" key={value} onClick={() => setFilter(value)}>{label}</button>)}
+          </div>
         </div>
-        <div className="runs-list runs-list-flat">{runs.length === 0 ? <p className="empty-runs">아직 저장된 실행이 없습니다.</p> : runs.map((run) => <RunRow key={run.id} {...run} />)}</div>
+        {visibleRuns.length === 0 ? <p className="empty-runs">{runs.length === 0 ? '아직 저장된 실행이 없습니다.' : '선택한 종류의 실행이 없습니다.'}</p>
+          : <div className="connection-table-scroll runs-table-scroll" role="region" aria-label="실행 기록 표 영역" tabIndex={0}><table className="connection-table runs-table" aria-label="실행 기록"><thead><tr><th scope="col">종류</th><th scope="col">대상</th><th scope="col">상태</th><th scope="col">시간</th><th scope="col">요약</th></tr></thead><tbody>{visibleRuns.map((run) => <tr key={run.id}>
+            <th scope="row"><span className={`tag tag-${run.tone}`}>{run.kind}</span></th>
+            <td><div className="connection-cell-content"><strong>{run.source} → {run.target}</strong></div></td>
+            <td><span className={`connection-state ${run.tone === 'green' ? 'connection-state-ready' : run.tone === 'amber' ? 'connection-state-warning' : 'connection-state-pending'}`}>{run.statusLabel}</span></td>
+            <td><time dateTime={run.createdAt}>{run.time}</time></td>
+            <td>{run.summary}</td>
+          </tr>)}</tbody></table></div>}
       </section>
     </div>
   );
@@ -382,7 +403,6 @@ function SettingsPage({
   const [settingsMessage, setSettingsMessage] = useState('');
   const [settingsError, setSettingsError] = useState('');
   const canEditSettings = ['OPERATOR', 'DEPLOYER', 'ADMIN'].includes(user.role);
-  const orgs = workspace?.sources.filter((source) => source.kind === 'org') ?? [];
   const serverProjects = workspace?.projects.filter((project) => !project.id.startsWith('git:') && !project.id.startsWith('upload:')) ?? [];
 
   useEffect(() => {
@@ -427,10 +447,10 @@ function SettingsPage({
     <div className="page-stack">
       <PageIntro
         kicker="SERVER CONFIGURATION"
-        title="연결과 프로젝트 소스를 관리합니다."
+        title="서버 설정과 프로젝트 소스를 관리합니다."
       />
       <div className="settings-grid">
-        <section className="workflow-panel" aria-labelledby="server-heading">
+        <section className="workflow-panel settings-server-panel" aria-labelledby="server-heading">
           <div className="panel-heading"><span className="card-icon icon-green"><Icon name="activity" /></span><div><h2 id="server-heading">UI 서버</h2></div><StatusPill label="실행 중" state="online" /></div>
           <dl className="settings-list">
             <div><dt>주소</dt><dd>{health?.host ?? '확인 중'}</dd></div>
@@ -441,10 +461,6 @@ function SettingsPage({
             <div><dt>비교 큐</dt><dd>{health?.comparisonQueue?.activeJobId === undefined ? `대기 ${health?.comparisonQueue?.queuedCount ?? 0}` : '실행 중'}</dd></div>
             <div><dt>원격 접근</dt><dd className={remoteAccess ? 'warning-text' : ''}>{remoteAccess ? '허용됨' : '차단됨'}</dd></div>
           </dl>
-        </section>
-        <section className="workflow-panel" aria-labelledby="cli-heading">
-          <div className="panel-heading"><span className="card-icon icon-blue"><Icon name="cloud" /></span><div><h2 id="cli-heading">Salesforce CLI</h2></div><StatusPill label="연결됨" state="online" /></div>
-          <div className="connection-card"><div className="avatar-stack large"><span>SF</span><i /></div><div><strong>{orgs.length}개 org 사용 가능</strong><p>{orgs.map((org) => org.label).join(' · ') || '연결 확인 중'}</p></div><button type="button" onClick={() => window.location.reload()}><Icon name="refresh" />새로고침</button></div>
         </section>
         <section className="workflow-panel settings-wide" aria-labelledby="deployment-settings-heading">
           <div className="panel-heading"><span className="card-icon icon-violet"><Icon name="deploy" /></span><div><h2 id="deployment-settings-heading">비교 및 배포 설정</h2></div></div>
@@ -465,9 +481,12 @@ function SettingsPage({
             ? <p className="empty-runs">프로젝트 확인 중입니다.</p>
             : serverProjects.length === 0
               ? <p className="empty-runs">등록된 서버 프로젝트가 없습니다. 서버 시작 시 <code>--project</code>를 지정하세요.</p>
-              : serverProjects.map((project) => <div className="project-row" key={project.id}><span className="project-logo"><Icon name="code" /></span><div><strong>{project.displayName}</strong><code>Manifest {project.manifests.length}개</code></div><span className="tag tag-green">SERVER</span><span aria-hidden="true"><Icon name="chevron" /></span></div>)}
+              : <div className="connection-table-scroll" role="region" aria-label="서버 프로젝트 표 영역" tabIndex={0}><table className="connection-table server-project-table" aria-label="명시적으로 등록된 서버 프로젝트"><thead><tr><th scope="col">프로젝트</th><th scope="col">Manifest</th><th scope="col">유형</th></tr></thead><tbody>{serverProjects.map((project) => <tr key={project.id}>
+                <th scope="row"><div className="connection-cell-content"><strong>{project.displayName}</strong></div></th><td>{project.manifests.length}개</td><td><span className="tag tag-green">SERVER</span></td>
+              </tr>)}</tbody></table></div>}
         </section>
-        <GitSettings key={user.id} user={user} />
+        <GitAllowedIps user={user} />
+        <GitSettings key={user.id} user={user} section="projects" />
       </div>
     </div>
   );
@@ -529,6 +548,7 @@ function toDashboardRun(job: ComparisonJobResponse): DashboardRun {
     kind: '비교',
     source: job.left.label,
     target: job.right.label,
+    statusLabel: comparisonStatusLabel(job.status),
     summary: job.comparisonLimit?.exceeded === true
       ? `비교 제한 초과 · Source ${summary?.total ?? 0}개 · 배포 목록 준비 완료`
       : summary === undefined
@@ -547,6 +567,7 @@ function toDashboardDryRun(job: DryRunJobResponse): DashboardRun {
     kind: job.kind === 'DRY_RUN' ? 'DRY-RUN' : '배포',
     source: job.source.label,
     target: job.target.label,
+    statusLabel: deploymentStatusLabel(job.status),
     summary: job.comparisonLimit?.exceeded === true
       ? `${deploymentStatusLabel(job.status)} · 파일 수 제한으로 비교 생략`
       : summary === undefined

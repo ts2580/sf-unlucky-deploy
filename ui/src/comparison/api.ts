@@ -11,6 +11,8 @@ export interface ComparisonComponent {
 }
 
 export interface ComparisonJobResponse {
+  excludedPackageIds?: string[];
+  excludePackageMetadata?: boolean;
   comparisonLimit?: { maximumFiles: number; fileCount: number; exceeded: boolean };
   id: string;
   mode?: 'compare' | 'source';
@@ -44,6 +46,8 @@ interface ComparisonSummary {
 }
 
 export interface CreateComparisonRequest {
+  excludedPackageIds?: string[];
+  excludePackageMetadata?: boolean;
   scope: 'all';
   metadataType: string;
   leftSourceId?: string;
@@ -60,8 +64,9 @@ export function listComparisonJobs(signal?: AbortSignal): Promise<{ jobs: Compar
 export function getComparisonJob(
   id: string,
   signal?: AbortSignal,
+  includeIdentical = false,
 ): Promise<{ job: ComparisonJobResponse }> {
-  return apiRequest(`/api/v1/comparisons/${encodeURIComponent(id)}`, { signal });
+  return apiRequest(`/api/v1/comparisons/${encodeURIComponent(id)}${includeIdentical ? '?includeIdentical=true' : ''}`, { signal });
 }
 
 export function startComparison(

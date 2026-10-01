@@ -56,10 +56,10 @@ export function AuthScreen({
         <div className="auth-brand"><img src="/favicon.svg" alt="" /><span><strong>sfud</strong><small>Deployment Console</small></span></div>
         <span className="auth-icon"><Icon name={setupRequired ? 'key' : 'shield'} /></span>
         <p className="eyebrow">{setupRequired ? 'FIRST ADMIN' : 'SECURE ACCESS'}</p>
-        <h1>{setupRequired ? '최초 관리자를 설정합니다.' : '다시 오셨군요.'}</h1>
-        <p>{setupRequired
-          ? '서버 시작 로그에 표시된 일회용 설정 코드와 관리자 정보를 입력하세요.'
-          : '배포 콘솔에 접근하려면 관리자에게 등록된 계정으로 로그인하세요.'}</p>
+        {setupRequired && <>
+          <h1>최초 관리자를 설정합니다.</h1>
+          <p>서버 시작 로그에 표시된 일회용 설정 코드와 관리자 정보를 입력하세요.</p>
+        </>}
         <form onSubmit={(event) => void submit(event)}>
           {setupRequired && <>
             <label htmlFor="bootstrap-token">초기 설정 코드</label>
