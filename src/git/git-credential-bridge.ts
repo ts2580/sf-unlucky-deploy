@@ -4,6 +4,7 @@ import { rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { GitRepositoryAddress } from './git-repository.js';
 import { GitError } from './git-errors.js';
+import { registerGitDiagnosticSecrets } from './git-diagnostics.js';
 
 export interface GitFetchCredential { username: string; password: string }
 
@@ -57,10 +58,16 @@ export async function createGitCredentialBridge(directory: string, repository: G
       for (const line of body.split('\n').filter(Boolean)) {
         const equals = line.indexOf('=');
         const key = line.slice(0, equals);
-        if (equals < 1 || fields.has(key)) { res.writeHead(403).end(); return; }
+        // Git's credential protocol can repeat capability[] (notably for
+        // smart HTTP protocol negotiation). It has no bearing on which
+        // repository receives a credential, so accept and deliberately ignore
+        // only that repeatable advisory field. Every identity-bearing field
+        // remains single-valued to prevent request smuggling.
+        if (equals < 1 || (key !== 'capability[]' && fields.has(key))) { res.writeHead(403).end(); return; }
+        if (key === 'capability[]') continue;
         fields.set(key, line.slice(equals + 1));
       }
-      if (fields.get('protocol') !== 'https' || fields.get('host') !== repository.host
+      if (fields.get('protocol') !== 'https' || fields.get('host') !== clone.host
         || !allowedPaths.has(fields.get('path') ?? '')
         || (fields.has('username') && fields.get('username') !== credential.username)) {
         res.writeHead(403).end(); return;
@@ -78,10 +85,12 @@ export async function createGitCredentialBridge(directory: string, repository: G
   } catch (error) { await rm(helperPath, { force: true }); throw error; }
   const address = server.address();
   if (address === null || typeof address === 'string') throw new GitError('GIT_PROCESS_FAILED');
+  const forgetSecrets = registerGitDiagnosticSecrets(nonce, [credential.password, credential.username, `${credential.username}:${credential.password}`]);
   return {
     helperCommand: `!${shellQuote(process.execPath)} ${shellQuote(helperPath)}`,
     environment: { SFUD_GIT_BRIDGE_PORT: String(address.port), SFUD_GIT_BRIDGE_NONCE: nonce },
     async close(): Promise<void> {
+      forgetSecrets();
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
       await rm(helperPath, { force: true });

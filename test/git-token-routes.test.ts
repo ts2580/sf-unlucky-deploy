@@ -22,6 +22,38 @@ afterEach(async () => {
 });
 
 describe('Git PAT/API token 연결 라우트', { timeout: 30_000 }, () => {
+  it('저장소 별칭은 소유자만 변경하며 URL·credential·tokenVersion을 보존하고 토큰 교체 후 유지한다', async () => {
+    const fixture = await createFixture();
+    try {
+      const owner = await bootstrap(fixture.server);
+      const payload = { provider: 'gitlab', token: 'alias-token-fixture', repositoryPath: 'https://git.example.com/group/repository.git' };
+      const created = await fixture.server.inject({ method: 'POST', url: '/api/v1/git/connections', headers: headers(owner), payload });
+      expect(created.statusCode, created.body).toBe(201);
+      const id = created.json().connection.id as string;
+      const url = `/api/v1/git/connections/${id}/alias`;
+      const db = fixture.server.sfudRuntime.store.database;
+      const before = await db.get('SELECT encrypted_access_token, token_version, repository_path, provider_host FROM git_connections WHERE id = ?', id);
+      expect((await fixture.server.inject({ method: 'PATCH', url, payload: { alias: '새 이름' } })).statusCode).toBe(401);
+      expect((await fixture.server.inject({ method: 'PATCH', url, headers: { cookie: owner.cookie }, payload: { alias: '새 이름' } })).statusCode).toBe(403);
+      for (const role of ['ADMIN', 'VIEWER'] as const) {
+        const user = await fixture.server.sfudRuntime.auth.createManagedUser({ actorUserId: owner.userId, email: `alias-${role}@example.com`, displayName: role, role, password });
+        const session = await login(fixture.server, user.email);
+        expect((await fixture.server.inject({ method: 'PATCH', url, headers: headers(session), payload: { alias: '변경 불가' } })).statusCode).toBe(role === 'ADMIN' ? 404 : 403);
+      }
+      for (const alias of ['a'.repeat(81), '줄\n바꿈']) expect((await fixture.server.inject({ method: 'PATCH', url, headers: headers(owner), payload: { alias } })).statusCode).toBe(400);
+      const renamed = await fixture.server.inject({ method: 'PATCH', url, headers: headers(owner), payload: { alias: '  커넥스 운영  ' } });
+      expect(renamed.statusCode, renamed.body).toBe(200);
+      expect(renamed.json().connection).toMatchObject({ alias: '커넥스 운영', repositoryPath: payload.repositoryPath });
+      expect(await db.get('SELECT encrypted_access_token, token_version, repository_path, provider_host FROM git_connections WHERE id = ?', id)).toEqual(before);
+      expect((await new GitConnectionRepository(db).list(owner.userId))[0]?.alias).toBe('커넥스 운영');
+      const replaced = await fixture.server.inject({ method: 'PUT', url: `/api/v1/git/connections/${id}`, headers: headers(owner), payload: { ...payload, token: 'replacement-fixture' } });
+      expect(replaced.statusCode, replaced.body).toBe(200);
+      expect(replaced.json().connection.alias).toBe('커넥스 운영');
+      const cleared = await fixture.server.inject({ method: 'PATCH', url, headers: headers(owner), payload: { alias: '  ' } });
+      expect(cleared.json().connection.alias).toBeUndefined();
+    } finally { await fixture.close(); }
+  });
+
   it('인증·역할·CSRF를 요구하고 provider identity를 검증한 뒤 owner별 연결을 반환한다', async () => {
     const fixture = await createFixture();
     try {
@@ -145,15 +177,23 @@ describe('Git PAT/API token 연결 라우트', { timeout: 30_000 }, () => {
         { provider: 'github', token: 'github_pat_11AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', repositoryPath: 'https://github.com/acme/github-project.git' },
         { provider: 'gitlab', token: 'glpat-AAAAAAAAAAAAAAAAAAAA', repositoryPath: 'https://gitlab.com/group/project.git' },
         { provider: 'bitbucket', token: 'ATBB-AAAAAAAAAAAAAAAAAAAA', repositoryPath: 'https://bitbucket.org/acme/project.git' },
+        { provider: 'github', token: 'github_pat_11BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', repositoryPath: 'https://git.example.test/acme/self-hosted.git' },
+        { provider: 'gitlab', token: 'glpat-BBBBBBBBBBBBBBBBBBBB', repositoryPath: 'https://gitlab.hmc.co.kr/group/project.git' },
       ] as const;
       for (const input of inputs) {
         const response = await fixture.server.inject({ method: 'POST', url: '/api/v1/git/connections', headers: headers(owner), payload: input });
-        expect(response.statusCode, response.body).toBe(201);
-        expect(response.json()).toMatchObject({ connection: { provider: input.provider, repositoryPath: expect.stringContaining('project') } });
+        expect(response.statusCode, `${input.repositoryPath}: ${response.body}`).toBe(201);
+        expect(response.json()).toMatchObject({ connection: { provider: input.provider, repositoryPath: expect.any(String) } });
+        if (input.repositoryPath.includes('git.example.test')) {
+          expect(response.json()).toMatchObject({ connection: { providerHost: 'git.example.test', repositoryPath: input.repositoryPath } });
+        }
+        if (input.repositoryPath.includes('gitlab.hmc.co.kr')) {
+          expect(response.json()).toMatchObject({ connection: { providerHost: 'gitlab.hmc.co.kr', repositoryPath: input.repositoryPath } });
+        }
         expect(response.body).not.toContain(input.token);
       }
       expect(fixture.apiCalls).toEqual([]);
-      expect(fixture.remoteCalls).toEqual(['acme/github-project', 'group/project', 'acme/project']);
+      expect(fixture.remoteCalls).toEqual(['acme/github-project', 'group/project', 'acme/project', 'acme/self-hosted', 'group/project']);
     } finally { await fixture.close(); }
   });
 

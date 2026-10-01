@@ -5,9 +5,19 @@ import { GitCatalogQuerySchema, GitCatalogResponseSchema, type GitCatalogQuery }
 import type { GitConnection } from '../../storage/git-connection-repository.js';
 import { GitError } from '../../git/git-errors.js';
 import { requireAuthenticatedSession } from './auth-routes.js';
+import { GitAliasInputSchema } from '../../api/git-contracts.js';
 
 export async function registerGitConnectionRoutes(app: FastifyInstance): Promise<void> {
   const mutation = { csrf: true, roles: ['OPERATOR', 'DEPLOYER', 'ADMIN'] as ('OPERATOR' | 'DEPLOYER' | 'ADMIN')[] };
+  app.patch<{ Params: { id: string }; Body: { alias: string } }>('/api/v1/git/connections/:id/alias', {
+    schema: { params: Type.Object({ id: Type.String({ format: 'uuid' }) }), body: GitAliasInputSchema,
+      response: { 200: GitConnectionResponseSchema } },
+  }, async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply, mutation);
+    if (session === undefined) return;
+    try { return { connection: publicConnection(await app.sfudRuntime.gitConnections.setAlias(session.user.id, request.params.id, request.body.alias)) }; }
+    catch (error) { return tokenFailure(reply, error); }
+  });
   app.get('/api/v1/git/providers', { schema: { response: { 200: GitProvidersResponseSchema } } }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;

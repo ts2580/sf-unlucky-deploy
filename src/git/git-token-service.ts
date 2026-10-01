@@ -1,5 +1,5 @@
 import { GitError } from './git-errors.js';
-import { normalizeRepository, type GitProviderId } from './git-repository.js';
+import { connectionRepositoryPath, normalizeRepository, type GitProviderId } from './git-repository.js';
 import { credentialProviderFor, providerApiCredential, validApiUsername } from './git-credential-provider.js';
 import { GitClient } from './git-client.js';
 import { GitRemoteProvider } from './git-remote-provider.js';
@@ -68,12 +68,17 @@ export class GitTokenService {
       }
       if (input.repositoryPath !== undefined) {
         const address = normalizeRepository(input.repositoryPath, input.provider);
-        if (previous !== undefined && previous.connection.repositoryPath !== address.repositoryPath) throw new GitError('GIT_CONNECTION_REQUIRED');
+        if (previous?.connection.repositoryPath !== undefined) {
+          const previousAddress = normalizeRepository(previous.connection.repositoryPath, input.provider);
+          if (previousAddress.cloneUrl !== address.cloneUrl) {
+            throw new GitError('GIT_CONNECTION_REQUIRED');
+          }
+        }
         const provider = new GitRemoteProvider(address, credentialProviderFor(input.provider, tokens), this.remote);
         const repository = await provider.inspect(address, undefined, AbortSignal.timeout(20_000));
         return await this.connections.save({ ownerUserId: owner, provider: input.provider, providerHost: address.host,
           providerAccountId: repository.repositoryId, displayName: address.repositoryPath.slice(0, 200),
-          repositoryPath: address.repositoryPath, grantedPermissions: [], tokens },
+          repositoryPath: connectionRepositoryPath(address), grantedPermissions: [], tokens },
         previous === undefined ? undefined : { id: replaceId!, tokenVersion: previous.tokenVersion });
       }
       if (previous?.connection.repositoryPath !== undefined) throw new GitError('GIT_CONNECTION_REQUIRED');

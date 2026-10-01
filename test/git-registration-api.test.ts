@@ -24,8 +24,15 @@ describe('등록 브랜치 API', () => {
       const created = await app.inject({ method: 'POST', url: '/api/v1/git/registrations', headers, payload: request });
       expect(created.statusCode).toBe(201);
       const id = created.json().registration.id as string;
+      const aliasUrl = `/api/v1/git/registrations/${id}/alias`;
+      expect((await app.inject({ method: 'PATCH', url: aliasUrl, headers: { cookie: headers.cookie }, payload: { alias: '운영 소스' } })).statusCode).toBe(403);
+      expect((await app.inject({ method: 'PATCH', url: aliasUrl, headers: otherHeaders, payload: { alias: '운영 소스' } })).statusCode).toBe(404);
+      expect((await app.inject({ method: 'PATCH', url: aliasUrl, headers: { cookie: `sfud_session=${viewerAuth.sessionToken}`, 'x-sfud-csrf': viewerAuth.csrfToken }, payload: { alias: '운영 소스' } })).statusCode).toBe(403);
+      expect((await app.inject({ method: 'PATCH', url: aliasUrl, headers, payload: { alias: '  운영 소스  ' } })).json().registration)
+        .toMatchObject({ alias: '운영 소스', request });
+      expect(warm).toHaveBeenCalledTimes(1);
       const workspace = await app.inject({ url: '/api/v1/workspace', headers });
-      expect(workspace.json().sources).toContainEqual(expect.objectContaining({ id: `git-registered:${id}` }));
+      expect(workspace.json().sources).toContainEqual(expect.objectContaining({ id: `git-registered:${id}`, label: '운영 소스 · main' }));
       const types = await app.inject({ url: `/api/v1/metadata-types?sourceIds=git-registered:${id}`, headers });
       expect(types.json().metadataTypes).toContainEqual({ name: 'ApexClass', directoryName: 'classes' });
       expect((await app.inject({ url: '/api/v1/git/registrations', headers: otherHeaders })).json().registrations).toEqual([]);
@@ -33,6 +40,8 @@ describe('등록 브랜치 API', () => {
       warm.mockRejectedValueOnce(new GitError('GIT_REMOTE_UNAVAILABLE'));
       expect((await app.inject({ method: 'POST', url: `/api/v1/git/registrations/${id}/sync`, headers })).statusCode).toBe(400);
       expect((await app.inject({ url: '/api/v1/git/registrations', headers })).json().registrations[0]).toMatchObject({ status: 'FAILED', lastCommitSha: '1'.repeat(40) });
+      expect((await app.inject({ url: '/api/v1/git/registrations', headers })).json().registrations[0].alias).toBe('운영 소스');
+      expect((await app.inject({ method: 'PATCH', url: aliasUrl, headers, payload: { alias: '' } })).json().registration.alias).toBeUndefined();
       expect((await app.inject({ method: 'DELETE', url: `/api/v1/git/registrations/${id}`, headers })).statusCode).toBe(204);
       expect((await app.inject({ url: '/api/v1/git/registrations', headers })).json().registrations).toEqual([]);
     } finally { await app.close(); }

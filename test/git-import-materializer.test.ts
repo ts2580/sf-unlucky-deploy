@@ -71,6 +71,54 @@ function project(prefix = ''): Entry[] {
 }
 
 describe('Git 원시 파일 추출', { timeout: 30_000 }, () => {
+  it.each([true, false])('하위 폴더 Apex와 companion을 평탄화하고 원본 blob·다른 타입은 보존한다 (restore=%s)', async (restore) => {
+    const entries = [
+      ...project('salesforce/'),
+      { name: 'salesforce/force-app/main/default/classes/interface/Contract.cls', content: 'public interface Contract {}\r\n' },
+      { name: 'salesforce/force-app/main/default/classes/interface/Contract.cls-meta.xml', content: '<ApexClass/>' },
+      { name: 'salesforce/extra/classes/logger/internal/Logger.cls', content: 'public class Logger {}' },
+      { name: 'salesforce/extra/classes/logger/internal/Logger.cls-meta.xml', content: '<ApexClass/>' },
+      { name: 'salesforce/force-app/main/default/lwc/widget/classes/Keep.cls', content: 'not apex metadata' },
+      { name: 'salesforce/force-app/main/default/reports/campaign/Report.report-meta.xml', content: '<Report/>' },
+      { name: 'salesforce/force-app/main/default/classes/ignored/Hidden.cls', content: 'ignored class' },
+    ];
+    const f = await fixture(entries);
+    const objects = restore ? f.objects : {
+      listTree: f.objects.listTree.bind(f.objects), readBlob: f.objects.readBlob.bind(f.objects),
+    };
+    const materializer = new GitMaterializer(objects);
+    const target = path.join(f.root, 'flattened');
+    const result = await materializer.materialize(f.commit, 'salesforce', target);
+    expect(await readFile(path.join(target, 'force-app/main/default/classes/Contract.cls'), 'utf8')).toBe('public interface Contract {}\r\n');
+    expect(await readFile(path.join(target, 'force-app/main/default/classes/Contract.cls-meta.xml'), 'utf8')).toBe('<ApexClass/>');
+    expect(await readFile(path.join(target, 'extra/classes/Logger.cls-meta.xml'), 'utf8')).toBe('<ApexClass/>');
+    await expect(access(path.join(target, 'extra/classes/logger/internal/Logger.cls'))).rejects.toThrow();
+    for (const unchanged of ['force-app/main/default/lwc/widget/classes/Keep.cls',
+      'force-app/main/default/reports/campaign/Report.report-meta.xml', 'force-app/main/default/classes/ignored/Hidden.cls']) {
+      await expect(access(path.join(target, unchanged))).resolves.toBeUndefined();
+    }
+    await expect(access(path.join(target, 'force-app/main/default/classes/Hidden.cls'))).rejects.toThrow();
+    expect(f.git(['show', `${f.commit}:salesforce/extra/classes/logger/internal/Logger.cls`])).toBe('public class Logger {}');
+    const repeated = await materializer.materialize(f.commit, 'salesforce', path.join(f.root, 'repeated'));
+    expect(repeated.checksum).toBe(result.checksum);
+    const scoped = path.join(f.root, 'scoped');
+    await materializer.materialize(f.commit, 'salesforce', scoped, { metadataType: 'ApexClass' });
+    expect(await readFile(path.join(scoped, 'extra/classes/Logger.cls'), 'utf8')).toBe('public class Logger {}');
+  });
+
+  it.each([
+    ['force-app/main/default/classes/a/Hello.cls', 'force-app/main/default/classes/b/Hello.cls'],
+    ['force-app/main/default/classes/Hello.cls', 'force-app/main/default/classes/b/hello.cls'],
+    ['force-app/main/default/classes/a/Hello.cls', 'force-app/main/default/classes/b/Hello.cls-meta.xml'],
+    ['force-app/main/default/classes/a/Hello.cls', 'extra/classes/b/Hello.cls'],
+  ])('평탄화 이름 충돌을 덮어쓰기 전에 거절한다: %s / %s', async (first, second) => {
+    const entries = project().filter((entry) => !entry.name.endsWith('/Hello.cls'));
+    const f = await fixture([...entries, { name: first, content: 'first' }, { name: second, content: 'second' }]);
+    const target = path.join(f.root, 'collision');
+    await expect(f.materializer.materialize(f.commit, '.', target)).rejects.toMatchObject({ code: 'APEX_PATH_COLLISION' });
+    await expect(access(target)).rejects.toThrow();
+  });
+
   it('기본 가져오기는 2,000개를 넘는 파일도 복원하여 배포 소스를 준비한다', async () => {
     const f = await fixture([{ name: 'sfdx-project.json', content: JSON.stringify({ packageDirectories: [{ path: 'force-app' }] }) },
       ...Array.from({ length: 1000 }, (_, i) => [

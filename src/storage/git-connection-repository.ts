@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { GitError } from '../git/git-errors.js';
+import { normalizeGitAlias } from '../git/git-alias.js';
 import { normalizeRepository, type GitProviderId } from '../git/git-repository.js';
 import type { TokenContext, TokenVault } from '../git/token-vault.js';
 import type { DatabaseExecutor, DatabaseHandle } from './database-executor.js';
@@ -11,6 +12,7 @@ export interface GitConnection {
   providerHost: string;
   providerAccountId: string;
   displayName: string;
+  alias?: string;
   repositoryPath?: string;
   expiresAt?: string;
   grantedPermissions: string[];
@@ -24,9 +26,10 @@ interface ConnectionRow {
   provider_account_id: string; display_name: string; encrypted_access_token: string | null;
   encrypted_refresh_token: string | null; encrypted_api_username: string | null; credential_type: string; expires_at: string | null; granted_permissions_json: string;
   repository_path: string | null;
+  alias: string | null;
   status: GitConnection['status']; key_version: number; token_version: number; created_at: string; updated_at: string;
 }
-type SaveConnection = Omit<GitConnection, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'expiresAt'> & { tokens: GitTokens };
+type SaveConnection = Omit<GitConnection, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'expiresAt' | 'alias'> & { tokens: GitTokens };
 
 export class GitConnectionRepository {
   public constructor(private readonly database: DatabaseExecutor, private readonly vault?: TokenVault) {}
@@ -43,9 +46,10 @@ export class GitConnectionRepository {
   public async save(input: SaveConnection, expected?: { id: string; tokenVersion: number }): Promise<GitConnection> {
     const vault = this.requireVault();
     validateTokens(input.tokens);
-    if (normalizeRepository('account/repository', input.provider).host !== input.providerHost
+    const repository = input.repositoryPath === undefined ? undefined : normalizeRepository(input.repositoryPath, input.provider);
+    if ((repository === undefined ? normalizeRepository('account/repository', input.provider).host : repository.host) !== input.providerHost
       || !safeValue(input.providerAccountId, 200) || !safeValue(input.displayName, 200)
-      || (input.repositoryPath !== undefined && normalizeRepository(input.repositoryPath, input.provider).repositoryPath !== input.repositoryPath)
+      || (repository !== undefined && input.repositoryPath !== repository.repositoryPath && input.repositoryPath !== repository.cloneUrl)
       || input.grantedPermissions.length > 100 || input.grantedPermissions.some((value) => !safeValue(value, 200))) {
       throw new GitError('GIT_REAUTH_REQUIRED');
     }
@@ -97,6 +101,18 @@ export class GitConnectionRepository {
     return { connection: publicConnection(row), tokenVersion: row.token_version };
   }
 
+  public async setAlias(owner: string, id: string, value: string): Promise<GitConnection> {
+    const alias = normalizeGitAlias(value);
+    return this.database.transaction(async (db) => {
+      const now = new Date().toISOString();
+      const result = await db.run("UPDATE git_connections SET alias = ?, updated_at = ? WHERE id = ? AND owner_user_id = ? AND status <> 'REVOKED'",
+        alias, now, id, owner);
+      if (result.changes !== 1) throw new GitError('GIT_CONNECTION_REQUIRED');
+      await audit(db, owner, id, 'GIT_CONNECTION_ALIAS_UPDATED', now);
+      return publicConnection((await db.get<ConnectionRow>('SELECT * FROM git_connections WHERE id = ?', id))!);
+    });
+  }
+
   public async readCredentials(ownerUserId: string, id: string): Promise<{ connection: GitConnection; tokens: GitTokens; tokenVersion: number }> {
     const vault = this.requireVault();
     const row = await this.database.get<ConnectionRow>('SELECT * FROM git_connections WHERE id = ? AND owner_user_id = ?', id, ownerUserId);
@@ -143,6 +159,7 @@ function publicConnection(row: ConnectionRow): GitConnection {
     providerAccountId: row.provider_account_id, displayName: row.display_name, grantedPermissions: JSON.parse(row.granted_permissions_json) as string[],
     status: row.status === 'ACTIVE' && row.expires_at !== null && Date.parse(row.expires_at) <= Date.now() ? 'REAUTH_REQUIRED' : row.status, createdAt: row.created_at, updatedAt: row.updated_at,
     ...(row.expires_at === null ? {} : { expiresAt: row.expires_at }),
+    ...(row.alias == null ? {} : { alias: row.alias }),
     ...(row.repository_path == null ? {} : { repositoryPath: row.repository_path }) };
 }
 function context(connection: GitConnection, purpose: TokenContext['purpose']): TokenContext {

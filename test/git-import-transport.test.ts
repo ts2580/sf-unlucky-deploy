@@ -8,7 +8,7 @@ import { normalizeRepository } from '../src/git/git-repository.js';
 import { GitClient } from '../src/git/git-client.js';
 import { GithubPatCredentialProvider } from '../src/git/git-credential-provider.js';
 import { GitError } from '../src/git/git-errors.js';
-import { isPublicGitAddress, validateProviderUrl } from '../src/git/git-network.js';
+import { gitHostPolicyFromAddresses, isPublicGitAddress, validateProviderUrl } from '../src/git/git-network.js';
 import * as network from '../src/git/git-network.js';
 import * as processRunner from '../src/git/git-process.js';
 
@@ -24,6 +24,42 @@ async function root() {
 }
 
 describe('격리 Git 수신과 credential bridge', { timeout: 30_000 }, () => {
+  it('셀프호스트 credential은 같은 포트·context 경로에만 전달한다', async () => {
+    const directory = await root();
+    const repository = normalizeRepository('https://code.example.test:7990/bitbucket/scm/TEAM/project.git', 'bitbucket');
+    const bridge = await createGitCredentialBridge(directory, repository, { username: 'fixture-user', password: 'fixture-secret' });
+    try {
+      const invoke = (host: string, repo: string) => runIsolatedGit(['credential', 'fill'], {
+        cwd: directory, input: Buffer.from(`protocol=https\nhost=${host}\npath=${repo}\n\n`),
+        additionalConfig: ['credential.useHttpPath=true', `credential.helper=${bridge.helperCommand}`], bridgeEnvironment: bridge.environment,
+      });
+      expect((await invoke('code.example.test:7990', 'bitbucket/scm/TEAM/project.git')).toString()).toContain('password=fixture-secret');
+      for (const host of ['code.example.test', 'code.example.test:8443', 'other.example.test:7990']) {
+        await expect(invoke(host, 'bitbucket/scm/TEAM/project.git')).rejects.toMatchObject({ code: 'GIT_PROCESS_FAILED' });
+      }
+      await expect(invoke('code.example.test:7990', 'scm/TEAM/project.git')).rejects.toMatchObject({ code: 'GIT_PROCESS_FAILED' });
+    } finally { await bridge.close(); }
+  });
+
+  it('refs·fetch·누락 blob fetch 모두 사용자 지정 HTTPS 포트를 DNS pinning에 적용한다', async () => {
+    const directory = await root();
+    vi.spyOn(network, 'resolveGitHost').mockResolvedValue({ address: '192.168.10.25', family: 4 });
+    const blob = 'b'.repeat(40);
+    const execute = vi.spyOn(processRunner, 'runIsolatedGit').mockImplementation(async (args) => Buffer.from(
+      args[0] === 'cat-file' ? args[1] === '-t' ? 'commit\n' : `${blob} missing\n` : ''));
+    const repository = normalizeRepository('https://code.example.test:7990/scm/TEAM/project.git', 'bitbucket');
+    const credentialProvider = new GithubPatCredentialProvider('fixture-token');
+    const client = new GitClient();
+    await client.lsRemote({ repository, credentialProvider });
+    const objects = await client.fetch({ directory, repository, commitSha: 'a'.repeat(40), partial: true, credentialProvider, onDiskUsage: () => undefined });
+    await objects.prepareBlobs([blob]);
+    const calls = execute.mock.calls.filter(([args]) => args[0] === 'fetch' || args[0] === 'ls-remote');
+    expect(calls).toHaveLength(3);
+    for (const [args, options] of calls) {
+      expect(args).toContain(repository.cloneUrl);
+      expect(options.additionalConfig).toContain('http.curloptResolve=code.example.test:7990:192.168.10.25');
+    }
+  });
   it('Git의 실제 credential helper가 지정 저장소에서만 credential을 수신하고 파일에 남기지 않는다', async () => {
     const directory = await root();
     const repository = normalizeRepository('https://github.com/owner/private');
@@ -43,6 +79,12 @@ describe('격리 Git 수신과 credential bridge', { timeout: 30_000 }, () => {
         method: 'POST', headers: { 'x-sfud-nonce': 'x'.repeat(64) }, body: 'protocol=https\nhost=github.com\npath=owner/private.git\n',
       });
       expect(response.status).toBe(403);
+      const capabilities = await fetch(`http://127.0.0.1:${bridge.environment.SFUD_GIT_BRIDGE_PORT}/credential`, {
+        method: 'POST', headers: { 'x-sfud-nonce': bridge.environment.SFUD_GIT_BRIDGE_NONCE },
+        body: 'protocol=https\nhost=github.com\npath=owner/private.git\ncapability[]=authtype\ncapability[]=state\n',
+      });
+      expect(capabilities.status).toBe(200);
+      expect(await capabilities.text()).toContain('password=fixture-secret-never-persist');
       for (const body of [
         'protocol=https\nhost=gitlab.com\npath=owner/private.git\n',
         'protocol=http\nhost=github.com\npath=owner/private.git\n',
@@ -139,13 +181,16 @@ describe('격리 Git 수신과 credential bridge', { timeout: 30_000 }, () => {
       expect(options.onDiskUsage).toBe(onDiskUsage);
       expect(options.additionalConfig).toContain('http.curloptResolve=github.com:443:140.82.114.3');
       expect(options.additionalConfig).toContain('credential.useHttpPath=true');
+      expect(options.additionalConfig).toContain('fetch.negotiationAlgorithm=noop');
+      expect(options.additionalConfig).toContain(`remote.${repository.cloneUrl}.promisor=true`);
+      expect(options.additionalConfig).toContain(`remote.${repository.cloneUrl}.partialclonefilter=blob:none`);
       expect(options.bridgeEnvironment?.SFUD_GIT_BRIDGE_PORT).toMatch(/^\d+$/u);
     }
     expect(hydrationCalls[0]?.[1].input?.toString('utf8').trimEnd().split('\n')).toHaveLength(500);
     expect(hydrationCalls[1]?.[1].input?.toString('utf8').trimEnd().split('\n')).toHaveLength(missing.length - 500);
     expect(JSON.stringify(execute.mock.calls)).not.toContain(token);
     expect((await readdir(directory)).filter((entry) => entry.startsWith('credential-'))).toEqual([]);
-    expect(removePromisorRemote()).toHaveLength(3);
+    expect(removePromisorRemote()).toHaveLength(1);
     for (const [, options] of removePromisorRemote()) {
       expect(options.signal).toBe(signal);
       expect(options.onDiskUsage).toBe(onDiskUsage);
@@ -182,9 +227,10 @@ describe('격리 Git 수신과 credential bridge', { timeout: 30_000 }, () => {
       'ref: refs/heads/main\tHEAD\n' + 'a'.repeat(40) + '\trefs/heads/main\n'));
     const repository = normalizeRepository('https://github.com/owner/private');
     const provider = new GithubPatCredentialProvider('secret-ls-remote-fixture');
-    const output = await new GitClient().lsRemote({ repository, credentialProvider: provider });
+    const hostPolicy = gitHostPolicyFromAddresses(['192.168.10.25']);
+    const output = await new GitClient(hostPolicy).lsRemote({ repository, credentialProvider: provider });
     expect(output.toString('utf8')).toContain('refs/heads/main');
-    expect(resolved).toHaveBeenCalledWith('github.com');
+    expect(resolved).toHaveBeenCalledWith('github.com', hostPolicy);
     const [args, options] = execute.mock.calls[0]!;
     expect(args).toEqual(['ls-remote', '--symref', '--', repository.cloneUrl, 'HEAD', 'refs/heads/*', 'refs/tags/*']);
     expect(options.timeoutMs).toBe(15_000);

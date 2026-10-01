@@ -117,6 +117,8 @@ describe('개인 소스 파생 작업 접근', { timeout: 30_000 }, () => {
     const { server, owner, other, headers, compare, dryRun } = await fixture();
     const legacyComparison = await compare(false);
     const legacyDeployment = await dryRun(false);
+    await server.sfudRuntime.jobAccess.grant('comparison', legacyComparison.id, owner.user.id, other.user.id, 'READ');
+    await server.sfudRuntime.jobAccess.grant('deployment', legacyDeployment.id, owner.user.id, other.user.id, 'READ');
     for (let index = 0; index < 55; index += 1) { await compare(); await dryRun(); }
     expect((await server.inject({ url: '/api/v1/comparisons', headers: headers(other) })).json().jobs)
       .toEqual([expect.objectContaining({ id: legacyComparison.id })]);
@@ -168,6 +170,7 @@ describe('개인 소스 파생 작업 접근', { timeout: 30_000 }, () => {
     const { server, owner, other, headers, compare } = await fixture();
     const privateJob = await compare();
     const publicJob = await compare(false);
+    await server.sfudRuntime.jobAccess.grant('comparison', publicJob.id, owner.user.id, other.user.id, 'READ');
     const address = await server.listen({ host: '127.0.0.1', port: 0 });
     const abort = new AbortController();
     const response = await fetch(`${address}/api/v1/workflow/events`, { headers: headers(other), signal: abort.signal });

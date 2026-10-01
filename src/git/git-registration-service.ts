@@ -3,20 +3,25 @@ import type { DatabaseExecutor } from '../storage/database-executor.js';
 import type { GitImportRequest } from '../storage/git-import-repository.js';
 import type { GitImportService } from './git-import-service.js';
 import { GitError } from './git-errors.js';
-import { normalizeRepository, validateGitRef } from './git-repository.js';
+import { connectionRepositoryPath, normalizeRepository, validateGitRef } from './git-repository.js';
 import { safeGitPath } from './git-project-validator.js';
 import type { WorkspaceSource } from '../api/workspace-contracts.js';
+import { runGitOperation } from './git-diagnostics.js';
+import { normalizeGitAlias } from './git-alias.js';
 
 export interface GitRegistration {
+  requiresRepositoryUrl?: boolean;
+  alias?: string;
   id: string; repositoryId: string; request: GitImportRequest; status: string; lastCommitSha?: string;
   lastSyncedAt?: string; errorMessage?: string;
 }
-interface Row { id: string; repository_id: string; request_json: string; status: string; last_commit_sha: string | null; last_synced_at: string | null; error_message: string | null }
+interface Row { id: string; alias: string | null; repository_url_verified: number; repository_id: string; request_json: string; status: string; last_commit_sha: string | null; last_synced_at: string | null; error_message: string | null }
 export class GitRegistrationService {
   private closed = false;
   private readonly admissions = new Map<string, number>();
   private readonly tails = new Map<string, Promise<unknown>>();
-  public constructor(private readonly database: DatabaseExecutor, private readonly imports: GitImportService) {}
+  public constructor(private readonly database: DatabaseExecutor, private readonly imports: GitImportService,
+    private readonly diagnosticsFile?: string) {}
 
   public async list(owner: string): Promise<GitRegistration[]> {
     return (await this.database.all<Row[]>('SELECT * FROM git_registrations WHERE owner_user_id = ? ORDER BY created_at DESC', owner)).map(map);
@@ -38,9 +43,9 @@ export class GitRegistrationService {
     const id = randomUUID();
     // Type selection belongs to each comparison, not the saved branch.
     const { metadataType: _type, ...saved } = request;
-    await this.database.run(`INSERT INTO git_registrations(id, owner_user_id, request_json, repository_id, status, created_at)
-      VALUES (?, ?, ?, ?, 'PENDING', ?)`, id, owner,
-    JSON.stringify({ ...saved, repositoryPath: address.repositoryPath, projectRoot: request.projectRoot ?? '.' }), repository.repositoryId, new Date().toISOString());
+    await this.database.run(`INSERT INTO git_registrations(id, owner_user_id, request_json, repository_id, status, created_at, repository_url_verified)
+      VALUES (?, ?, ?, ?, 'PENDING', ?, 1)`, id, owner,
+    JSON.stringify({ ...saved, repositoryPath: connectionRepositoryPath(address), projectRoot: request.projectRoot ?? '.' }), repository.repositoryId, new Date().toISOString());
     await this.sync(id, owner);
     return this.get(id, owner);
   }
@@ -48,7 +53,7 @@ export class GitRegistrationService {
     if (this.closed) throw new GitError('IMPORT_CANCELLED');
     const leave = this.admit(owner);
     const prior = this.tails.get(id) ?? Promise.resolve();
-    const work = prior.catch(() => undefined).then(async () => {
+    const work = prior.catch(() => undefined).then(() => runGitOperation(this.diagnosticsFile, id, 'registration-sync', async () => {
       if (this.closed) throw new GitError('IMPORT_CANCELLED');
       const registered = await this.get(id, owner);
       await this.database.run("UPDATE git_registrations SET status = 'SYNCING', error_message = NULL WHERE id = ?", id);
@@ -63,7 +68,7 @@ export class GitRegistrationService {
         throw safe;
       }
       return this.get(id, owner);
-    });
+    }));
     this.tails.set(id, work);
     try { return await work; } finally { leave(); if (this.tails.get(id) === work) this.tails.delete(id); }
   }
@@ -72,7 +77,7 @@ export class GitRegistrationService {
     if (this.closed) throw new GitError('IMPORT_CANCELLED');
     const leave = this.admit(owner);
     const prior = this.tails.get(id) ?? Promise.resolve();
-    const work = prior.catch(() => undefined).then(async () => {
+    const work = prior.catch(() => undefined).then(() => runGitOperation(this.diagnosticsFile, id, 'registration-prepare', async () => {
       if (this.closed) throw new GitError('IMPORT_CANCELLED');
       const registered = await this.get(id, owner);
       await this.database.run("UPDATE git_registrations SET status = 'SYNCING', error_message = NULL WHERE id = ?", id);
@@ -87,7 +92,7 @@ export class GitRegistrationService {
         await this.database.run("UPDATE git_registrations SET status = 'FAILED', error_message = ? WHERE id = ?", safe.message, id);
         throw safe;
       }
-    });
+    }));
     this.tails.set(id, work);
     try { return await work; } finally { leave(); if (this.tails.get(id) === work) this.tails.delete(id); }
   }
@@ -101,6 +106,7 @@ export class GitRegistrationService {
     };
   }
   private async assertRepository(registered: GitRegistration, owner: string): Promise<void> {
+    if (registered.requiresRepositoryUrl) throw new GitError('GIT_REPOSITORY_URL_REQUIRED');
     const current = await this.imports.inspect(registered.request, undefined, owner);
     if (current.repositoryId !== registered.repositoryId) throw new GitError('REPOSITORY_UNAVAILABLE');
   }
@@ -109,18 +115,26 @@ export class GitRegistrationService {
     if (this.tails.has(id)) throw new Error('동기화 중인 브랜치는 제거할 수 없습니다.');
     await this.database.run('DELETE FROM git_registrations WHERE id = ? AND owner_user_id = ?', id, owner);
   }
+  public async setAlias(id: string, owner: string, value: string): Promise<GitRegistration> {
+    const alias = normalizeGitAlias(value);
+    const result = await this.database.run('UPDATE git_registrations SET alias = ? WHERE id = ? AND owner_user_id = ?', alias, id, owner);
+    if (result.changes !== 1) throw new GitError('IMPORT_EXPIRED');
+    return this.get(id, owner);
+  }
   public async close(): Promise<void> {
     this.closed = true;
     await Promise.allSettled(this.tails.values());
   }
   public async sources(owner: string): Promise<WorkspaceSource[]> {
-    return (await this.list(owner)).map((item) => ({ id: `git-registered:${item.id}`, kind: 'local', location: 'git',
-      label: `${item.request.repositoryPath} · ${item.request.ref.name}`,
+    return (await this.list(owner)).filter((item) => !item.requiresRepositoryUrl).map((item) => ({ id: `git-registered:${item.id}`, kind: 'local', location: 'git',
+      label: `${item.alias ?? item.request.repositoryPath} · ${item.request.ref.name}`,
       detail: '등록 브랜치 · 비교 시작 시 자동 동기화' }));
   }
 }
 function map(row: Row): GitRegistration {
   return { id: row.id, repositoryId: row.repository_id, request: JSON.parse(row.request_json) as GitImportRequest, status: row.status,
+    ...(row.repository_url_verified === 0 ? { requiresRepositoryUrl: true } : {}),
+    ...(row.alias == null ? {} : { alias: row.alias }),
     ...(row.last_commit_sha === null ? {} : { lastCommitSha: row.last_commit_sha }),
     ...(row.last_synced_at === null ? {} : { lastSyncedAt: row.last_synced_at }),
     ...(row.error_message === null ? {} : { errorMessage: row.error_message }) };
