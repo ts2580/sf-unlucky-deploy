@@ -27,7 +27,7 @@ Salesforce org와 로컬 Salesforce DX 프로젝트의 메타데이터를 같은
 
 ## 요구 사항
 
-- Node.js 20.19 이상
+- Node.js 22.19.0 이상 (Node.js 24 LTS 권장)
 - npm
 - Salesforce CLI v2 (`sf`)
 - Git
@@ -51,7 +51,7 @@ npm run verify
 
 CI와 개발 설치는 `package-lock.json`을 기준으로 `npm ci`를 수행하고, 배포 tarball에는
 `npm-shrinkwrap.json`을 포함한다. 두 파일의 dependency graph는 `npm run lockfile:check`로
-동기화를 확인한다. 패키징과 릴리스 설치 검증은 `packageManager`에 고정한 npm 11.7.0으로
+동기화를 확인한다. 패키징과 릴리스 설치 검증은 `packageManager`에 고정한 npm 11.20.0으로
 수행해 서로 다른 로컬 npm 버전이 배포 dependency tree를 바꾸지 않게 한다.
 
 도움말은 TypeScript 소스에서 바로 실행할 수 있다.
@@ -101,13 +101,66 @@ npm run build
 node dist/cli.js --help
 ```
 
+### npm 배포 준비 상태
+
+npm 패키지 이름은 `@trstyq/sf-unlucky-deploy`이고 실행 명령은 `sfud`입니다. 현재 npm 시험 배포 후보는 `0.4.0-rc.1`이며 공개 발행 전입니다. 시험 채널은 `next`를 사용하고 프로젝트 라이선스는 MIT입니다. 공개 GitHub Release는 `v0.3.0`까지 확인됐습니다. 아래 npm 명령은 발행 이후 사용할 설치 형태입니다. 공개 배포가 완료되기 전에는 GitHub Release tarball을 사용하세요.
+
+```bash
+npm install --global --allow-scripts=sqlite3 @trstyq/sf-unlucky-deploy@next
+sfud --version
+sfud --help
+```
+
+Salesforce CLI v2(`sf`)와 Git은 별도로 설치하고, 필요한 Org를 미리 로그인해야 합니다. 설치된 `sfud`는 현재 디렉터리의 `.env`를 자동으로 읽지 않습니다. 다음 배포부터 `sfud ui`, `sfud compare`, `sfud deploy`를 처음 실행하면 사용자 홈에 `.sfud/config.json`과 `.sfud/secrets.env`를 자동으로 생성합니다. Linux의 기본 경로는 `~/.sfud/config.json`, Windows는 `%USERPROFILE%\.sfud\config.json`입니다. npm 설치 시에는 생성하지 않으므로 설치 스크립트를 끈 환경에서도 첫 실행 시 동작합니다. `--help`, `--version`, `config path` 조회는 파일을 만들지 않습니다. 현재 공개 시험판 `0.4.0-rc.1`은 자동 생성을 지원하지 않으므로 아래 초기화 명령이 필요합니다.
+
+자동 생성 파일은 `{ "version": 1, "env": {} }`로 시작하여 현재 실행 모드와 데이터 경로를 유지합니다. 기존 설정은 덮어쓰거나 권한을 자동 변경하지 않습니다. 설정이 없을 때 개인 LOCAL 모드를 명시적으로 초기화하려면 다음 명령을 사용합니다.
+
+```bash
+sfud config path
+sfud config init
+```
+
+`sfud config init`으로 만든 개인 설정은 `LOCAL=true`와 설정 디렉터리 기준 `data/local`을 사용합니다. 자동 생성된 빈 설정이 이미 있다면 `config path`가 표시한 파일의 `env`에 이 값을 직접 설정하세요. 실행 옵션이 가장 우선하고, 그 다음 현재 프로세스 환경변수, 홈 설정, 기본값 순서로 적용됩니다. `SFUD_CONFIG_DIR`에는 설정 디렉터리의 절대 경로를 지정할 수 있습니다. 자동 생성 설정이 비어 있으면 기존 기본 동작을 유지합니다.
+
+일반 설정 파일은 버전 1의 제한된 환경 변수만 받습니다. 예를 들면 다음과 같습니다.
+
+```json
+{
+  "version": 1,
+  "env": {
+    "LOCAL": "true",
+    "SFUD_UI_PORT": "27546",
+    "SFUD_DATA_DIR": "data/local"
+  }
+}
+```
+
+`LOCAL=true`에서는 OS 사용자의 Salesforce CLI 인증을 사용하므로 Salesforce 인증에 암호화 키가 필요하지 않습니다. Git 토큰을 저장하려면 로컬 모드에서도 `SFUD_TOKEN_SECRET`이 필요합니다. `LOCAL=false`에서 사용자별 Salesforce 연결을 저장하려면 이 암호화 키를 설정해야 합니다. 빈 값은 유효하지 않은 키로 처리되며, 프로세스에 빈 환경변수가 있으면 비밀 설정 파일의 값보다 우선합니다.
+
+비밀값은 `config.json`에 넣지 마세요. 다음 배포부터 `~/.sfud/secrets.env`는 첫 실행과 `config init`에서 사용자 전용 권한으로 자동 생성합니다. 기존 config.json만 있는 경우에도 누락된 secrets.env를 만들며, 기존 비밀값 파일은 덮어쓰지 않습니다. 자동 생성 내용은 항목 안내 주석뿐이고 비밀값을 생성하거나 빈 환경변수를 활성화하지 않습니다. 사용할 항목의 주석을 풀고 실제 값을 넣으세요. `secrets.env`에는 `SFUD_TOKEN_SECRET`, `SFUD_SF_OAUTH_CLIENT_ID`, `SFUD_SF_OAUTH_CLIENT_SECRET`을 사용합니다. 이전 두 개별 암호화 키 이름도 호환용으로 허용합니다. POSIX에서는 새 파일을 `umask 077` 상태에서 만들고 `chmod 600 ~/.sfud/secrets.env`인지 확인한 뒤 편집하세요. 기존 설정의 권한이 안전하지 않으면 `sfud`가 읽기를 거부하므로 권한을 직접 점검하세요. UI 호스트를 루프백 밖으로 설정해도 원격 bind에는 계속 `--allow-remote`가 필요하며 `LOCAL=true`는 루프백으로 고정됩니다.
+
+개인 로컬 웹 UI는 설정에 저장되므로 매번 `LOCAL=true`를 명시하지 않아도 됩니다. 셸에서 직접 환경변수로 덮어쓸 수도 있습니다.
+
+```bash
+# POSIX 셸
+LOCAL=true sfud ui
+```
+
+```powershell
+# PowerShell
+$env:LOCAL = 'true'
+sfud ui
+```
+
+업그레이드 전에는 서버를 종료하고 데이터 디렉터리와 암호화 키를 백업하세요. 데이터베이스를 이전 버전으로 되돌려 열 수 있다고 가정하지 마세요.
+
 ### GitHub Release 패키지 설치
 
-GitHub Release에서 버전별 `.tgz`와 `SHA256SUMS`를 내려받아 설치할 수 있다. npm registry에는 발행하지 않는다.
+현재 사용할 수 있는 설치 경로다. 공개 GitHub Release `v0.3.0`의 `.tgz`와 `SHA256SUMS`를 내려받아 설치한다. `0.4.0`은 아직 공개 Release가 아니다. npm registry에 같은 버전이 공개되기 전까지 npm 설치는 사용할 수 없다.
 
 ```bash
 sha256sum --check SHA256SUMS
-npm install --global --allow-scripts=sqlite3 ./sf-unlucky-deploy-0.4.0.tgz
+npm install --global --allow-scripts=sqlite3 ./sf-unlucky-deploy-0.3.0.tgz
 sfud --version
 ```
 
@@ -482,7 +535,7 @@ ssh -N -L 27546:127.0.0.1:27546 -L 1717:localhost:1717 user@server
 LOCAL=true
 ```
 
-`LOCAL=false`에서는 로그인한 사용자별 Salesforce 연결을 사용한다. 서버의 공용 `sf` 로그인은 웹 작업에 사용하지 않는다. 관리자는 `SFUD_SF_TOKEN_SECRET`에 32~1024자의 임의 문자열을 지정하고 서버를 시작한다. 같은 DB의 연결을 계속 읽으려면 이 값을 유지해야 한다.
+`LOCAL=false`에서는 로그인한 사용자별 Salesforce 연결을 사용한다. 서버의 공용 `sf` 로그인은 웹 작업에 사용하지 않는다. 관리자는 `SFUD_TOKEN_SECRET`에 32~1024자의 임의 문자열을 지정하고 서버를 시작한다. 같은 DB의 연결을 계속 읽으려면 이 값을 유지해야 한다.
 
 ```bash
 openssl rand -hex 32
@@ -501,10 +554,10 @@ LOCAL=false
 SFUD_PUBLIC_ORIGIN=https://deploy.example.com
 SFUD_SF_OAUTH_CLIENT_ID=<Salesforce 앱 Client ID>
 SFUD_SF_OAUTH_CLIENT_SECRET=<Salesforce 앱 Client Secret>
-SFUD_SF_TOKEN_SECRET=<openssl rand -hex 32로 생성한 키>
+SFUD_TOKEN_SECRET=<openssl rand -hex 32로 생성한 키>
 ```
 
-인증 관리의 **Salesforce 계정 연결**은 OAuth PKCE 승인을 같은 브라우저 탭에서 진행하고 연결을 시작한 사용자 계정에 저장한다. callback은 짧은 수명의 브라우저 확인 쿠키를 검증한 뒤 고정 인증 화면으로 돌아오며, 로그인 세션과 CSRF를 다시 확인한 후 연결을 저장한다. 서버 재시작이나 만료로 진행 중 연결이 끝나면 화면에서 다시 시작한다. 앱 자격 증명과 토큰을 포함한 연결 값은 `SFUD_SF_TOKEN_SECRET`으로 암호화 저장한다.
+인증 관리의 **Salesforce 계정 연결**은 OAuth PKCE 승인을 같은 브라우저 탭에서 진행하고 연결을 시작한 사용자 계정에 저장한다. callback은 짧은 수명의 브라우저 확인 쿠키를 검증한 뒤 고정 인증 화면으로 돌아오며, 로그인 세션과 CSRF를 다시 확인한 후 연결을 저장한다. 서버 재시작이나 만료로 진행 중 연결이 끝나면 화면에서 다시 시작한다. 앱 자격 증명과 토큰을 포함한 연결 값은 `SFUD_TOKEN_SECRET`으로 암호화 저장한다.
 
 OAuth 앱을 구성하지 않은 경우에는 **수동 SFDX 인증 URL 등록**을 보조 경로로 사용할 수 있다. 사용자는 Salesforce CLI에서 인증한 다음 자신의 인증 URL을 입력한다.
 
@@ -828,13 +881,13 @@ PAT/API Token과 Bitbucket API 이메일은 내부 SQLite `git_connections`에 A
 Git URL·프로세스 인자·Git 설정 파일에 남기지 않는다. Git 자격 증명은 작업별 IPC helper로 전달한다.
 Salesforce CLI 자식 프로세스에도 Git 토큰 환경변수를 전달하지 않는다.
 
-암호화 키는 `.env`의 `SFUD_GIT_TOKEN_SECRET`에 32~1024자 문자열을 지정하면 된다.
+Git과 Salesforce 인증 저장에 공통으로 사용할 암호화 키는 환경변수 또는 `~/.sfud/secrets.env`의 `SFUD_TOKEN_SECRET`에 32~1024자 문자열을 지정하면 된다.
 `openssl rand -hex 32`로 생성한 임의 문자열을 권장하며, 앞뒤 공백과 줄바꿈·제어 문자는 허용하지 않는다.
 예시의 설명 문구 대신 실제 생성한 값을 넣고 `start-local.sh`로 서버를 재시작한다.
 직접 CLI를 실행할 때는 해당 환경변수를 프로세스에 전달해야 한다.
 
 ```dotenv
-SFUD_GIT_TOKEN_SECRET="여기에 직접 생성한 32자 이상의 암호화 문자열 입력"
+SFUD_TOKEN_SECRET="여기에 직접 생성한 32자 이상의 암호화 문자열 입력"
 SFUD_GIT_TOKEN_KEY_VERSION=1
 ```
 
@@ -844,10 +897,12 @@ DB별로 생성한 공개 salt만 저장하며, 암호화 문자열과 파생 �
 같은 DB와 문자열이면 재시작 후에도 복호화할 수 있다. `.env`는 접근 권한을 제한하고 버전 관리에 넣지 않는다.
 
 기존 `SFUD_GIT_TOKEN_KEY_FILE` 방식(32바이트 바이너리 파일, POSIX 0600)도 지원한다.
-`SFUD_GIT_TOKEN_SECRET`이 설정되어 있으면 문자열 방식이 우선하며, 빈 값이나 잘못된 값일 때
+`SFUD_TOKEN_SECRET`이 설정되어 있으면 두 인증 저장소 모두 이 값을 우선 사용하며, 빈 값이나 잘못된 값일 때
 파일 방식으로 자동 대체하지 않는다. 파일 방식만 사용하려면 SECRET 항목을 제거한다.
 방식을 바꾸거나 문자열·키 버전을 변경해도 기존 토큰 암호문이 자동 변환되지는 않으므로,
 이미 등록된 토큰이 있다면 기존 설정을 유지하거나 변경 후 각 토큰을 다시 등록한다.
+기존 `SFUD_GIT_TOKEN_SECRET`과 `SFUD_SF_TOKEN_SECRET`은 공통 키가 없을 때만 호환용으로 사용한다. 기존 secrets.env는 자동으로 고치지 않는다. 기존 두 키의 값이 같았다면 그 값을 SFUD_TOKEN_SECRET으로 옮겨도 저장한 인증을 읽을 수 있다. 두 값이 달랐다면 단일 키로 이름만 바꾸어 통합할 수는 없으며, 기존 키를 유지하거나 새 공통 키로 해당 인증을 다시 등록해야 한다. 키나 DB를 자동 변환하지 않는다.
+
 `SFUD_GIT_TOKEN_KEY_VERSION` 기본값은 1이다. 설정이 없거나 잘못되면 토큰 등록과 private 가져오기는
 사용할 수 없으며 public 가져오기는 가능하다. DB와 암호화 설정은 안전하게 백업하고 복구 시 같은 값을 사용한다.
 
@@ -886,11 +941,11 @@ Git 전용 연결의 저장소 식별자는 호스트와 경로의 해시(`git:`
 ## CI와 릴리스 산출물
 
 Pull Request와 공유 브랜치는 Linux Node.js 24의 전체 단위·브라우저·패키지 검증, Linux
-Node.js 20.19의 최소 지원 버전 검증, Windows Node.js 20.19·24의 플랫폼 및 설치 스모크를
+Node.js 22.19.0의 최소 지원 버전 검증, Windows Node.js 24의 플랫폼 스모크를
 통과해야 한다. TypeScript의 미사용 선언 검사와 Knip의 미사용 export·파일 검사도 `check`에
 포함된다.
 
-태그 릴리스는 npm 11.7.0으로 `npm-shrinkwrap.json`이 포함된 tarball을 만든 뒤, 그 tarball을
+태그 릴리스는 npm 11.20.0으로 `npm-shrinkwrap.json`이 포함된 tarball을 만든 뒤, 그 tarball을
 새 prefix에 설치해 전체 dependency tree와 `sfud --version`을 검증한다. GitHub Release에는
 tarball, SHA-256 체크섬과 CycloneDX JSON SBOM을 각각 첨부한다. SBOM은 공급망 구성의 가시성을
 위한 별도 산출물이며, 설치 재현성은 `npm-shrinkwrap.json`과 tarball 설치 검증으로 확보한다.
@@ -917,3 +972,7 @@ feat/* 또는 fix/* → canary → main
 - Playwright Chromium 기반 데스크톱·모바일 HTML 렌더링
 
 실제 org 전체 범위 검증은 배포 대상과 manifest를 명시적으로 정한 뒤 수행한다. 저장소 검증에서는 작은 단일 컴포넌트 check-only만 실행한다.
+
+인증 관리에서 Git·Salesforce 연결 이름 또는 행을 클릭하면 연결 설정을 열 수 있다. 별칭, Git 연결 대상과 새 토큰, Salesforce 로그인 대상과 재인증을 변경할 수 있다. 계정 범위 Git 연결은 저장 직후 저장소 목록을 열며, 연결 설정의 **저장소 목록 조회**로 다시 조회한다. 저장소를 선택하고 브랜치를 확인해 가져오거나 배포 브랜치로 등록한다. 목록 권한 오류는 이 화면에 표시된다. 새 인증 검증 실패나 동시 변경 충돌 시 기존 연결을 덮어쓰지 않는다.
+
+Salesforce CLI 인증 목록은 최초 앱 조회에서 한 번 불러온 뒤 서버가 실행 중인 동안 같은 사용자의 탭 이동·브라우저 새로고침·재로그인에서 재사용한다. 서버를 재시작하면 최초 조회를 다시 수행한다. 연결 추가·이름 변경·재인증·삭제와 인증 관리의 **새로고침**에서 갱신하며, CLI를 외부에서 변경했을 때는 새로고침을 사용한다. 사용자별 목록은 분리하고, 캐시에는 공개 Org 정보만 보관한다. 배포 직전 Org 확인과 실제 작업의 인증 복원은 계속 수행한다.

@@ -1,12 +1,12 @@
 {
-  "name": "sf-unlucky-deploy",
-  "version": "0.4.0",
+  "name": "@trstyq/sf-unlucky-deploy",
+  "version": "0.4.0-rc.2",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
-      "name": "sf-unlucky-deploy",
-      "version": "0.4.0",
+      "name": "@trstyq/sf-unlucky-deploy",
+      "version": "0.4.0-rc.2",
       "dependencies": {
         "@fastify/static": "^10.1.3",
         "@salesforce/core": "8.32.6",
@@ -45,8 +45,9 @@
         "vitest": "^4.1.11"
       },
       "engines": {
-        "node": ">=20.19"
-      }
+        "node": ">=22.19.0"
+      },
+      "license": "MIT"
     },
     "node_modules/@babel/helper-string-parser": {
       "version": "7.29.7",

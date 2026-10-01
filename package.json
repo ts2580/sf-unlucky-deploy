@@ -1,9 +1,9 @@
 {
-  "name": "sf-unlucky-deploy",
-  "version": "0.4.0",
+  "name": "@trstyq/sf-unlucky-deploy",
+  "version": "0.4.0-rc.2",
   "description": "Salesforce 메타데이터를 비교하고 안전하게 검증·배포하는 CLI",
-  "private": true,
-  "packageManager": "npm@11.7.0",
+  "private": false,
+  "packageManager": "npm@11.20.0",
   "type": "module",
   "bin": {
     "sfud": "dist/cli.js"
@@ -35,10 +35,11 @@
     "test:watch": "vitest",
     "typecheck": "tsc --project tsconfig.json && tsc --project tsconfig.ui.json && tsc --project tsconfig.e2e.json",
     "quality": "npm run lint && npm run lint:ts-react && npm run dead-code",
-    "verify": "npm run check && npm run test:e2e"
+    "verify": "npm run check && npm run test:e2e",
+    "test:npm-policy": "node --test scripts/npm-distribution-policy.test.mjs"
   },
   "engines": {
-    "node": ">=20.19"
+    "node": ">=22.19.0"
   },
   "dependencies": {
     "@fastify/static": "^10.1.3",
@@ -77,5 +78,25 @@
   "allowScripts": {
     "esbuild": true,
     "sqlite3": true
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ts2580/sf-unlucky-deploy.git"
+  },
+  "homepage": "https://github.com/ts2580/sf-unlucky-deploy#readme",
+  "bugs": {
+    "url": "https://github.com/ts2580/sf-unlucky-deploy/issues"
+  },
+  "keywords": [
+    "salesforce",
+    "metadata",
+    "deployment",
+    "cli",
+    "sfud"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "license": "MIT"
 }
