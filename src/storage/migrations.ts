@@ -1,9 +1,11 @@
 import type { Database } from 'sqlite';
+import { repairLegacyGitRepositoryUrls } from './git-repository-url-migration.js';
 
 interface Migration {
   version: number;
   name: string;
   sql: string;
+  after?: (database: Database) => Promise<void>;
 }
 
 const MIGRATIONS: Migration[] = [
@@ -701,7 +703,172 @@ const MIGRATIONS: Migration[] = [
       expires_at TEXT NOT NULL,
       created_at TEXT NOT NULL
     ) STRICT;
-    CREATE INDEX idx_deployment_execution_leases_expiry ON deployment_execution_leases(expires_at);`,
+      CREATE INDEX idx_deployment_execution_leases_expiry ON deployment_execution_leases(expires_at);`,
+  },
+  {
+    version: 36,
+    name: 'self_hosted_git_repository_connections',
+    sql: `
+      PRAGMA defer_foreign_keys = ON;
+      DROP INDEX idx_git_connections_owner;
+      DROP INDEX idx_git_imports_owner;
+      ALTER TABLE git_imports RENAME TO git_imports_legacy;
+      ALTER TABLE git_connections RENAME TO git_connections_legacy;
+      CREATE TABLE git_connections (
+        id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL CHECK (provider IN ('github', 'gitlab', 'bitbucket')),
+        provider_host TEXT NOT NULL,
+        provider_account_id TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        encrypted_access_token TEXT,
+        encrypted_refresh_token TEXT,
+        expires_at TEXT,
+        granted_permissions_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'REAUTH_REQUIRED', 'REVOKED')),
+        key_version INTEGER NOT NULL CHECK (key_version > 0),
+        token_version INTEGER NOT NULL DEFAULT 1 CHECK (token_version > 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        credential_type TEXT NOT NULL DEFAULT 'oauth' CHECK (credential_type IN ('oauth', 'token')),
+        encrypted_api_username TEXT,
+        repository_path TEXT,
+        CHECK ((status = 'ACTIVE' AND encrypted_access_token IS NOT NULL)
+          OR (status <> 'ACTIVE' AND encrypted_access_token IS NULL AND encrypted_refresh_token IS NULL)),
+        UNIQUE (owner_user_id, provider, provider_host, provider_account_id)
+      ) STRICT;
+      INSERT INTO git_connections (id, owner_user_id, provider, provider_host, provider_account_id, display_name,
+        encrypted_access_token, encrypted_refresh_token, expires_at, granted_permissions_json, status, key_version,
+        token_version, created_at, updated_at, credential_type, encrypted_api_username, repository_path)
+      SELECT id, owner_user_id, provider, provider_host, provider_account_id, display_name,
+        encrypted_access_token, encrypted_refresh_token, expires_at, granted_permissions_json, status, key_version,
+        token_version, created_at, updated_at, credential_type, encrypted_api_username, repository_path
+      FROM git_connections_legacy;
+      CREATE TABLE git_imports (
+        id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+        connection_id TEXT REFERENCES git_connections(id) ON DELETE SET NULL,
+        provider TEXT NOT NULL CHECK (provider IN ('github', 'gitlab', 'bitbucket')),
+        repository_path TEXT NOT NULL,
+        ref_kind TEXT NOT NULL CHECK (ref_kind IN ('branch', 'tag', 'commit')),
+        ref_name TEXT NOT NULL,
+        expected_commit_sha TEXT NOT NULL,
+        project_root TEXT,
+        status TEXT NOT NULL CHECK (status IN ('QUEUED', 'FETCHING', 'SELECTING', 'MATERIALIZING', 'READY', 'FAILED', 'CANCELLED', 'EXPIRED', 'DELETED')),
+        project_roots_json TEXT NOT NULL DEFAULT '[]',
+        source_provenance_json TEXT,
+        size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
+        safe_error_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        metadata_type TEXT
+      ) STRICT;
+      INSERT INTO git_imports (id, owner_user_id, connection_id, provider, repository_path, ref_kind, ref_name,
+        expected_commit_sha, project_root, status, project_roots_json, source_provenance_json, size_bytes,
+        safe_error_code, created_at, updated_at, metadata_type)
+      SELECT id, owner_user_id, connection_id, provider, repository_path, ref_kind, ref_name,
+        expected_commit_sha, project_root, status, project_roots_json, source_provenance_json, size_bytes,
+        safe_error_code, created_at, updated_at, metadata_type
+      FROM git_imports_legacy;
+      DROP TABLE git_imports_legacy;
+      DROP TABLE git_connections_legacy;
+      CREATE INDEX idx_git_connections_owner ON git_connections(owner_user_id, status);
+      CREATE INDEX idx_git_imports_owner ON git_imports(owner_user_id, created_at);`,
+  },
+  {
+    version: 37,
+    name: 'administrator_managed_git_allowed_ips',
+    sql: `CREATE TABLE git_allowed_ips (
+      address TEXT PRIMARY KEY,
+      created_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      created_at TEXT NOT NULL
+    ) STRICT;`,
+  },
+  {
+    version: 38,
+    name: 'git_connection_and_registration_aliases',
+    sql: `ALTER TABLE git_connections ADD COLUMN alias TEXT;
+      ALTER TABLE git_registrations ADD COLUMN alias TEXT;`,
+  },
+  {
+    version: 39,
+    name: 'preserve_and_verify_git_repository_urls',
+    sql: `ALTER TABLE git_imports ADD COLUMN repository_url_verified INTEGER NOT NULL DEFAULT 0 CHECK (repository_url_verified IN (0, 1));
+      ALTER TABLE git_registrations ADD COLUMN repository_url_verified INTEGER NOT NULL DEFAULT 0 CHECK (repository_url_verified IN (0, 1));`,
+    after: repairLegacyGitRepositoryUrls,
+  },
+  {
+    version: 40,
+    name: 'comparison_package_exclusion',
+    sql: `ALTER TABLE comparison_jobs ADD COLUMN exclude_package_metadata INTEGER NOT NULL DEFAULT 0 CHECK (exclude_package_metadata IN (0, 1));`,
+  },
+  {
+    version: 41,
+    name: 'comparison_selected_package_exclusions',
+    sql: `ALTER TABLE comparison_jobs ADD COLUMN excluded_package_ids_json TEXT;`,
+  },
+  {
+    version: 42,
+    name: 'backfill_job_owners_from_creators',
+    sql: `UPDATE comparison_jobs SET access_owner_user_id = created_by
+      WHERE access_owner_user_id IS NULL AND created_by IS NOT NULL;
+      UPDATE deployment_jobs SET access_owner_user_id = created_by
+      WHERE access_owner_user_id IS NULL AND created_by IS NOT NULL;
+      -- Records without a verifiable creator stay unowned and are hidden by access checks.`,
+  },
+  {
+    version: 43,
+    name: 'runtime_mode_identity',
+    sql: `CREATE TABLE runtime_mode (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      mode TEXT NOT NULL CHECK (mode IN ('local', 'multiuser'))
+    ) STRICT;`,
+  },
+  {
+    version: 44,
+    name: 'org_execution_access_by_org_id',
+    sql: `CREATE TABLE org_execution_policies_v2 (
+      org_id TEXT PRIMARY KEY,
+      enabled_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      enabled_at TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE org_execution_grants_v2 (
+      org_id TEXT NOT NULL REFERENCES org_execution_policies_v2(org_id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      granted_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (org_id, user_id)
+    ) STRICT;
+    CREATE INDEX idx_org_execution_grants_v2_user ON org_execution_grants_v2(user_id, org_id);
+    -- Alias-based legacy grants cannot be mapped to an org without live identity verification.
+    -- Keep those records for explicit review, but never treat them as active permission.`,
+  },
+  {
+    version: 45,
+    name: 'user_salesforce_connections',
+    sql: `CREATE TABLE salesforce_connections (
+      id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      alias TEXT NOT NULL,
+      org_id TEXT NOT NULL,
+      username TEXT NOT NULL,
+      instance_url TEXT NOT NULL,
+      encrypted_auth_url TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('CONNECTED', 'REAUTH_REQUIRED')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(owner_user_id, alias)
+    ) STRICT;
+    CREATE INDEX idx_salesforce_connections_owner ON salesforce_connections(owner_user_id, alias);
+    CREATE TABLE salesforce_token_key_parameters (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      salt TEXT NOT NULL
+    ) STRICT;`,
+  },
+  {
+    version: 46,
+    name: 'salesforce_connection_generations',
+    sql: `ALTER TABLE salesforce_connections ADD COLUMN generation INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1);`,
   },
 ];
 
@@ -728,6 +895,7 @@ export async function applyMigrations(
       await database.exec('BEGIN IMMEDIATE');
       try {
         await database.exec(migration.sql);
+        await migration.after?.(database);
         await database.run(
           'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)',
           migration.version,

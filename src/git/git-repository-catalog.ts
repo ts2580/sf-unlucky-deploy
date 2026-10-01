@@ -21,7 +21,7 @@ export class GitRepositoryCatalog {
       if (query.namespace !== undefined || query.cursor !== undefined) throw new GitError('INVALID_REPOSITORY');
       const address = normalizeRepository(state.connection.repositoryPath, provider);
       return { namespaces: [], repositories: query.search && !address.repositoryPath.toLowerCase().includes(query.search.trim().toLowerCase())
-        ? [] : [{ repositoryId: repositoryIdentity(address), repositoryPath: address.repositoryPath }] };
+        ? [] : [{ repositoryId: repositoryIdentity(address), repositoryPath: state.connection.repositoryPath }] };
     }
     const credential = providerApiCredential(provider, state.tokens);
     const search = query.search?.trim() ?? '';

@@ -40,8 +40,8 @@ export class GitImportRepository {
   public async create(id: string, owner: string, input: GitImportRequest): Promise<GitImportRecord> {
     const now = new Date().toISOString();
     await this.database.run(`INSERT INTO git_imports (id, owner_user_id, connection_id, provider,
-      repository_path, ref_kind, ref_name, expected_commit_sha, project_root, metadata_type, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?)`, id, owner, input.connectionId ?? null,
+      repository_path, ref_kind, ref_name, expected_commit_sha, project_root, metadata_type, status, created_at, updated_at, repository_url_verified)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?, 1)`, id, owner, input.connectionId ?? null,
     input.provider, input.repositoryPath, input.ref.kind, input.ref.name, input.expectedCommitSha,
     input.projectRoot ?? null, input.metadataType ?? null, now, now);
     return this.get(id, owner);

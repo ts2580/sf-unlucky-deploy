@@ -2,7 +2,12 @@ import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { lookup } from 'node:dns/promises';
 import { request } from 'node:https';
-import { resolveGitHost, SafeProviderHttpClient } from '../src/git/git-network.js';
+import { gitHostPolicyFromAddresses, gitHostPolicyFromEnvironment, resolveGitHost, SafeProviderHttpClient } from '../src/git/git-network.js';
+import { GithubProvider } from '../src/git/providers/github-provider.js';
+import { GitlabProvider } from '../src/git/providers/gitlab-provider.js';
+import { BitbucketProvider } from '../src/git/providers/bitbucket-provider.js';
+import { ProviderApi } from '../src/git/providers/provider-api.js';
+import { normalizeRepository } from '../src/git/git-repository.js';
 
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }));
 vi.mock('node:https', () => ({ request: vi.fn() }));
@@ -26,10 +31,33 @@ function mockResponse(status: number, payload: string, headers = {}) {
 }
 
 describe('제공자 HTTP 접근 경계', () => {
+  it.each([GithubProvider, GitlabProvider, BitbucketProvider])('클라우드 adapter는 셀프호스트를 공식 API로 재해석하지 않는다', async (Provider) => {
+    const http = { request: vi.fn() };
+    const provider = new Provider(new ProviderApi(http));
+    const address = normalizeRepository('https://code.example.test:8443/context/team/project.git', provider.id);
+    const repository = { ...address, repositoryId: '123', private: true };
+    await expect(provider.inspect(address, 'fixture-token')).rejects.toMatchObject({ code: 'GIT_CONNECTION_REQUIRED' });
+    await expect(provider.listRefs(repository, 'branch', undefined, 'fixture-token')).rejects.toMatchObject({ code: 'GIT_CONNECTION_REQUIRED' });
+    await expect(provider.resolveCommit(repository, { kind: 'branch', name: 'main' }, 'fixture-token')).rejects.toMatchObject({ code: 'GIT_CONNECTION_REQUIRED' });
+    expect(http.request).not.toHaveBeenCalled();
+  });
   it('DNS 응답 중 하나라도 사설 주소이면 연결 전에 거절한다', async () => {
     vi.mocked(lookup).mockResolvedValue([{ address: '140.82.114.3', family: 4 }, { address: '127.0.0.1', family: 4 }] as never);
     await expect(resolveGitHost('github.com')).rejects.toMatchObject({ code: 'INVALID_REPOSITORY' });
     expect(request).not.toHaveBeenCalled();
+  });
+  it('셀프호스팅 Git 주소도 공개 IP로만 해석한다', async () => {
+    vi.mocked(lookup).mockResolvedValue([{ address: '8.8.8.8', family: 4 }] as never);
+    await expect(resolveGitHost('git.example.test')).resolves.toEqual({ address: '8.8.8.8', family: 4 });
+  });
+  it('운영자가 명시한 사설 IP만 셀프호스팅 Git FQDN에 허용한다', async () => {
+    const policy = gitHostPolicyFromAddresses(['192.168.10.25', 'fd00:1234::25']);
+    vi.mocked(lookup).mockResolvedValue([{ address: '192.168.10.25', family: 4 }] as never);
+    await expect(resolveGitHost('git.internal.example', policy)).resolves.toEqual({ address: '192.168.10.25', family: 4 });
+    vi.mocked(lookup).mockResolvedValue([{ address: '192.168.10.25', family: 4 }, { address: '192.168.10.26', family: 4 }] as never);
+    await expect(resolveGitHost('git.internal.example', policy)).rejects.toMatchObject({ code: 'INVALID_REPOSITORY' });
+    expect(() => gitHostPolicyFromAddresses(['192.168.10.0/24'])).toThrow(/IPv4 또는 IPv6/u);
+    expect(() => gitHostPolicyFromEnvironment({ SFUD_GIT_ALLOWED_IPS: 'git.internal.example' })).toThrow(/IPv4 또는 IPv6/u);
   });
   it('검증한 IP로 연결하면서 TLS servername과 Host를 고정한다', async () => {
     mockResponse(200, '{"id":123}');

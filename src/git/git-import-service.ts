@@ -11,11 +11,12 @@ import { GitError } from './git-errors.js';
 import { GitMaterializer } from './git-materializer.js';
 import type { GitObjectReader } from './git-object-store.js';
 import type { GitProvider, GitRepositoryInfo } from './git-provider.js';
-import { assertCommitSha, normalizeRepository, validateGitRef, type GitProviderId } from './git-repository.js';
+import { assertCommitSha, connectionRepositoryPath, normalizeRepository, validateGitRef, type GitProviderId } from './git-repository.js';
 import { GithubProvider } from './providers/github-provider.js';
 import { GitlabProvider } from './providers/gitlab-provider.js';
 import { BitbucketProvider } from './providers/bitbucket-provider.js';
 import type { GitRepositoryAccess, GitRepositoryAuthorization } from './git-repository-access.js';
+import { runGitOperation } from './git-diagnostics.js';
 
 interface Entry {
   record: GitImportRecord;
@@ -33,6 +34,7 @@ interface Entry {
   cacheLease?: Awaited<ReturnType<GitCache['acquire']>>;
 }
 interface Options {
+  diagnosticsFile?: string;
   cache?: GitCache;
   access?: GitRepositoryAccess;
   enabled?: boolean;
@@ -62,7 +64,7 @@ export class GitImportService {
   private closed = false;
 
   public constructor(private readonly history: GitImportRepository,
-    private readonly projects: ManagedProjectService, options: Options = {}) {
+    private readonly projects: ManagedProjectService, private readonly options: Options = {}) {
     this.cache = options.cache;
     this.providers = options.providers ?? { github: new GithubProvider(), gitlab: new GitlabProvider(), bitbucket: new BitbucketProvider() };
     this.client = options.client ?? new GitClient();
@@ -83,6 +85,11 @@ export class GitImportService {
 
   private async authorize(input: Pick<GitImportRequest, 'provider' | 'repositoryPath' | 'connectionId'>,
     owner?: string, signal?: AbortSignal): Promise<{ repository: GitRepositoryInfo; authorization?: GitRepositoryAuthorization }> {
+    return runGitOperation(this.options.diagnosticsFile, undefined, 'authorize', () => this.authorizeInternal(input, owner, signal));
+  }
+
+  private async authorizeInternal(input: Pick<GitImportRequest, 'provider' | 'repositoryPath' | 'connectionId'>,
+    owner?: string, signal?: AbortSignal): Promise<{ repository: GitRepositoryInfo; authorization?: GitRepositoryAuthorization }> {
     if (!this.enabled) throw new GitError('PROVIDER_NOT_CONFIGURED');
     const address = normalizeRepository(input.repositoryPath, input.provider);
     if (input.connectionId !== undefined) {
@@ -91,6 +98,8 @@ export class GitImportService {
       const authorization = await this.access.authorize(owner, input.connectionId, address, this.providers[input.provider], signal);
       return { repository: authorization.repository, authorization };
     }
+    // Cloud REST endpoints must never reinterpret a self-hosted repository.
+    if (connectionRepositoryPath(address) !== address.repositoryPath) throw new GitError('GIT_CONNECTION_REQUIRED');
     const repository = await this.providers[input.provider].inspect(address, undefined, signal);
     if (repository.private) throw new GitError('GIT_CONNECTION_REQUIRED');
     return { repository };
@@ -123,7 +132,7 @@ export class GitImportService {
       }
       allocation = await this.projects.begin(owner, isolation);
       if (this.closed) throw new GitError('IMPORT_CANCELLED');
-      const record = await this.history.create(allocation.id, owner, { ...input, repositoryPath: address.repositoryPath, ref });
+      const record = await this.history.create(allocation.id, owner, { ...input, repositoryPath: connectionRepositoryPath(address), ref });
       const entry: Entry = {
         record, directory: allocation.directory, controller: new AbortController(), roots: [], chargedBytes: 0, selecting: false,
         timer: setTimeout(() => { void this.cancel(record.id, owner, true).catch(() => undefined); }, this.timeoutMs),
@@ -148,7 +157,7 @@ export class GitImportService {
     if (this.warming.size >= 2) throw new GitError('GIT_QUOTA_EXCEEDED');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    const work = this.warmRepository(owner, input, controller.signal);
+    const work = runGitOperation(this.options.diagnosticsFile, undefined, 'warm', () => this.warmRepository(owner, input, controller.signal));
     this.warming.set(controller, work);
     try { return await work; }
     finally { clearTimeout(timer); this.warming.delete(controller); }
@@ -284,7 +293,7 @@ export class GitImportService {
       const { entry, work } = this.queue.shift()!;
       if (entry.controller.signal.aborted) continue;
       this.active++;
-      entry.execution = work().catch(async (error: unknown) => {
+      entry.execution = runGitOperation(this.options.diagnosticsFile, entry.record.id, 'import', work).catch(async (error: unknown) => {
         if (entry.controller.signal.aborted) return; // cancel owns cleanup and final state.
         const code = error instanceof GitError ? error.code
           : error instanceof ManagedProjectQuotaError ? 'GIT_QUOTA_EXCEEDED' : 'GIT_PROCESS_FAILED';
@@ -345,7 +354,7 @@ if (this.cache !== undefined) entry.cacheLease = await this.cache.acquire([
     this.projects.releasePendingBytes(record.id, entry.chargedBytes);
     const repository = entry.repository!;
     const provenance: NonNullable<WorkspaceSource['provenance']> = {
-      provider: repository.provider, host: repository.host, repositoryId: repository.repositoryId, repositoryPath: repository.repositoryPath,
+      provider: repository.provider, host: repository.host, repositoryId: repository.repositoryId, repositoryPath: connectionRepositoryPath(repository),
       ...(record.metadataType === undefined ? {} : { metadataType: record.metadataType }),
       refType: record.ref.kind, refName: record.ref.name, commitSha: record.expectedCommitSha, projectRoot: root,
       importedAt: new Date().toISOString(), importedContentChecksum: result.checksum, sourceOwnerUserId: record.ownerUserId, importId: record.id,

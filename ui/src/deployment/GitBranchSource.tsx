@@ -115,8 +115,8 @@ export function GitBranchSource({ connection: selectedGitConnection, side, canRu
     finally { if (gitSelectionVersion.current === version) setGitImportBusy(false); }
   };
 
-  return (<section className="git-branch-source" aria-labelledby={headingId}>
-              <div><strong id={headingId}>{side === 'target' ? '타겟 · ' : '소스 · '}{providerNames[selectedGitConnection.provider]} · {selectedGitConnection.repositoryPath}</strong><p>브랜치와 메타데이터 타입을 선택하면 해당 파일을 임시 작업공간에 가져옵니다.</p></div>
+  return (<section className="git-branch-source" aria-labelledby={headingId} aria-busy={gitBranchLoading}>
+              <div><strong id={headingId} title={selectedGitConnection.repositoryPath}>{side === 'target' ? '타겟 · ' : '소스 · '}{providerNames[selectedGitConnection.provider]} · {selectedGitConnection.alias ?? selectedGitConnection.repositoryPath}</strong><p>브랜치와 메타데이터 타입을 선택하면 해당 파일을 임시 작업공간에 가져옵니다.</p></div>
               <label>{side === 'target' ? '타겟 브랜치 검색 및 선택' : '브랜치 검색 및 선택'}<input list={branchOptionsId} value={gitBranchInput} autoComplete="off" spellCheck={false}
                 disabled={!canRun || gitBranchLoading || gitImportBusy || ['QUEUED', 'FETCHING', 'SELECTING', 'MATERIALIZING'].includes(gitImport?.status ?? '')} onChange={(event) => {
                   gitSelectionVersion.current++; setGitBranchInput(event.target.value); onSourceChange(undefined); setGitImport(undefined); setGitBranchError('');
@@ -131,7 +131,7 @@ export function GitBranchSource({ connection: selectedGitConnection, side, canRu
                 <datalist id={typeOptionsId}>{gitMetadataTypes.map((type) => <option key={type.name} value={type.name}>{type.directoryName}</option>)}</datalist>
               </label>
               {selectedGitMetadataType === undefined && <p className="settings-error">목록에서 가져올 메타데이터 타입을 선택하세요.</p>}
-              {gitBranchLoading ? <p role="status">브랜치 목록을 불러오는 중……</p>
+              {gitBranchLoading ? <p role="status" aria-live="polite">브랜치 불러오는 중…</p>
                 : <p>{gitBranches.length === 0 ? '사용 가능한 브랜치가 없습니다.' : `${gitBranches.length}개 브랜치 · 입력하여 검색할 수 있습니다.`}</p>}
               {selectedGitBranch !== undefined && <p className="git-sha">현재 선택: <code>{selectedGitBranch.name}</code> · 고정할 커밋 <code>{selectedGitBranch.commitSha}</code></p>}
               {gitImport?.status === 'SELECTING' ? <div className="git-roots"><p>가져올 Salesforce DX 프로젝트 루트를 선택하세요.</p>

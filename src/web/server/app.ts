@@ -20,7 +20,11 @@ import { registerSettingsRoutes } from './settings-routes.js';
 import { registerGitConnectionRoutes } from './git-connection-routes.js';
 import { registerJobAccessRoutes } from './job-access-routes.js';
 import { registerOrgExecutionAccessRoutes } from './org-execution-access-routes.js';
+import { registerSalesforceConnectionRoutes } from './salesforce-connection-routes.js';
 import { redactSensitiveText, type SfClient } from '../../salesforce/sf-client.js';
+import { beginSalesforceRequestContext } from '../../salesforce/user-context.js';
+import type { SalesforceOAuthDependencies } from './salesforce-oauth.js';
+import type { GitHostPolicy } from '../../git/git-network.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -31,6 +35,7 @@ declare module 'fastify' {
 export interface WebServerOptions {
   host: string;
   port: number;
+  localMode?: boolean;
   assetsDirectory?: string;
   dataDirectory?: string;
   databasePath?: string;
@@ -43,24 +48,35 @@ export interface WebServerOptions {
   userImportQuotaBytes?: number;
   serverImportQuotaBytes?: number;
   quickDeployEnabled?: boolean;
+  gitHostPolicy?: GitHostPolicy;
+  salesforceOAuth?: Omit<SalesforceOAuthDependencies, 'config'>;
 }
 
 export async function createWebServer(options: WebServerOptions): Promise<FastifyInstance> {
   const trustedProxies = options.trustedProxies ?? [];
   const publicOrigin = normalizePublicOrigin(options.publicOrigin);
+  if (options.localMode === true && (
+    !['127.0.0.1', '::1'].includes(options.host)
+    || trustedProxies.length > 0
+    || publicOrigin !== undefined
+  )) throw new Error('LOCAL=true는 루프백 주소에서만 프록시와 공개 Origin 없이 사용할 수 있습니다.');
   const app = Fastify({
     logger: options.logger === true ? {
       redact: ['req.headers.authorization', 'req.headers.cookie', 'res.headers.set-cookie'],
       serializers: { req: (request) => ({ method: request.method,
-        url: /^\/api\/v1\/git\/(?:connections|auth)(?:\/|\?|$)/u.test(request.url)
+        url: /^\/api\/v1\/salesforce\/oauth\/callback(?:\?|$)/u.test(request.url)
+          ? request.url.split('?')[0]!
+          : /^\/api\/v1\/git\/(?:connections|auth)(?:\/|\?|$)/u.test(request.url)
           ? request.url.split('?')[0]! : redactSensitiveText(request.url),
       }) },
     } : false,
     ...(trustedProxies.length === 0 ? {} : { trustProxy: trustedProxies }),
   });
   const assetsDirectory = options.assetsDirectory ?? resolveDefaultAssetsDirectory();
+  const dataDirectory = options.dataDirectory ?? process.env.SFUD_DATA_DIR
+    ?? (options.localMode === true ? path.join(process.cwd(), '.sfud-local') : undefined);
   const databasePath = options.databasePath
-    ?? resolveDatabasePath(process.cwd(), options.dataDirectory);
+    ?? resolveDatabasePath(process.cwd(), dataDirectory);
   const runtime = await createWebRuntime(
     databasePath,
     options.bootstrapToken,
@@ -75,13 +91,24 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
         ? {}
         : { serverImportQuotaBytes: options.serverImportQuotaBytes }),
     },
-    ...(options.quickDeployEnabled === undefined ? [] : [{ quickDeployEnabled: options.quickDeployEnabled }]),
+    {
+      ...(options.localMode === undefined ? {} : { localMode: options.localMode }),
+      ...(options.quickDeployEnabled === undefined ? {} : { quickDeployEnabled: options.quickDeployEnabled }),
+      ...(options.gitHostPolicy === undefined ? {} : { gitHostPolicy: options.gitHostPolicy }),
+    },
   );
   app.decorate('sfudRuntime', runtime);
   app.addHook('onClose', async () => {
     await runtime.shutdown();
   });
+  app.addHook('onRequest', (_request, _reply, done) => beginSalesforceRequestContext(done));
   app.addHook('onRequest', async (request, reply) => {
+    if (runtime.localMode) {
+      const host = request.headers.host;
+      if (host === undefined || !/^(?:127\.0\.0\.1|\[::1\]|localhost)(?::\d+)?$/iu.test(host)) {
+        return reply.code(403).send({ error: { code: 'HOST_DENIED', message: '로컬 주소로 접속하세요.' } });
+      }
+    }
     reply.header('x-content-type-options', 'nosniff');
     reply.header('x-frame-options', 'DENY');
     reply.header('referrer-policy', 'no-referrer');
@@ -135,6 +162,10 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
   await registerAuthRoutes(app, publicOrigin === undefined ? {} : { publicOrigin });
   await registerAdminRoutes(app);
   await registerOrgExecutionAccessRoutes(app);
+  await registerSalesforceConnectionRoutes(app, {
+    ...(publicOrigin === undefined ? {} : { publicOrigin }),
+    ...(options.salesforceOAuth === undefined ? {} : { oauth: options.salesforceOAuth }),
+  });
   await registerProjectUploadRoutes(app);
   await registerSettingsRoutes(app);
   await registerJobAccessRoutes(app);

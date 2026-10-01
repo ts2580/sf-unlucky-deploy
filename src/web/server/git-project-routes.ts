@@ -6,11 +6,20 @@ import { GitImportListResponseSchema, GitImportRequestSchema, GitImportResponseS
 import { GitError } from '../../git/git-errors.js';
 import type { GitImportRecord } from '../../storage/git-import-repository.js';
 import { requireAuthenticatedSession } from './auth-routes.js';
+import { GitAliasInputSchema } from '../../api/git-contracts.js';
 
 const mutation = { csrf: true, roles: ['OPERATOR', 'DEPLOYER', 'ADMIN'] as ('OPERATOR' | 'DEPLOYER' | 'ADMIN')[] };
 const params = Type.Object({ id: Type.String({ format: 'uuid' }) });
 
 export async function registerGitProjectRoutes(app: FastifyInstance): Promise<void> {
+  app.patch<{ Params: { id: string }; Body: { alias: string } }>('/api/v1/git/registrations/:id/alias', {
+    schema: { params, body: GitAliasInputSchema },
+  }, async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply, mutation);
+    if (session === undefined) return;
+    try { return { registration: await app.sfudRuntime.gitRegistrations.setAlias(request.params.id, session.user.id, request.body.alias) }; }
+    catch (error) { return sendError(reply, error); }
+  });
   app.get('/api/v1/git/registrations', async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;

@@ -4,10 +4,11 @@ import os from 'node:os';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { GitError } from './git-errors.js';
 import { assertCommitSha, normalizeRepository, validateGitRef, type GitRepositoryAddress } from './git-repository.js';
-import { resolveGitHost } from './git-network.js';
+import { gitHostPolicyFromEnvironment, resolveGitHost, type GitHostPolicy } from './git-network.js';
 import { createGitCredentialBridge } from './git-credential-bridge.js';
 import { runIsolatedGit } from './git-process.js';
 import { GitObjectStore } from './git-object-store.js';
+import { runGitOperation } from './git-diagnostics.js';
 
 export interface GitFetchOptions {
   directory: string;
@@ -28,7 +29,14 @@ export interface GitRemoteOptions {
 let remoteChecks = 0;
 
 export class GitClient {
+  public constructor(private readonly hostPolicy: GitHostPolicy = gitHostPolicyFromEnvironment(),
+    private readonly diagnosticsFile?: string) {}
+
   public async lsRemote(options: GitRemoteOptions): Promise<Buffer> {
+    return runGitOperation(this.diagnosticsFile, undefined, 'ls-remote', () => this.lsRemoteInternal(options));
+  }
+
+  private async lsRemoteInternal(options: GitRemoteOptions): Promise<Buffer> {
     const repository = normalizeRepository(options.repository.cloneUrl, options.repository.provider);
     if (repository.repositoryPath !== options.repository.repositoryPath || repository.host !== options.repository.host) {
       throw new GitError('INVALID_REPOSITORY');
@@ -37,7 +45,7 @@ export class GitClient {
     remoteChecks++;
     let directory: string | undefined;
     try {
-      const selected = await resolveGitHost(repository.host);
+      const selected = await resolveGitHost(repository.host, this.hostPolicy);
       directory = await mkdtemp(path.join(os.tmpdir(), 'sfud-git-refs-'));
       const bridge = await createGitCredentialBridge(directory, repository, await options.credentialProvider.getCredential());
       try {
@@ -45,7 +53,7 @@ export class GitClient {
         return await runIsolatedGit(['ls-remote', '--symref', '--', repository.cloneUrl, 'HEAD', 'refs/heads/*', 'refs/tags/*'], {
           cwd: directory, timeoutMs: 15_000, maxOutputBytes: 4 * 1024 * 1024,
           ...(options.signal === undefined ? {} : { signal: options.signal }),
-          additionalConfig: [`http.curloptResolve=${repository.host}:443:${ip}`, 'credential.useHttpPath=true', `credential.helper=${bridge.helperCommand}`],
+          additionalConfig: [`http.curloptResolve=${repository.host}:${new URL(repository.cloneUrl).port || '443'}:${ip}`, 'credential.useHttpPath=true', `credential.helper=${bridge.helperCommand}`],
           bridgeEnvironment: bridge.environment,
         });
       } finally { await bridge.close(); }
@@ -59,13 +67,17 @@ export class GitClient {
   }
 
   public async fetch(options: GitFetchOptions): Promise<GitObjectStore> {
+    return runGitOperation(this.diagnosticsFile, undefined, 'fetch', () => this.fetchInternal(options));
+  }
+
+  private async fetchInternal(options: GitFetchOptions): Promise<GitObjectStore> {
     assertCommitSha(options.commitSha);
     if (options.ref !== undefined) validateGitRef({ kind: 'branch', name: options.ref });
     const repository = normalizeRepository(options.repository.cloneUrl, options.repository.provider);
     if (repository.repositoryPath !== options.repository.repositoryPath || repository.host !== options.repository.host) {
       throw new GitError('INVALID_REPOSITORY');
     }
-    const selected = await resolveGitHost(repository.host);
+    const selected = await resolveGitHost(repository.host, this.hostPolicy);
     const gitDirectory = path.join(options.directory, 'repository.git');
     const base = {
       cwd: options.directory, ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -80,7 +92,7 @@ export class GitClient {
         '--', repository.cloneUrl, options.ref === undefined ? options.commitSha : `+refs/heads/${options.ref}:refs/remotes/origin/selected`], {
         ...base, gitDirectory,
         additionalConfig: [
-          `http.curloptResolve=${repository.host}:443:${ip}`,
+          `http.curloptResolve=${repository.host}:${new URL(repository.cloneUrl).port || '443'}:${ip}`,
           ...(bridge === undefined ? [] : ['credential.useHttpPath=true', `credential.helper=${bridge.helperCommand}`]),
         ],
         ...(bridge === undefined ? {} : { bridgeEnvironment: bridge.environment }),
@@ -98,9 +110,9 @@ export class GitClient {
       }
       const type = await runIsolatedGit(['cat-file', '-t', options.commitSha], { ...base, gitDirectory });
       if (type.toString('utf8').trim() !== 'commit') throw new GitError('INVALID_GIT_OBJECT');
-      return new GitObjectStore(options.directory, gitDirectory, options.partial === true ? async (ids, signal) => {
+      return new GitObjectStore(options.directory, gitDirectory, options.partial === true ? async (ids, signal) => runGitOperation(this.diagnosticsFile, undefined, 'fetch-lazy', async () => {
         for (const id of ids) assertCommitSha(id);
-        const resolved = await resolveGitHost(repository.host);
+        const resolved = await resolveGitHost(repository.host, this.hostPolicy);
         const fetchBridge = options.credentialProvider === undefined ? undefined
           : await createGitCredentialBridge(options.directory, repository, await options.credentialProvider.getCredential());
         try {
@@ -108,13 +120,18 @@ export class GitClient {
           await runIsolatedGit(['fetch', '--filter=blob:none', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head',
             '--stdin', '--', repository.cloneUrl], {
             ...base, gitDirectory, ...(signal === undefined ? {} : { signal }), input: Buffer.from(`${ids.join('\n')}\n`),
-            additionalConfig: [`http.curloptResolve=${repository.host}:443:${pinnedIp}`,
+            // Match Git's promisor fetch: avoid commit negotiation for object
+            // wants, and restore promisor context for this command only. The
+            // normal reader deliberately has no remote (no implicit fetch).
+            additionalConfig: ['fetch.negotiationAlgorithm=noop',
+              `remote.${repository.cloneUrl}.promisor=true`,
+              `remote.${repository.cloneUrl}.partialclonefilter=blob:none`,
+              `http.curloptResolve=${repository.host}:${new URL(repository.cloneUrl).port || '443'}:${pinnedIp}`,
               ...(fetchBridge === undefined ? [] : ['credential.useHttpPath=true', `credential.helper=${fetchBridge.helperCommand}`])],
             ...(fetchBridge === undefined ? {} : { bridgeEnvironment: fetchBridge.environment }),
           });
-          await runIsolatedGit(['config', '--local', '--remove-section', `remote.${repository.cloneUrl}`], { ...base, gitDirectory });
         } finally { await fetchBridge?.close(); }
-      } : undefined);
+      }) : undefined);
     } finally { await bridge?.close(); }
   }
 }

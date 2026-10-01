@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { lstat, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { GitError } from './git-errors.js';
+import { logGitFailure, sanitizeGitStderr } from './git-diagnostics.js';
 
 export interface GitProcessOptions {
   cwd: string;
@@ -46,6 +47,7 @@ export async function runIsolatedGit(args: readonly string[], options: GitProces
     ...(options.workTree === undefined ? [] : [`--work-tree=${options.workTree}`]), ...args,
   ];
   return new Promise<Buffer>((resolve, reject) => {
+    const started = Date.now();
     const child = spawn('git', finalArgs, {
       cwd: options.cwd, env, shell: false, detached: process.platform !== 'win32',
       windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
@@ -60,6 +62,9 @@ export async function runIsolatedGit(args: readonly string[], options: GitProces
     let killTimer: NodeJS.Timeout | undefined;
     let diskCheck = Promise.resolve();
     let checking = false;
+    let stderrBuffer: Buffer = Buffer.alloc(0);
+    let stderrTruncated = false;
+    let spawnCode: string | undefined;
     const monitor = () => {
       if (checking || closed || options.onDiskUsage === undefined) return;
       checking = true;
@@ -79,13 +84,20 @@ export async function runIsolatedGit(args: readonly string[], options: GitProces
       if (bytes > maximum) terminate(new GitError('GIT_QUOTA_EXCEEDED'));
       else if (failure === undefined) chunks.push(chunk);
     });
-    // Drain, bound and discard stderr. Never propagate remote messages or paths.
+    // Keep a bounded diagnostic copy. Raw stderr never enters API errors.
     child.stderr.on('data', (chunk: Buffer) => {
+      // Keep the tail: fatal errors usually follow transfer progress.
+      const combined = Buffer.concat([stderrBuffer, chunk]);
+      if (combined.length > 16384) stderrTruncated = true;
+      stderrBuffer = combined.subarray(Math.max(0, combined.length - 16384));
       bytes += chunk.length;
       if (bytes > maximum) terminate(new GitError('GIT_QUOTA_EXCEEDED'));
     });
-    child.once('error', () => { failure ??= new GitError('GIT_PROCESS_FAILED'); });
-    child.once('close', (code) => {
+    child.once('error', (error: NodeJS.ErrnoException) => {
+      failure ??= new GitError('GIT_PROCESS_FAILED');
+      if (/^E[A-Z0-9]+$/u.test(error.code ?? '')) spawnCode = error.code;
+    });
+    child.once('close', (code, signal) => {
       closed = true;
       if (failure !== undefined) kill('SIGKILL');
       clearInterval(interval);
@@ -98,7 +110,21 @@ export async function runIsolatedGit(args: readonly string[], options: GitProces
         if (code !== 0) throw new GitError('GIT_PROCESS_FAILED');
         if (options.onDiskUsage !== undefined) options.onDiskUsage(await directorySize(options.cwd));
         resolve(Buffer.concat(chunks));
-      })().catch(reject);
+      })().catch(async (error: unknown) => {
+        let stderr = stderrBuffer.toString('utf8');
+        // Omit the partial first line, which could contain a cut-off secret.
+        if (stderrTruncated) stderr = stderr.includes('\n') ? stderr.slice(stderr.indexOf('\n') + 1) : '';
+        const command = args.find((arg) => !arg.startsWith('-')) ?? 'git';
+        const stage = ['fetch', 'cat-file', 'ls-tree', 'restore', 'rev-parse', 'ls-remote', 'init', 'config'].includes(command)
+          ? command === 'fetch' && args.includes('--stdin') ? 'fetch-lazy' : command : 'git';
+        await logGitFailure({ stage, exitCode: code, signal, durationMs: Date.now() - started,
+          errorCode: error instanceof GitError ? error.code : 'GIT_PROCESS_FAILED',
+          ...(spawnCode === undefined ? {} : { spawnCode }),
+          ...(stage === 'fetch-lazy' ? { inputCount: options.input?.toString('utf8').split('\n').filter(Boolean).length ?? 0 } : {}),
+          stderr: sanitizeGitStderr(stderr, [], options.bridgeEnvironment?.SFUD_GIT_BRIDGE_NONCE),
+        });
+        reject(error);
+      });
     });
     function terminate(error: Error): void {
       if (failure !== undefined) return;

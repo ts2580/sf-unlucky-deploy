@@ -12,8 +12,10 @@ import {
   DEFAULT_UI_PORT,
   startWebUi,
 } from './web/server/start.js';
+import { gitHostPolicyFromAddresses, gitHostPolicyFromEnvironment } from './git/git-network.js';
+import { getHomeConfigPaths, initializeHomeConfiguration } from './config/user-config.js';
 
-export const CLI_VERSION = '0.4.0';
+export const CLI_VERSION = '0.4.0-rc.2';
 
 export interface ProgramDependencies extends CommandDependencies, DeployCommandDependencies {}
 
@@ -33,6 +35,19 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
     .version(CLI_VERSION)
     .showHelpAfterError();
 
+  const config = program.command('config').description('사용자 홈 설정을 관리합니다.');
+  config.command('path')
+    .description('사용자 설정 파일 경로를 표시합니다.')
+    .action(() => {
+      process.stdout.write(`${getHomeConfigPaths().configFile}\n`);
+    });
+  config.command('init')
+    .description('개인 LOCAL 모드의 사용자 설정을 처음 생성합니다.')
+    .action(async () => {
+      const paths = await initializeHomeConfiguration();
+      process.stdout.write(`설정을 생성했습니다: ${paths.configFile}\n`);
+    });
+
   program
     .command('compare')
     .description('org 또는 로컬 DX 프로젝트의 메타데이터를 비교합니다.')
@@ -45,6 +60,8 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
     .option('--report-dir <path>', '실행 결과 저장 디렉터리')
     .option('--detail', '변경 상세를 터미널에 출력')
     .option('--show-identical', '동일한 컴포넌트도 터미널에 출력')
+    .option('--exclude-package-metadata', 'Org에 설치된 패키지 네임스페이스의 컴포넌트를 양쪽 비교에서 제외')
+    .option('--excluded-package-ids <ids...>', '양쪽 비교에서 제외할 설치 패키지 ID (033...)')
     .option('--strict', 'XML 형식 차이까지 비교')
     .option('--fail-on-diff', '차이가 있으면 종료 코드 1 반환')
     .option('--json', 'JSON 결과를 표준 출력')
@@ -84,7 +101,7 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
   program
     .command('ui')
     .description('로컬 웹 UI를 시작합니다.')
-    .option('--host <host>', 'bind 주소', DEFAULT_UI_HOST)
+    .option('--host <host>', 'bind 주소')
     .option(
       '--port <port>',
       'bind 포트',
@@ -96,11 +113,13 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
     .option('--allow-remote', 'loopback 외 주소 bind 허용')
     .option('--trusted-proxy <ip-or-cidr>', '신뢰할 reverse proxy IP 또는 CIDR (반복 가능)', collectOption, [])
     .option('--public-origin <origin>', '브라우저 요청에 허용할 공개 http(s) origin')
+    .option('--allow-git-ip <ip>', '셀프호스팅 Git FQDN에 허용할 IP (반복 가능)', collectOption, [])
     .action(async (options) => {
       const dataDirectory = options.dataDir as string | undefined;
       const projectPaths = options.project as string[];
       const port = options.port as number | undefined;
       const configuredProxies = options.trustedProxy as string[];
+      const configuredGitIps = options.allowGitIp as string[];
       const environmentProxies = (process.env.SFUD_TRUSTED_PROXIES ?? '')
         .split(',')
         .map((value) => value.trim())
@@ -108,16 +127,25 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
       const trustedProxies = configuredProxies.length > 0 ? configuredProxies : environmentProxies;
       const publicOrigin = options.publicOrigin as string | undefined
         ?? process.env.SFUD_PUBLIC_ORIGIN;
+      const gitHostPolicy = configuredGitIps.length > 0
+        ? gitHostPolicyFromAddresses(configuredGitIps)
+        : gitHostPolicyFromEnvironment();
+      const localValue = process.env.LOCAL ?? 'false';
+      if (localValue !== 'true' && localValue !== 'false') {
+        throw new SfudError('INVALID_LOCAL_MODE', 'LOCAL 환경변수는 true 또는 false여야 합니다.');
+      }
       await startWebUi({
-        host: options.host as string,
+        host: (options.host as string | undefined) ?? process.env.SFUD_UI_HOST ?? DEFAULT_UI_HOST,
         port: port ?? parsePort(process.env.SFUD_UI_PORT ?? String(DEFAULT_UI_PORT)),
         allowRemote: options.allowRemote === true,
+        localMode: localValue === 'true',
         open: options.open !== false,
         logger: false,
         ...(dataDirectory === undefined ? {} : { dataDirectory }),
         ...(projectPaths.length === 0 ? {} : { projectPaths }),
         ...(trustedProxies.length === 0 ? {} : { trustedProxies }),
         ...(publicOrigin === undefined ? {} : { publicOrigin }),
+        gitHostPolicy,
       });
     });
 

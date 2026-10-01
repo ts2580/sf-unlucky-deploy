@@ -46,7 +46,10 @@ describe('SQLite 저장소', () => {
     expect(await store.database.get('PRAGMA journal_mode')).toEqual({ journal_mode: 'wal' });
     expect(await store.database.get('PRAGMA busy_timeout')).toEqual({ timeout: 5_000 });
     expect(await store.database.get('SELECT COUNT(*) count FROM schema_migrations'))
-      .toEqual({ count: 35 });
+      .toEqual({ count: 46 });
+    expect(await store.database.get<{ dflt_value: string }>(
+      "SELECT dflt_value FROM pragma_table_info('salesforce_connections') WHERE name = 'generation'"))
+      .toEqual({ dflt_value: '1' });
     expect(await store.database.all('SELECT id, salt FROM git_token_key_parameters'))
       .toEqual([]);
     if (process.platform !== 'win32') {
@@ -192,7 +195,7 @@ describe('SQLite 저장소', () => {
     await expect(comparisonJobs.getRequired(comparison.id)).rejects.toThrow();
   });
 
-  it.each([{ from: 8, to: 9 }, { from: 28, to: 29 }, { from: 29, to: 30 }, { from: 30, to: 31 }, { from: 31, to: 32 }, { from: 32, to: 33 }, { from: 33, to: 34 }, { from: 34, to: 35 }])('v$from 작업·승인 이력을 보존하면서 v$to로 이관한다', async ({ from, to }) => {
+  it.each([{ from: 8, to: 9 }, { from: 28, to: 29 }, { from: 29, to: 30 }, { from: 30, to: 31 }, { from: 31, to: 32 }, { from: 32, to: 33 }, { from: 33, to: 34 }, { from: 34, to: 35 }, { from: 35, to: 36 }, { from: 36, to: 37 }, { from: 37, to: 38 }, { from: 38, to: 39 }, { from: 39, to: 40 }, { from: 40, to: 41 }])('v$from 작업·승인 이력을 보존하면서 v$to로 이관한다', async ({ from, to }) => {
     const database = await open({ filename: ':memory:', driver: sqlite3.Database });
     try {
       await database.exec('PRAGMA foreign_keys = ON');
@@ -277,6 +280,19 @@ describe('SQLite 저장소', () => {
         expect(await database.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'deployment_execution_leases'"))
           .toEqual({ name: 'deployment_execution_leases' });
       }
+      if (to === 36) {
+        expect(await database.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'git_connections'"))
+          .toEqual({ name: 'git_connections' });
+      }
+      if (to === 37) {
+        expect(await database.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'git_allowed_ips'"))
+          .toEqual({ name: 'git_allowed_ips' });
+      }
+      if (to === 38) {
+        for (const table of ['git_connections', 'git_registrations']) {
+          expect(await database.all(`PRAGMA table_info(${table})`)).toContainEqual(expect.objectContaining({ name: 'alias', type: 'TEXT' }));
+        }
+      }
     } finally {
       await database.close();
     }
@@ -308,7 +324,7 @@ describe('SQLite 저장소', () => {
       expect(await database.all('PRAGMA foreign_key_check')).toEqual([]);
       for (const table of ['comparison_jobs', 'deployment_jobs']) {
         expect(await database.get(`SELECT access_owner_user_id owner, created_by creator FROM ${table}`))
-          .toEqual({ owner: null, creator: 'legacy' });
+          .toEqual({ owner: 'legacy', creator: 'legacy' });
       }
       expect(await database.get('SELECT COUNT(*) count FROM job_access_grants')).toEqual({ count: 0 });
     } finally {

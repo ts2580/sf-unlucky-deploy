@@ -26,6 +26,7 @@ export type DeploymentJobStatus =
 export type DeploymentExecutionEvidence =
   | 'NOT_STARTED'
   | 'ATTEMPT_TRACKED'
+  | 'MANUALLY_ATTESTED'
   | 'LEGACY_NO_EXTERNAL_ID'
   | 'LEGACY_VALIDATION_ONLY'
   | 'LEGACY_EXECUTION_REPORT_UNVERIFIED'

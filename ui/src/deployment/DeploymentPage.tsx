@@ -19,6 +19,7 @@ import {
   type ComparisonJobResponse,
 } from '../comparison/api';
 import { ComparisonResultPanel, WorkspaceSourceSelect } from '../comparison/ComparisonResult';
+import { PackageExclusions } from '../comparison/PackageExclusions';
 import { Icon } from '../components/Icon';
 import { connections as getGitConnections, providerNames } from '../git/api';
 import {
@@ -112,6 +113,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const [tests, setTests] = useState('');
   const [showIdentical, setShowIdentical] = useState(false);
   const [compareCurrentType, setCompareCurrentType] = useState(true);
+  const [packageSelection, setPackageSelection] = useState<{ sourceIds: string; ids: string[] }>({ sourceIds: '', ids: [] });
   const [comparisonSubmitting, setComparisonSubmitting] = useState(false);
   const [dryRunSubmitting, setDryRunSubmitting] = useState(false);
   const [deploymentSubmitting, setDeploymentSubmitting] = useState(false);
@@ -144,6 +146,13 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const preparedMetadataType = sourceMetadataType ?? targetMetadataType;
   const metadataScopeMismatch = sourceMetadataType !== undefined && targetMetadataType !== undefined && sourceMetadataType !== targetMetadataType;
   const metadataTypeSourceIds = compareCurrentType ? `${sourceId},${targetOrgId}` : sourceId;
+  const packageOrgIds = [...new Set([sourceId, ...(compareCurrentType ? [targetOrgId] : [])]
+    .filter((id) => id.startsWith('org:')))].sort().join(',');
+  const excludedPackageIds = packageSelection.sourceIds === packageOrgIds ? packageSelection.ids : [];
+  const packageSelectionKey = excludedPackageIds.join(',');
+  useEffect(() => {
+    setPackageSelection({ sourceIds: packageOrgIds, ids: [] });
+  }, [packageOrgIds]);
   const workflowSelectionKey = [
     sourceSelectionId, targetSelectionId,
     sourceId,
@@ -151,6 +160,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     scopeQuery,
     compareCurrentType ? showIdentical : false,
     compareCurrentType,
+    packageSelectionKey,
   ].join('\u0000');
   const deploymentSourceId = sourceId.startsWith('git-registered:')
     ? comparisonJob?.status === 'SUCCEEDED' && comparisonJobSelectionKeyRef.current === workflowSelectionKey
@@ -286,7 +296,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
 
   useEffect(() => {
     setDeploymentCart([]);
-  }, [sourceId, targetOrgId, sourceSelectionId, targetSelectionId]);
+  }, [sourceId, targetOrgId, sourceSelectionId, targetSelectionId, packageSelectionKey]);
 
   useEffect(() => {
     if (deploymentSourceId.length === 0 || comparisonOnly) {
@@ -404,6 +414,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
           ...(compareCurrentType ? { leftSourceId: targetOrgId } : { sourceOnly: true }),
           rightSourceId: sourceId,
           strict: false,
+          ...(excludedPackageIds.length > 0 ? { excludedPackageIds } : {}),
           showIdentical: compareCurrentType && showIdentical,
         }, controller.signal);
       if (
@@ -567,7 +578,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
         id: `${gitConnectionSourcePrefix}${connection.id}`,
         kind: 'local' as const,
         location: 'git' as const,
-        label: connection.repositoryPath!,
+        label: connection.alias ?? connection.repositoryPath!,
         detail: `${providerNames[connection.provider]} · 브랜치 선택`,
       })),
   ];
@@ -608,7 +619,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   };
 
   return (
-    <div className="page-stack">
+    <div className="page-stack deployment-page">
       <WorkflowStatusPanel
         liveStatus={liveStatus}
         comparisonJob={comparisonJob}
@@ -671,6 +682,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
               <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} disabled={!compareCurrentType || comparisonLimitExceeded} />
               <button className={`button button-secondary comparison-run-button${comparing ? ' comparison-run-loading' : ''}`} type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesStatus !== 'ready' || !scopeValid || !sourceId || (compareCurrentType && (!targetOrgId || sourceId === targetOrgId))}><Icon name={comparing ? 'refresh' : 'compare'} /><span>{comparing ? '메타데이터 받는 중……' : '메타데이터 받아오기'}</span></button>
             </div>
+            <PackageExclusions key={packageOrgIds} sourceIds={packageOrgIds} selectedIds={excludedPackageIds}
+              onChange={(ids) => setPackageSelection({ sourceIds: packageOrgIds, ids })} />
           </section>
 
           {comparisonJob !== null && !['QUEUED', 'RUNNING'].includes(comparisonJob.status) && <ComparisonResultPanel

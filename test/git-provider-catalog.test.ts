@@ -50,20 +50,23 @@ describe('Git provider repository catalog', { timeout: 30_000 }, () => {
     }
   });
 
-  it('repository-bound 연결은 account REST 없이 고정된 한 저장소만 catalog로 노출한다', async () => {
+  it.each([
+    ['github', 'github.com', 'acme/widget'],
+    ['gitlab', 'gitlab.hmc.co.kr', 'https://gitlab.hmc.co.kr/acme/widget.git'],
+  ] as const)('%s repository-bound 연결은 account REST 없이 고정된 한 저장소만 catalog로 노출한다', async (provider, providerHost, repositoryPath) => {
     const fixture = await databaseFixture();
     try {
       const connection = await fixture.connections.save({
-        ownerUserId: fixture.owner.id, provider: 'github', providerHost: 'github.com',
+        ownerUserId: fixture.owner.id, provider, providerHost,
         providerAccountId: 'bound-account', displayName: 'Bound repository', grantedPermissions: [],
-        repositoryPath: 'acme/widget', tokens: { accessToken: 'bound-token' },
+        repositoryPath, tokens: { accessToken: 'bound-token' },
       });
       const http = new MockHttp();
       const catalog = new GitRepositoryCatalog(fixture.connections, fixture.credentials, true, new ProviderApi(http));
       const listed = await catalog.list(fixture.owner.id, connection.id, {});
       expect(listed.namespaces).toEqual([]);
       expect(listed.repositories).toHaveLength(1);
-      expect(listed.repositories[0]).toMatchObject({ repositoryPath: 'acme/widget' });
+      expect(listed.repositories[0]).toMatchObject({ repositoryPath });
       expect(listed.repositories[0]!.repositoryId).toMatch(/^git:[0-9a-f]{64}$/u);
       await expect(catalog.list(fixture.owner.id, connection.id, { search: 'WIDGET' })).resolves.toEqual(listed);
       await expect(catalog.list(fixture.owner.id, connection.id, { search: 'missing' })).resolves.toEqual({ namespaces: [], repositories: [] });

@@ -5,6 +5,10 @@ const password = 'e2e correct horse battery staple';
 const operatorEmail = 'e2e-operator@example.com';
 const operatorPassword = 'e2e operator initial password';
 
+test.beforeEach(async ({ page }) => {
+  await page.route('**/api/v1/installed-packages**', (route) => route.fulfill({ json: { packages: [] } }));
+});
+
 test('일회용 코드로 최초 관리자를 생성한다', async ({ page }) => {
   await page.goto('http://127.0.0.1:27546');
   await expect(page.getByRole('heading', { name: '최초 관리자를 설정합니다.' })).toBeVisible();
@@ -18,7 +22,9 @@ test('일회용 코드로 최초 관리자를 생성한다', async ({ page }) =>
 
 test('로그인 실패를 표시하고 올바른 계정으로 대시보드에 진입한다', async ({ page }) => {
   await page.goto('http://127.0.0.1:27546');
-  await expect(page.getByRole('heading', { name: '다시 오셨군요.' })).toBeVisible();
+  await expect(page.getByText('다시 오셨군요.')).toHaveCount(0);
+  await expect(page.getByText('배포 콘솔에 접근하려면 관리자에게 등록된 계정으로 로그인하세요.')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '로그인', exact: true })).toBeVisible();
   await page.getByLabel('이메일').fill(email);
   await page.getByLabel('비밀번호').fill('incorrect password value');
   await page.getByRole('button', { name: '로그인' }).click();
@@ -34,7 +40,8 @@ test('대시보드 shell과 핵심 안전 안내를 렌더링한다', async ({ p
   await login(page);
 
   await expect(page.getByRole('heading', { name: '배포 대시보드' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: /변경을 먼저 확인하고/u })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'SAFE BY DEFAULT' })).toBeVisible();
+  await expect(page.getByText('변경을 먼저 확인하고,')).toHaveCount(0);
   await expect(page.getByRole('link', { name: /비교 및 배포 시작/u })).toBeVisible();
   await expect(page.getByText('삭제는 자동으로 실행되지 않습니다.')).toBeVisible();
   await expect(page.getByText(/두 Salesforce 환경의 메타데이터를 한눈에 비교하고/u)).toHaveCount(0);
@@ -94,7 +101,8 @@ test('큰 화면의 작업 공간을 활용하고 좁은 화면에서는 패널�
     expect(metrics.overflow, `${width}px 가로 넘침`).toBe(false);
     expect(metrics.button.right).toBeLessThan(metrics.search.right);
     expect(Math.abs(metrics.button.width - metrics.options.width), `${width}px 버튼 너비`).toBeLessThan(1);
-    expect(Math.abs(metrics.button.height - metrics.options.height), `${width}px 버튼 높이`).toBeLessThan(1);
+    expect(metrics.button.height, `${width}px 메타데이터 버튼 높이`).toBeGreaterThanOrEqual(45);
+    expect(metrics.button.height, `${width}px 메타데이터 버튼 공통 높이`).toBeLessThan(metrics.options.height);
     expect(metrics.status.bottom).toBeLessThanOrEqual(metrics.steps.y);
     expect(metrics.status.bottom).toBeLessThanOrEqual(metrics.source.y);
     expect(metrics.status.bottom).toBeLessThanOrEqual(metrics.summary.y);
@@ -114,7 +122,8 @@ test('큰 화면의 작업 공간을 활용하고 좁은 화면에서는 패널�
       expect(metrics.search.y).toBeGreaterThanOrEqual(metrics.source.bottom);
     }
     if (width > 700) {
-      expect(Math.abs(metrics.options.y - metrics.button.y)).toBeLessThan(2);
+      expect(metrics.button.y).toBeGreaterThanOrEqual(metrics.options.y);
+      expect(metrics.button.bottom).toBeLessThanOrEqual(metrics.options.bottom);
     } else {
       expect(metrics.button.y).toBeGreaterThanOrEqual(metrics.options.bottom);
     }
@@ -131,27 +140,28 @@ test('320~430px 모바일에서 주요 화면과 컨트롤이 화면 안에 표�
   await login(page);
   for (const width of [320, 360, 390, 430]) {
     await page.setViewportSize({ width, height: 844 });
-    for (const route of ['/', '/deploy', '/runs', '/settings', '/admin']) {
+    for (const route of ['/', '/deploy', '/runs', '/auth', '/settings', '/admin']) {
       await page.goto(`http://127.0.0.1:27546${route}`);
       await expect(page.getByRole('button', { name: '로그아웃' })).toBeVisible();
       if (route === '/deploy') {
         await expect(page.getByRole('combobox', { name: 'Salesforce metadata type' })).toHaveValue('ApexClass');
       }
       if (route === '/settings') {
-        await expect(page.locator('.connection-card')).toContainText('2개 org 사용 가능');
         const help = await page.locator('#test-class-suffix-help').boundingBox();
         const helpText = await page.locator('#test-class-suffix-help > span').boundingBox();
         expect(helpText!.width, `${width}px 안내문 본문 너비`).toBeGreaterThan(help!.width * .85);
       }
-      if (route === '/admin') await expect(page.locator('.admin-user-row').first()).toBeVisible();
+      if (route === '/auth') await expect(page.getByRole('heading', { name: 'Salesforce 인증' })).toBeVisible();
+      if (route === '/admin') await expect(page.getByRole('table', { name: '등록 사용자' }).getByRole('row').nth(1)).toBeVisible();
       const metrics = await page.evaluate(() => {
         const viewport = document.documentElement.clientWidth;
         return {
           overflow: document.documentElement.scrollWidth > viewport,
           clippedControls: [...document.querySelectorAll('button, input, select, a')]
-            .filter((element) => {
+          .filter((element) => {
               const rect = element.getBoundingClientRect();
-              return rect.width > 0 && rect.height > 0 && (rect.x < -1 || rect.right > viewport + 1);
+              const inTableScroller = element.closest('.connection-table-scroll') !== null;
+              return !inTableScroller && rect.width > 0 && rect.height > 0 && (rect.x < -1 || rect.right > viewport + 1);
             }).map((element) => element.getAttribute('aria-label') ?? element.textContent),
         };
       });
@@ -160,6 +170,7 @@ test('320~430px 모바일에서 주요 화면과 컨트롤이 화면 안에 표�
       await expect(page.getByRole('navigation', { name: '주요 메뉴' })).toBeVisible();
       await expect(page.getByRole('link', { name: '실행 기록', exact: true })).toBeVisible();
       await expect(page.getByRole('link', { name: '설정', exact: true })).toBeVisible();
+      await expect(page.getByRole('link', { name: '인증 관리', exact: true })).toBeVisible();
     }
   }
   expect(pageErrors).toEqual([]);
@@ -180,23 +191,65 @@ test('메뉴마다 독립 URL과 화면을 제공한다', async ({ page }) => {
 
   await page.getByRole('link', { name: '설정', exact: true }).click();
   await expect(page).toHaveURL(/\/settings$/u);
-  await expect(page.getByRole('heading', { name: '연결과 프로젝트 소스를 관리합니다.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '서버 설정과 프로젝트 소스를 관리합니다.' })).toBeVisible();
   await expect(page.getByText(/Salesforce 인증은 sf CLI에서 관리하고/u)).toHaveCount(0);
+  await page.getByRole('link', { name: '인증 관리', exact: true }).click();
+  await expect(page).toHaveURL(/\/auth$/u);
+  await expect(page.getByRole('heading', { name: 'Salesforce 인증' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Git 계정 연결' })).toBeVisible();
+});
+
+test('실행 기록 종류 필터와 API 상태 라벨을 표에 표시한다', async ({ page }) => {
+  await page.route('**/api/v1/comparisons', (route) => route.fulfill({ json: { jobs: [
+    { id: 'compare-failed', left: { label: '개발' }, right: { label: '운영' }, status: 'FAILED', createdAt: '2026-09-30T01:00:00.000Z' },
+    { id: 'compare-running', left: { label: 'QA' }, right: { label: '운영' }, status: 'RUNNING', createdAt: '2026-09-30T02:00:00.000Z' },
+  ] } }));
+  await page.route('**/api/v1/deployment-jobs', (route) => route.fulfill({ json: { jobs: [
+    { id: 'dry-approval', kind: 'DRY_RUN', source: { id: 'dev', kind: 'org', label: '개발' }, target: { id: 'prod', kind: 'org', label: '운영' }, status: 'APPROVAL_PENDING', manifest: '<Package/>', prepared: false, remoteStatus: 'NOT_SUBMITTED', createdAt: '2026-09-30T03:00:00.000Z' },
+    { id: 'deployment-failed', kind: 'DEPLOY', source: { id: 'qa', kind: 'org', label: 'QA' }, target: { id: 'prod', kind: 'org', label: '운영' }, status: 'FAILED', manifest: '<Package/>', prepared: false, remoteStatus: 'FAILED', createdAt: '2026-09-30T04:00:00.000Z' },
+  ] } }));
+  await login(page, '/runs');
+  const table = page.getByRole('table', { name: '실행 기록' });
+  await expect(table.getByRole('row')).toHaveCount(5);
+  await expect(table.getByRole('row', { name: /비교.*개발 → 운영.*실패/u })).toBeVisible();
+  await expect(table.getByRole('row', { name: /DRY-RUN.*개발 → 운영.*dry-run 성공/u })).toBeVisible();
+  await page.getByRole('button', { name: '비교', exact: true }).click();
+  await expect(table.getByRole('row')).toHaveCount(3);
+  await expect(table.getByRole('row', { name: /실패/u })).toBeVisible();
+  await page.getByRole('button', { name: 'Dry-run', exact: true }).click();
+  await expect(table.getByRole('row')).toHaveCount(2);
+  await expect(table.getByRole('row', { name: /dry-run 성공/u })).toBeVisible();
+  await page.getByRole('button', { name: '실제 배포', exact: true }).click();
+  await expect(table.getByRole('row')).toHaveCount(2);
+  await expect(table.getByRole('row', { name: /배포.*실패/u })).toBeVisible();
 });
 
 test('ADMIN이 사용자를 생성하고 역할과 활성 상태를 관리한다', async ({ page }) => {
   await login(page, '/admin');
   await expect(page.getByRole('link', { name: '사용자 관리', exact: true })).toHaveAttribute('aria-current', 'page');
   await expect(page.getByRole('heading', { name: '사용자와 배포 권한을 관리합니다.' })).toBeVisible();
-  const createPanel = page.getByRole('region', { name: '사용자 생성' });
-  await createPanel.getByLabel('표시 이름').fill('E2E 운영자');
-  await createPanel.getByLabel('이메일').fill(operatorEmail);
-  await createPanel.getByLabel('역할').selectOption('OPERATOR');
-  await createPanel.getByLabel('초기 비밀번호').fill(operatorPassword);
+  await page.getByRole('button', { name: '사용자 생성', exact: true }).click();
+  const createPanel = page.getByRole('dialog', { name: '사용자 생성' });
+  await createPanel.getByLabel('표시 이름').fill('중복 사용자');
+  await createPanel.getByLabel('이메일').fill(email);
+  await createPanel.getByLabel('역할').selectOption('VIEWER');
+  await createPanel.getByLabel('초기 비밀번호').fill('e2e duplicate user password');
   await createPanel.getByRole('button', { name: '사용자 생성' }).click();
+  await expect(createPanel.getByRole('alert')).toBeVisible();
+  await createPanel.getByRole('button', { name: '닫기', exact: true }).click();
+  await page.getByRole('button', { name: '사용자 생성', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: '사용자 생성' }).getByLabel('이메일')).toHaveValue('');
+  await page.getByRole('dialog', { name: '사용자 생성' }).getByRole('button', { name: '닫기', exact: true }).click();
+  await page.getByRole('button', { name: '사용자 생성', exact: true }).click();
+  const createAgain = page.getByRole('dialog', { name: '사용자 생성' });
+  await createAgain.getByLabel('표시 이름').fill('E2E 운영자');
+  await createAgain.getByLabel('이메일').fill(operatorEmail);
+  await createAgain.getByLabel('역할').selectOption('OPERATOR');
+  await createAgain.getByLabel('초기 비밀번호').fill(operatorPassword);
+  await createAgain.getByRole('button', { name: '사용자 생성' }).click();
   await expect(page.getByRole('status')).toContainText('E2E 운영자 계정을 생성했습니다.');
 
-  const userRow = page.locator('.admin-user-row', { hasText: operatorEmail });
+  const userRow = page.getByRole('table', { name: '등록 사용자' }).getByRole('row', { name: new RegExp(operatorEmail) });
   await expect(userRow).toContainText('OPERATOR');
   await userRow.getByRole('combobox', { name: 'E2E 운영자 역할' }).selectOption('DEPLOYER');
   await expect(page.getByRole('status')).toContainText('사용자 설정을 변경했습니다.');
@@ -204,20 +257,47 @@ test('ADMIN이 사용자를 생성하고 역할과 활성 상태를 관리한다
 
   const accessPanel = page.locator('.admin-org-access-panel');
   await expect(accessPanel.getByRole('heading', { name: '대상 org 실제 배포 권한' })).toBeVisible();
-  await accessPanel.getByLabel('대상 org 별칭').fill('target');
-  await accessPanel.getByLabel('실행 사용자').selectOption({ label: 'E2E 운영자 · DEPLOYER' });
+  const targetOrgId = '00D000000000001';
   await accessPanel.getByRole('button', { name: '실행 권한 추가' }).click();
-  await expect(page.getByRole('status')).toContainText('target org의 실제 배포 권한을 추가했습니다.');
-  const accessRow = accessPanel.locator('.admin-org-access-row', { hasText: 'E2E 운영자 · DEPLOYER' });
-  await expect(accessRow).toContainText('target');
+  const grantDialog = page.getByRole('dialog', { name: '실행 권한 추가' });
+  await grantDialog.getByLabel('대상 Salesforce Org ID').fill(targetOrgId);
+  await grantDialog.getByLabel('실행 사용자').selectOption({ label: 'E2E 운영자 · DEPLOYER' });
+  await grantDialog.getByRole('button', { name: '실행 권한 추가' }).click();
+  await expect(page.getByRole('status')).toContainText(`${targetOrgId} org의 실제 배포 권한을 추가했습니다.`);
+  const accessRow = accessPanel.getByRole('table', { name: 'Org 실행 권한' }).getByRole('row', { name: /E2E 운영자 · DEPLOYER/u });
+  await expect(accessRow).toContainText(targetOrgId);
   await accessRow.getByRole('button', { name: '회수' }).click();
-  await expect(page.getByRole('status')).toContainText('target org의 실제 배포 권한을 회수했습니다.');
-  await expect(accessPanel.locator('.admin-org-access-row')).toHaveCount(0);
+  await expect(page.getByRole('status')).toContainText(`${targetOrgId}EAA org의 실제 배포 권한을 회수했습니다.`);
+  await expect(accessPanel.getByRole('table', { name: 'Org 실행 권한' }).getByRole('row')).toHaveCount(0);
+
+  const secondOrgId = '00D000000000002';
+  await accessPanel.getByRole('button', { name: '실행 권한 추가' }).click();
+  const secondGrantDialog = page.getByRole('dialog', { name: '실행 권한 추가' });
+  const targetInput = secondGrantDialog.getByLabel('대상 Salesforce Org ID');
+  await targetInput.fill(secondOrgId);
+  expect(await targetInput.evaluate((element: HTMLInputElement) => element.checkValidity())).toBe(true);
+  await secondGrantDialog.getByLabel('실행 사용자').selectOption({ label: 'E2E 운영자 · DEPLOYER' });
+  await secondGrantDialog.getByRole('button', { name: '실행 권한 추가' }).click();
+  await expect(accessRow).toContainText(secondOrgId);
+  await accessRow.getByRole('button', { name: '회수' }).click();
+  await expect(accessPanel.getByRole('table', { name: 'Org 실행 권한' }).getByRole('row')).toHaveCount(0);
 
   await userRow.getByRole('button', { name: '비활성화' }).click();
   await expect(userRow).toContainText('비활성');
   await userRow.getByRole('button', { name: '활성화' }).click();
   await expect(userRow).toContainText('활성');
+
+  await page.goto('http://127.0.0.1:27546/settings');
+  await page.getByRole('button', { name: 'IP 등록', exact: true }).click();
+  const ipDialog = page.getByRole('dialog', { name: '허용 Git IP 등록' });
+  await ipDialog.getByLabel('IPv4 또는 IPv6 주소').fill('10.23.45.67');
+  await ipDialog.getByRole('button', { name: '등록', exact: true }).click();
+  await expect(ipDialog).toHaveCount(0);
+  const ipTable = page.getByRole('table', { name: '허용 Git IP' });
+  const ipRow = ipTable.getByRole('row', { name: /10\.23\.45\.67/u });
+  await expect(ipRow).toBeVisible();
+  await ipRow.getByRole('button', { name: '제거' }).click();
+  await expect(page.getByText('UI에서 등록한 허용 IP가 없습니다.')).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(
@@ -225,10 +305,12 @@ test('ADMIN이 사용자를 생성하고 역할과 활성 상태를 관리한다
   )).toBe(false);
 
   await page.getByRole('button', { name: '로그아웃' }).click();
-  await expect(page.getByRole('heading', { name: '다시 오셨군요.' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '로그인', exact: true })).toBeVisible();
   await page.getByLabel('이메일').fill(operatorEmail);
   await page.getByLabel('비밀번호').fill(operatorPassword);
   await page.getByRole('button', { name: '로그인' }).click();
+  await expect(page.getByRole('button', { name: '로그아웃', exact: true })).toBeVisible();
+  await page.goto('http://127.0.0.1:27546/admin');
   await expect(page.getByRole('heading', { name: 'ADMIN 권한이 필요합니다.' })).toBeVisible();
   await expect(page.getByRole('link', { name: '사용자 관리', exact: true })).toHaveCount(0);
 });
@@ -306,7 +388,45 @@ test('metadata type 조회 전 상태를 오류로 표시하지 않는다', asyn
     .toHaveClass(/field-hint-error/u);
 });
 
+test('설치 패키지 목록 오류 재시도와 선택 해제를 지원한다', async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.route('**/api/v1/workspace', (route) => route.fulfill({ json: { orgs: [], projects: [], sources: [
+    { id: 'org:left', kind: 'org', label: 'left', detail: '' },
+    { id: 'org:right', kind: 'org', label: 'right', detail: '' },
+  ] } }));
+  await page.route('**/api/v1/metadata-types**', (route) => route.fulfill({ json: {
+    metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }],
+  } }));
+  let requests = 0;
+  await page.route('**/api/v1/installed-packages**', (route) => {
+    requests += 1;
+    return requests === 1 ? route.fulfill({ status: 400, json: { error: { code: 'INSTALLED_PACKAGES_LOAD_FAILED', message: '목록 조회 권한을 확인하세요.' } } })
+      : route.fulfill({ json: { packages: requests === 2 ? [
+        { id: '033000000000001', name: 'Installed CRM', namespace: 'crm', orgAliases: ['left', 'right'] },
+      ] : [] } });
+  });
+  await login(page, '/deploy');
+  const packages = page.getByRole('group', { name: '비교에서 제외할 설치 패키지' });
+  await expect(packages.getByRole('alert')).toContainText('목록 조회 권한');
+  await packages.getByRole('button', { name: '목록 새로고침' }).click();
+  await packages.getByRole('checkbox', { name: 'Installed CRM 비교에서 제외' }).check();
+  await expect(packages.getByText('1개 선택')).toBeVisible();
+  await packages.getByRole('button', { name: '선택 해제', exact: true }).click();
+  await expect(packages.getByRole('checkbox')).not.toBeChecked();
+  await page.setViewportSize({ width: 320, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await packages.getByRole('button', { name: '목록 새로고침' }).click();
+  await expect(packages.getByText('설치된 패키지가 없습니다.')).toBeVisible();
+  expect(pageErrors).toEqual([]);
+});
+
 test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', async ({ page }) => {
+  await page.route('**/api/v1/installed-packages**', (route) => route.fulfill({ json: { packages: [
+    { id: '033000000000001', name: 'Installed CRM', namespace: 'crm', orgAliases: ['right'] },
+    { id: '033000000000002', name: 'Keep Reports', namespace: 'reports', orgAliases: ['right'] },
+    { id: '033000000000003', name: 'Unlocked', namespace: null, orgAliases: ['right'], exclusionUnavailableReason: '네임스페이스가 없어 개별 제외를 지원하지 않습니다.' },
+  ] } }));
   await page.route('**/api/v1/workspace', async (route) => route.fulfill({
     json: {
       orgs: [],
@@ -397,8 +517,10 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   expect(desktopCurrentTypeToggleBox).not.toBeNull();
   expect(desktopIdenticalToggleBox).not.toBeNull();
   expect(desktopApexTestOptionsBox).not.toBeNull();
-  expect(Math.abs(desktopCurrentTypeToggleBox!.y - desktopComparisonButtonBox!.y)).toBeLessThan(2);
-  expect(Math.abs(desktopIdenticalToggleBox!.y - desktopComparisonButtonBox!.y)).toBeLessThan(2);
+  expect(desktopComparisonButtonBox!.y).toBeGreaterThanOrEqual(desktopCurrentTypeToggleBox!.y);
+  expect(desktopComparisonButtonBox!.y + desktopComparisonButtonBox!.height).toBeLessThanOrEqual(desktopCurrentTypeToggleBox!.y + desktopCurrentTypeToggleBox!.height);
+  expect(desktopComparisonButtonBox!.y).toBeGreaterThanOrEqual(desktopIdenticalToggleBox!.y);
+  expect(desktopComparisonButtonBox!.y + desktopComparisonButtonBox!.height).toBeLessThanOrEqual(desktopIdenticalToggleBox!.y + desktopIdenticalToggleBox!.height);
   expect(desktopIdenticalToggleBox!.x + desktopIdenticalToggleBox!.width).toBeLessThan(desktopComparisonButtonBox!.x);
   expect(desktopComparisonButtonBox!.y + desktopComparisonButtonBox!.height).toBeLessThan(desktopApexTestOptionsBox!.y);
   await page.setViewportSize({ width: 390, height: 844 });
@@ -419,13 +541,21 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(workflowStatus.getByText(/SSE 연결이 끊기면/u)).toHaveCount(0);
   const compareCurrentType = comparisonOptions.getByRole('checkbox', { name: /현재 타입 비교 실행/u });
   const showIdentical = comparisonOptions.getByRole('checkbox', { name: /동일 항목 표시/u });
+  const excludePackages = comparisonOptions.getByRole('checkbox', { name: 'Installed CRM 비교에서 제외' });
+  await expect(excludePackages).not.toBeChecked();
+  await excludePackages.check();
+  await expect(comparisonOptions.getByRole('checkbox', { name: 'Keep Reports 비교에서 제외' })).not.toBeChecked();
+  await expect(comparisonOptions.getByRole('checkbox', { name: 'Unlocked 비교에서 제외' })).toBeDisabled();
   await compareCurrentType.uncheck();
+  await expect(excludePackages).not.toBeChecked();
+  await excludePackages.check();
   await expect(showIdentical).toBeDisabled();
   await expect(comparisonOptions.getByText('3개 metadata type 검색 가능 · source 기준')).toBeVisible();
   await expect.poll(() => metadataTypeSourceIds.at(-1)).toBe('org:right');
   await comparisonButton.click();
   await expect.poll(() => sourceOnlyRequest).toMatchObject({
     scope: 'all', metadataType: 'ApexClass', rightSourceId: 'org:right', sourceOnly: true,
+    excludedPackageIds: ['033000000000001'],
   });
   expect(sourceOnlyRequest).not.toHaveProperty('leftSourceId');
   const sourceOnlyLoadingButton = comparisonOptions.getByRole('button', { name: '메타데이터 받는 중……' });
@@ -438,6 +568,8 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(sourceOnlyResult.locator('.component-status')).toHaveText('SOURCE');
   await expect(sourceOnlyResult.getByLabel('Hello 배포 대상으로 선택')).toBeEnabled();
   await expect(sourceOnlyResult.getByText('TARGET ONLY', { exact: true })).toHaveCount(0);
+  await excludePackages.uncheck();
+  await expect(sourceOnlyResult).toHaveCount(0);
   await compareCurrentType.check();
   await expect(showIdentical).toBeEnabled();
   await showIdentical.check();
@@ -761,13 +893,17 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(metadataResults.locator('.component-result')).toHaveCount(20);
   const resultPagination = page.getByRole('navigation', { name: '메타데이터 검색 결과 페이지' });
   await expect(resultPagination).toContainText('1 / 3페이지 · 1-20 / 42개');
-  await resultPagination.getByRole('button', { name: '다음 페이지' }).click();
+  await expect(resultPagination.getByRole('button', { name: '1 페이지', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect(resultPagination.getByRole('button', { name: '이전 페이지' })).toBeDisabled();
+  await resultPagination.getByRole('button', { name: '2 페이지', exact: true }).click();
   await expect(metadataResults.locator('.component-result')).toHaveCount(20);
   await expect(page.getByText('Paged19', { exact: true })).toBeVisible();
   await expect(page.getByText('NewClass', { exact: true })).toHaveCount(0);
   await resultPagination.getByRole('button', { name: '다음 페이지' }).click();
   await expect(metadataResults.locator('.component-result')).toHaveCount(2);
   await expect(resultPagination).toContainText('3 / 3페이지 · 41-42 / 42개');
+  await expect(resultPagination.getByRole('button', { name: '3 페이지', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect(resultPagination.getByRole('button', { name: '다음 페이지' })).toBeDisabled();
   await resultPagination.getByRole('button', { name: '이전 페이지' }).click();
   await resultPagination.getByRole('button', { name: '이전 페이지' }).click();
   await page.getByLabel('NewClass 배포 대상으로 선택').check();
@@ -874,6 +1010,66 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(diagnostics.getByText(/8\.696%.*75%/u)).toBeVisible();
 });
 
+for (const width of [1440, 320]) {
+  test(`메타데이터 페이지 번호 이동과 검색 초기화를 지원한다 (${width}px)`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    const errors: string[] = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+    await mockResponsiveWorkspace(page);
+    const components = Array.from({ length: 201 }, (_, index) => {
+      const fullName = `Paged${String(index + 1).padStart(3, '0')}`;
+      return { key: `ApexClass:${fullName}`, type: 'ApexClass', fullName, status: 'ADDED', files: [] };
+    });
+    const job = { ...deploymentComparisonFixture('SUCCEEDED'),
+      right: { id: 'org:source', kind: 'org', label: 'source' },
+      result: { summary: { added: 201, removed: 0, modified: 0, identical: 0, total: 201, different: 201 }, warnings: [], components } };
+    await page.route('**/api/v1/comparisons**', (route) => route.fulfill({
+      status: route.request().method() === 'POST' ? 202 : 200,
+      json: route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/v1/comparisons' ? { jobs: [] } : { job },
+    }));
+    await login(page, '/deploy');
+    await page.getByRole('button', { name: '메타데이터 받아오기' }).click();
+    const pagination = page.getByRole('navigation', { name: '메타데이터 검색 결과 페이지' });
+    const numbers = pagination.locator('.component-page-numbers button');
+    const previous = pagination.getByRole('button', { name: '이전 페이지' });
+    const next = pagination.getByRole('button', { name: '다음 페이지' });
+    await expect(numbers).toHaveText(['1', '2', '3', '4', '5']);
+    await expect(previous).toBeDisabled();
+    await expect(previous.locator('.icon')).toHaveCSS('transform', 'matrix(-1, 0, 0, -1, 0, 0)');
+    await expect(next.locator('.icon')).toHaveCSS('transform', 'none');
+    await page.getByLabel('Paged001 배포 대상으로 선택').check();
+    for (const target of [5, 7, 9, 11]) {
+      const button = pagination.getByRole('button', { name: `${target} 페이지`, exact: true });
+      await button.focus();
+      await button.press('Enter');
+      await expect(button).toHaveAttribute('aria-current', 'page');
+    }
+    await expect(numbers).toHaveText(['7', '8', '9', '10', '11']);
+    await expect(page.locator('.component-result')).toHaveCount(1);
+    await expect(pagination).toContainText('11 / 11페이지 · 201-201 / 201개');
+    await expect(next).toBeDisabled();
+    await next.scrollIntoViewIfNeeded();
+    for (const button of await pagination.getByRole('button').all()) {
+      const box = await button.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+    }
+    await page.screenshot({ path: testInfo.outputPath(`pagination-${width}.png`) });
+    await previous.click();
+    await expect(pagination.getByRole('button', { name: '10 페이지', exact: true })).toHaveAttribute('aria-current', 'page');
+    await page.getByRole('searchbox', { name: '메타데이터 검색', exact: true }).fill('Paged201');
+    await expect(pagination).toHaveCount(0);
+    await expect(page.locator('.component-result')).toHaveCount(1);
+    await page.getByRole('button', { name: '필터 초기화' }).click();
+    await expect(numbers).toHaveText(['1', '2', '3', '4', '5']);
+    await expect(previous).toBeDisabled();
+    await expect(page.getByLabel('Paged001 배포 대상으로 선택')).toBeChecked();
+    expect(errors).toEqual([]);
+  });
+}
+
 test('제품 파비콘을 제공한다', async ({ page, request }) => {
   await page.goto('http://127.0.0.1:27546');
   await expect(page.locator('link[rel="icon"]')).toHaveAttribute('href', '/favicon.svg');
@@ -885,9 +1081,9 @@ test('제품 파비콘을 제공한다', async ({ page, request }) => {
 test('로그아웃하면 보호된 콘솔을 다시 숨긴다', async ({ page }) => {
   await login(page);
   await page.getByRole('button', { name: '로그아웃' }).click();
-  await expect(page.getByRole('heading', { name: '다시 오셨군요.' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '로그인', exact: true })).toBeVisible();
   await page.reload();
-  await expect(page.getByRole('heading', { name: '다시 오셨군요.' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '로그인', exact: true })).toBeVisible();
 });
 
 async function login(page: Page, path = '/') {

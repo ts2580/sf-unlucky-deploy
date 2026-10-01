@@ -13,6 +13,8 @@ coverage/
 .sf/
 .sfdx/
 .sfud/
+/.sfud-local/
+sf-unlucky-deploy-source-*.zip
 AGENTS.md
 working/
 playwright-report/

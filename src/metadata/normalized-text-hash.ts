@@ -8,12 +8,17 @@ export async function normalizedTextHash(filePath: string): Promise<string | und
   const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
   let first = true;
   let pendingCr = false;
+  let endsWithNewline = true;
   const update = (text: string) => {
     if (text.length === 0) return;
     if (first) { text = text.replace(/^\uFEFF/u, ''); first = false; }
     if (pendingCr && text.startsWith('\n')) text = text.slice(1);
     pendingCr = text.endsWith('\r');
-    hash.update(text.replace(/\r\n?/gu, '\n'));
+    const normalized = text.replace(/\r\n?/gu, '\n');
+    if (normalized.length > 0) {
+      hash.update(normalized);
+      endsWithNewline = normalized.endsWith('\n');
+    }
   };
   for await (const chunk of createReadStream(filePath)) {
     const bytes = chunk as Buffer;
@@ -27,5 +32,6 @@ export async function normalizedTextHash(filePath: string): Promise<string | und
   try { final = decoder.decode(); }
   catch { return undefined; }
   update(final);
+  if (!endsWithNewline) hash.update('\n');
   return hash.digest('hex');
 }

@@ -163,6 +163,43 @@ describe('deploy command', () => {
     expect(result.comparison.left.manifestSha256).toBe(result.comparison.right.manifestSha256);
   });
 
+  it.each([undefined, 'ApexClass'])('커버리지는 비교 합집합이 아닌 고정 payload로 검사한다: %s', async (metadataType) => {
+    const fixture = await createDeployFixture(temporaryDirectories);
+    await writeFile(path.join(fixture.projectPath, 'sfdx-project.json'), JSON.stringify({
+      packageDirectories: [{ path: 'force-app' }], sourceApiVersion: '67.0',
+    }));
+    await mkdir(path.join(fixture.projectPath, 'force-app'), { recursive: true });
+    const client = new DeployablePayloadSfClient();
+    const result = await runDeployCommand({
+      from: `local:${fixture.projectPath}`, to: 'target', allMetadata: true,
+      ...(metadataType === undefined ? {} : { metadataType }),
+      reportDir: fixture.runDirectory, execute: true, minimumCoverage: 75, color: false,
+    }, { cwd: fixture.projectPath, sfClient: client, stdout: () => undefined });
+    expect(result.executed).toBe(true);
+    expect(result.comparison.components).toContainEqual(expect.objectContaining({ fullName: 'TargetOnly', status: 'REMOVED' }));
+    expect(client.deployedManifest).not.toContain('TargetOnly');
+    expect(deploymentStartCalls(client.calls)).toHaveLength(2);
+  });
+
+  it.each([undefined, 20])('실제 payload 클래스의 누락 또는 낮은 커버리지는 계속 차단한다: %s', async (coverage) => {
+    const fixture = await createDeployFixture(temporaryDirectories);
+    await writeFile(path.join(fixture.projectPath, 'sfdx-project.json'), JSON.stringify({
+      packageDirectories: [{ path: 'force-app' }], sourceApiVersion: '67.0',
+    }));
+    await mkdir(path.join(fixture.projectPath, 'force-app'), { recursive: true });
+    const client = new DeployablePayloadSfClient();
+    client.coverage = coverage === undefined ? [] : [
+      { name: 'Shared', numLocations: 100, numLocationsNotCovered: 100 - coverage },
+      { name: 'SourceOnly', numLocations: 100, numLocationsNotCovered: 0 },
+    ];
+    await expect(runDeployCommand({
+      from: `local:${fixture.projectPath}`, to: 'target', allMetadata: true,
+      reportDir: fixture.runDirectory, execute: true, minimumCoverage: 75, color: false,
+    }, { cwd: fixture.projectPath, sfClient: client, stdout: () => undefined }))
+      .rejects.toMatchObject({ code: 'DEPLOY_FAILED' });
+    expect(deploymentStartCalls(client.calls)).toHaveLength(1);
+  });
+
   it('동적 source가 변해도 최초 검증한 변환 payload를 실제 배포한다', async () => {
     const fixture = await createDeployFixture(temporaryDirectories);
     await writeFile(path.join(fixture.projectPath, 'sfdx-project.json'), JSON.stringify({
@@ -289,6 +326,10 @@ class DeployablePayloadSfClient implements SfClient {
   public deployedManifest = '';
   public deployedClassNames: readonly string[] = [];
   private conversionCount = 0;
+  public coverage = [
+    { name: 'Shared', numLocations: 100, numLocationsNotCovered: 0 },
+    { name: 'SourceOnly', numLocations: 100, numLocationsNotCovered: 0 },
+  ];
 
   public constructor(
     private readonly sourceMembers: readonly string[] = ['Shared', 'SourceOnly'],
@@ -339,7 +380,9 @@ class DeployablePayloadSfClient implements SfClient {
       return { status: 0, result: { id: '0Af-source-only', status: 'Queued', done: false } };
     }
     if (args[0] === 'project' && args[1] === 'deploy' && args[2] === 'report') {
-      return { status: 0, result: { id: '0Af-source-only', status: 'Succeeded', done: true, success: true } };
+      return { status: 0, result: { id: '0Af-source-only', status: 'Succeeded', done: true, success: true,
+        details: { runTestResult: { codeCoverage: this.coverage } },
+      } };
     }
     throw new Error(`예상하지 못한 sf 명령: ${args.join(' ')}`);
   }

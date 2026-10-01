@@ -133,8 +133,7 @@ export class DryRunService {
         targetOrgIdentity: prepared.targetOrgIdentity,
         ...(prepared.sourceOrgIdentity === undefined ? {} : { sourceOrgIdentity: prepared.sourceOrgIdentity }),
         createdBy: input.createdBy,
-        ...([input.sourceId, input.projectId].some((id) => /^(git|upload):/u.test(id ?? ''))
-          ? { accessOwnerUserId: input.createdBy } : {}),
+        accessOwnerUserId: input.createdBy,
         clientRequestId: input.clientRequestId,
         requestHash,
         scope: prepared.scope === 'all' ? 'ALL' : 'MANIFEST',
@@ -301,8 +300,7 @@ export class DryRunService {
         targetOrgIdentity: prepared.targetOrgIdentity,
         ...(prepared.sourceOrgIdentity === undefined ? {} : { sourceOrgIdentity: prepared.sourceOrgIdentity }),
         createdBy: input.createdBy,
-        ...([input.sourceId, input.projectId].some((id) => /^(git|upload):/u.test(id ?? ''))
-          ? { accessOwnerUserId: input.createdBy } : {}),
+        accessOwnerUserId: input.createdBy,
         scope: prepared.scope === 'all' ? 'ALL' : 'MANIFEST',
         ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
         ...(prepared.selectedComponents === undefined ? {} : { selectedComponents: prepared.selectedComponents }),
@@ -367,7 +365,7 @@ export class DryRunService {
           beforeDeploymentSubmit: async (phase, payload) => {
             if (phase === 'DEPLOY') {
               await this.jobs.assertAccess(job.id, input.createdBy);
-              await this.orgExecutionAccess?.assertCanExecute(job.targetAlias, input.createdBy);
+              await this.orgExecutionAccess?.assertCanExecute(requiredString(job.targetOrgIdentity?.orgId, '대상 Org ID'), input.createdBy);
             }
             await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
             attempts.set(phase, await this.jobs.attempts.begin({

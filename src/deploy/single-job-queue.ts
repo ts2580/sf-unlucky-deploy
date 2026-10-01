@@ -1,10 +1,12 @@
+import { AsyncResource } from 'node:async_hooks';
+
 export interface JobQueueStatus {
   activeJobId?: string;
   queuedCount: number;
   accepting: boolean;
 }
 
-class JobQueueClosedError extends Error {
+export class JobQueueClosedError extends Error {
   public constructor() {
     super('서버가 종료 중이어서 새 작업을 받을 수 없습니다.');
     this.name = 'JobQueueClosedError';
@@ -81,8 +83,11 @@ export class SingleJobQueue {
       return Promise.reject(new Error(`이미 대기 중이거나 실행 중인 작업입니다: ${jobId}`));
     }
     const result = new Promise<T>((resolve, reject) => {
+      // Capture the complete async-local context at admission time. A queued task
+      // must not inherit the context that happens to drain the queue.
+      const runInEnqueueContext = AsyncResource.bind(task);
       this.pending.push({ id: jobId, run: async (signal) => {
-        try { resolve(await task(signal)); } catch (error) { reject(error); }
+        try { resolve(await runInEnqueueContext(signal)); } catch (error) { reject(error); }
       } });
     });
     this.completions.add(result);

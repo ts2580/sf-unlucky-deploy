@@ -2,7 +2,7 @@ import type { ApiCredential } from '../git-credential-provider.js';
 import { GitError } from '../git-errors.js';
 import type { GitProvider, GitRefPage, GitRepositoryInfo } from '../git-provider.js';
 import { validateProviderUrl } from '../git-network.js';
-import { normalizeRepository, validateGitRef, type GitRef, type GitRepositoryAddress } from '../git-repository.js';
+import { connectionRepositoryPath, normalizeRepository, validateGitRef, type GitRef, type GitRepositoryAddress } from '../git-repository.js';
 import { arrayBody, commitSha, ProviderApi, record, stringField } from './provider-api.js';
 
 export class BitbucketProvider implements GitProvider {
@@ -41,6 +41,7 @@ export class BitbucketProvider implements GitProvider {
 
   private endpoint(address: GitRepositoryAddress): string {
     const normalized = normalizeRepository(address.cloneUrl, this.id);
+    if (connectionRepositoryPath(normalized) !== normalized.repositoryPath) throw new GitError('GIT_CONNECTION_REQUIRED');
     return `https://api.bitbucket.org/2.0/repositories/${normalized.repositoryPath.split('/').map(encodeURIComponent).join('/')}`;
   }
 }

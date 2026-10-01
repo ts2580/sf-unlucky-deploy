@@ -3,7 +3,7 @@ import { request } from 'node:https';
 import { BlockList, isIP } from 'node:net';
 import { GitError } from './git-errors.js';
 
-const hosts = new Set(['github.com', 'api.github.com', 'gitlab.com', 'bitbucket.org', 'api.bitbucket.org']);
+const providerApiHosts = new Set(['github.com', 'api.github.com', 'gitlab.com', 'bitbucket.org', 'api.bitbucket.org']);
 const forbidden = new BlockList();
 for (const [network, prefix] of [
   ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16],
@@ -23,21 +23,63 @@ export function isPublicGitAddress(address: string): boolean {
   return family === 6 && globalV6.check(address, 'ipv6') && !forbidden.check(address, 'ipv6');
 }
 
+/**
+ * Explicit operator policy for a self-hosted Git FQDN that resolves to a
+ * non-public address. Addresses (not hostnames or ranges) are intentional:
+ * the resolver must still pin the actual DNS answer before Git connects.
+ */
+export interface GitHostPolicy {
+  readonly allowedAddresses: readonly string[];
+  allows(address: string, family: 'ipv4' | 'ipv6'): boolean;
+}
+
+export function gitHostPolicyFromAddresses(addresses: readonly string[] = []): GitHostPolicy {
+  const normalized = [...new Set(addresses.map(normalizeGitHostIpAddress))];
+  const allowedAddresses = new BlockList();
+  for (const address of normalized) {
+    allowedAddresses.addAddress(address, isIP(address) === 4 ? 'ipv4' : 'ipv6');
+  }
+  return { allowedAddresses: normalized, allows: (address, family) => allowedAddresses.check(address, family) };
+}
+
+export class MutableGitHostPolicy implements GitHostPolicy {
+  private current = gitHostPolicyFromAddresses();
+  public get allowedAddresses(): readonly string[] { return this.current.allowedAddresses; }
+  public allows(address: string, family: 'ipv4' | 'ipv6'): boolean { return this.current.allows(address, family); }
+  public replaceAddresses(addresses: readonly string[]): void { this.current = gitHostPolicyFromAddresses(addresses); }
+}
+
+export function normalizeGitHostIpAddress(value: string): string {
+  const address = value.trim();
+  if (address === '' || isIP(address) === 0) {
+    throw new Error('Git 허용 IP는 IPv4 또는 IPv6 주소여야 합니다.');
+  }
+  return address;
+}
+
+export function gitHostPolicyFromEnvironment(environment: NodeJS.ProcessEnv = process.env): GitHostPolicy {
+  const configured = environment.SFUD_GIT_ALLOWED_IPS;
+  if (configured === undefined) return gitHostPolicyFromAddresses();
+  return gitHostPolicyFromAddresses(configured.split(','));
+}
+
 export function validateProviderUrl(value: string, expectedHost?: string): URL {
   let url: URL;
   try { url = new URL(value); } catch { throw new GitError('INVALID_REPOSITORY'); }
-  if (url.protocol !== 'https:' || !hosts.has(url.hostname) || (expectedHost !== undefined && url.hostname !== expectedHost)
+  if (url.protocol !== 'https:' || !providerApiHosts.has(url.hostname) || (expectedHost !== undefined && url.hostname !== expectedHost)
     || url.port !== '' || url.username !== '' || url.password !== '' || url.hash !== ''
     || /[\u0000-\u0020\u007f\\]/u.test(value)) throw new GitError('INVALID_REPOSITORY');
   return url;
 }
 
-export async function resolveGitHost(host: string): Promise<{ address: string; family: 4 | 6 }> {
-  if (!hosts.has(host)) throw new GitError('INVALID_REPOSITORY');
+export async function resolveGitHost(host: string, policy: GitHostPolicy = gitHostPolicyFromAddresses()): Promise<{ address: string; family: 4 | 6 }> {
   let addresses;
   try { addresses = await lookup(host, { all: true, verbatim: true }); }
   catch { throw new GitError('REPOSITORY_UNAVAILABLE'); }
-  if (addresses.length === 0 || addresses.some((entry) => !isPublicGitAddress(entry.address))) throw new GitError('INVALID_REPOSITORY');
+  if (addresses.length === 0 || addresses.some((entry) => {
+    const family = entry.family === 4 ? 'ipv4' : 'ipv6';
+    return !isPublicGitAddress(entry.address) && !policy.allows(entry.address, family);
+  })) throw new GitError('INVALID_REPOSITORY');
   const selected = addresses.find((entry) => entry.family === 4) ?? addresses[0]!;
   return { address: selected.address, family: selected.family as 4 | 6 };
 }

@@ -13,7 +13,7 @@ function tableFor(type: JobType): string {
 
 export function jobVisibilitySql(type: JobType): string {
   const table = tableFor(type);
-  return `(${table}.access_owner_user_id IS NULL OR ${table}.access_owner_user_id = ? OR EXISTS (
+  return `(${table}.access_owner_user_id = ? OR EXISTS (
     SELECT 1 FROM job_access_grants g WHERE g.job_type = '${type}'
     AND g.job_id = ${table}.id AND g.user_id = ?
   ))`;
@@ -34,7 +34,7 @@ async function canAccessJob(
   const row = await database.get<{ allowed: number }>(`
     SELECT 1 AS allowed FROM ${table} j
     WHERE j.id = ? AND (
-      j.access_owner_user_id IS NULL OR j.access_owner_user_id = ? OR EXISTS (
+      j.access_owner_user_id = ? OR EXISTS (
         SELECT 1 FROM job_access_grants g WHERE g.job_type = ? AND g.job_id = j.id
         AND g.user_id = ? AND (? = 'READ' OR g.permission = 'EXECUTE')
       )

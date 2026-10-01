@@ -13,15 +13,78 @@ import { createWebServer } from '../src/web/server/app.js';
 const origin = 'https://deploy.example.com';
 const password = 'correct horse battery staple';
 const roots: string[] = [];
-const initialTokenSecret = process.env.SFUD_GIT_TOKEN_SECRET;
+const initialTokenSecret = process.env.SFUD_TOKEN_SECRET;
+const legacySecrets = { SFUD_GIT_TOKEN_SECRET: process.env.SFUD_GIT_TOKEN_SECRET, SFUD_SF_TOKEN_SECRET: process.env.SFUD_SF_TOKEN_SECRET };
 
 afterEach(async () => {
-  for (const name of ['SFUD_GIT_TOKEN_KEY_FILE', 'SFUD_GIT_TOKEN_KEY_VERSION', 'SFUD_GIT_TOKEN_SECRET']) delete process.env[name];
-  if (initialTokenSecret !== undefined) process.env.SFUD_GIT_TOKEN_SECRET = initialTokenSecret;
+  for (const name of ['SFUD_GIT_TOKEN_KEY_FILE', 'SFUD_GIT_TOKEN_KEY_VERSION', 'SFUD_TOKEN_SECRET']) delete process.env[name];
+  for (const [key, value] of Object.entries(legacySecrets)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+  if (initialTokenSecret !== undefined) process.env.SFUD_TOKEN_SECRET = initialTokenSecret;
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 describe('Git PAT/API token 연결 라우트', { timeout: 30_000 }, () => {
+  it('저장소 별칭은 소유자만 변경하며 URL·credential·tokenVersion을 보존하고 토큰 교체 후 유지한다', async () => {
+    const fixture = await createFixture();
+    try {
+      const owner = await bootstrap(fixture.server);
+      const payload = { provider: 'gitlab', token: 'alias-token-fixture', repositoryPath: 'https://git.example.com/group/repository.git' };
+      const created = await fixture.server.inject({ method: 'POST', url: '/api/v1/git/connections', headers: headers(owner), payload });
+      expect(created.statusCode, created.body).toBe(201);
+      const id = created.json().connection.id as string;
+      const url = `/api/v1/git/connections/${id}/alias`;
+      const db = fixture.server.sfudRuntime.store.database;
+      const before = await db.get('SELECT encrypted_access_token, token_version, repository_path, provider_host FROM git_connections WHERE id = ?', id);
+      expect((await fixture.server.inject({ method: 'PATCH', url, payload: { alias: '새 이름' } })).statusCode).toBe(401);
+      expect((await fixture.server.inject({ method: 'PATCH', url, headers: { cookie: owner.cookie }, payload: { alias: '새 이름' } })).statusCode).toBe(403);
+      for (const role of ['ADMIN', 'VIEWER'] as const) {
+        const user = await fixture.server.sfudRuntime.auth.createManagedUser({ actorUserId: owner.userId, email: `alias-${role}@example.com`, displayName: role, role, password });
+        const session = await login(fixture.server, user.email);
+        expect((await fixture.server.inject({ method: 'PATCH', url, headers: headers(session), payload: { alias: '변경 불가' } })).statusCode).toBe(role === 'ADMIN' ? 404 : 403);
+      }
+      for (const alias of ['a'.repeat(81), '줄\n바꿈']) expect((await fixture.server.inject({ method: 'PATCH', url, headers: headers(owner), payload: { alias } })).statusCode).toBe(400);
+      const renamed = await fixture.server.inject({ method: 'PATCH', url, headers: headers(owner), payload: { alias: '  커넥스 운영  ' } });
+      expect(renamed.statusCode, renamed.body).toBe(200);
+      expect(renamed.json().connection).toMatchObject({ alias: '커넥스 운영', repositoryPath: payload.repositoryPath });
+      expect(await db.get('SELECT encrypted_access_token, token_version, repository_path, provider_host FROM git_connections WHERE id = ?', id)).toEqual(before);
+      expect((await new GitConnectionRepository(db).list(owner.userId))[0]?.alias).toBe('커넥스 운영');
+      const replaced = await fixture.server.inject({ method: 'PUT', url: `/api/v1/git/connections/${id}`, headers: headers(owner), payload: { ...payload, token: 'replacement-fixture' } });
+      expect(replaced.statusCode, replaced.body).toBe(200);
+      expect(replaced.json().connection.alias).toBe('커넥스 운영');
+      const cleared = await fixture.server.inject({ method: 'PATCH', url, headers: headers(owner), payload: { alias: '  ' } });
+      expect(cleared.json().connection.alias).toBeUndefined();
+    } finally { await fixture.close(); }
+  });
+
+  it('명시한 연결 대상 변경은 id·별칭을 보존하고 실패·중복·지연 교체를 안전하게 거부한다', async () => {
+    const fixture = await createFixture();
+    try {
+      const owner = await bootstrap(fixture.server);
+      const created = await fixture.server.inject({ method: 'POST', url: '/api/v1/git/connections', headers: headers(owner), payload: { provider: 'github', token: 'original-target-token' } });
+      const id = created.json().connection.id as string;
+      await fixture.server.inject({ method: 'PATCH', url: `/api/v1/git/connections/${id}/alias`, headers: headers(owner), payload: { alias: '내 연결' } });
+      const url = `/api/v1/git/connections/${id}`;
+      const target = { provider: 'gitlab', token: 'new-target-token', changeTarget: true };
+      fixture.setProviderStatus(401);
+      expect((await fixture.server.inject({ method: 'PUT', url, headers: headers(owner), payload: target })).statusCode).toBe(400);
+      expect((await fixture.server.sfudRuntime.gitConnections.readCredentials(owner.userId, id)).tokens.accessToken).toBe('original-target-token');
+      fixture.setProviderStatus(200);
+      const changed = await fixture.server.inject({ method: 'PUT', url, headers: headers(owner), payload: target });
+      expect(changed.statusCode, changed.body).toBe(200);
+      expect(changed.json().connection).toMatchObject({ id, alias: '내 연결', provider: 'gitlab', providerHost: 'gitlab.com' });
+      expect((await fixture.server.sfudRuntime.gitConnections.readCredentials(owner.userId, id)).tokens.accessToken).toBe('new-target-token');
+      await fixture.server.inject({ method: 'POST', url: '/api/v1/git/connections', headers: headers(owner), payload: { provider: 'github', token: 'another-target-token' } });
+      expect((await fixture.server.inject({ method: 'PUT', url, headers: headers(owner), payload: { ...target, provider: 'github' } })).statusCode).toBe(404);
+      expect((await fixture.server.sfudRuntime.gitConnections.readCredentials(owner.userId, id)).connection.provider).toBe('gitlab');
+      const delayed = fixture.blockNextProviderCall();
+      const changing = fixture.server.inject({ method: 'PUT', url, headers: headers(owner), payload: target });
+      await delayed.started;
+      await fixture.server.sfudRuntime.gitConnections.disconnect(owner.userId, id);
+      delayed.release();
+      expect([400, 404]).toContain((await changing).statusCode);
+    } finally { await fixture.close(); }
+  });
+
   it('인증·역할·CSRF를 요구하고 provider identity를 검증한 뒤 owner별 연결을 반환한다', async () => {
     const fixture = await createFixture();
     try {
@@ -145,15 +208,23 @@ describe('Git PAT/API token 연결 라우트', { timeout: 30_000 }, () => {
         { provider: 'github', token: 'github_pat_11AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', repositoryPath: 'https://github.com/acme/github-project.git' },
         { provider: 'gitlab', token: 'glpat-AAAAAAAAAAAAAAAAAAAA', repositoryPath: 'https://gitlab.com/group/project.git' },
         { provider: 'bitbucket', token: 'ATBB-AAAAAAAAAAAAAAAAAAAA', repositoryPath: 'https://bitbucket.org/acme/project.git' },
+        { provider: 'github', token: 'github_pat_11BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', repositoryPath: 'https://git.example.test/acme/self-hosted.git' },
+        { provider: 'gitlab', token: 'glpat-BBBBBBBBBBBBBBBBBBBB', repositoryPath: 'https://gitlab.hmc.co.kr/group/project.git' },
       ] as const;
       for (const input of inputs) {
         const response = await fixture.server.inject({ method: 'POST', url: '/api/v1/git/connections', headers: headers(owner), payload: input });
-        expect(response.statusCode, response.body).toBe(201);
-        expect(response.json()).toMatchObject({ connection: { provider: input.provider, repositoryPath: expect.stringContaining('project') } });
+        expect(response.statusCode, `${input.repositoryPath}: ${response.body}`).toBe(201);
+        expect(response.json()).toMatchObject({ connection: { provider: input.provider, repositoryPath: expect.any(String) } });
+        if (input.repositoryPath.includes('git.example.test')) {
+          expect(response.json()).toMatchObject({ connection: { providerHost: 'git.example.test', repositoryPath: input.repositoryPath } });
+        }
+        if (input.repositoryPath.includes('gitlab.hmc.co.kr')) {
+          expect(response.json()).toMatchObject({ connection: { providerHost: 'gitlab.hmc.co.kr', repositoryPath: input.repositoryPath } });
+        }
         expect(response.body).not.toContain(input.token);
       }
       expect(fixture.apiCalls).toEqual([]);
-      expect(fixture.remoteCalls).toEqual(['acme/github-project', 'group/project', 'acme/project']);
+      expect(fixture.remoteCalls).toEqual(['acme/github-project', 'group/project', 'acme/project', 'acme/self-hosted', 'group/project']);
     } finally { await fixture.close(); }
   });
 
@@ -277,6 +348,38 @@ describe('Git PAT/API token 연결 라우트', { timeout: 30_000 }, () => {
     } finally { await corrupted.close(); }
   });
 
+  it('기존 개별 키는 호환되고 공통 키 하나로 두 저장소를 재시작 후 복호화한다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-shared-token-secret-')); roots.push(root);
+    const databasePath = path.join(root, 'data/sfud.db');
+    const secret = 'shared-legacy-secret-fixture-'.repeat(2);
+    process.env.SFUD_GIT_TOKEN_SECRET = secret;
+    process.env.SFUD_SF_TOKEN_SECRET = secret;
+    const first = await createFixture({ databasePath });
+    let userId: string; let gitId: string; let sfId: string; let sfGeneration: number;
+    const sfUrl = 'force://PlatformCLI::shared-fixture-refresh-token@my.salesforce.com';
+    try {
+      expect(first.server.sfudRuntime.sfTokenStorageStatus).toBe('ready');
+      const owner = await bootstrap(first.server); userId = owner.userId;
+      const created = await first.server.inject({ method: 'POST', url: '/api/v1/git/connections', headers: headers(owner), payload: { provider: 'github', token: 'shared-fixture-token' } });
+      gitId = created.json().connection.id;
+      const sf = await first.server.sfudRuntime.sfConnections.upsert(userId, 'shared-org', { orgId: '00D000000000001', username: 'shared@example.com', instanceUrl: 'https://my.salesforce.com/' }, sfUrl);
+      sfId = sf.id; sfGeneration = sf.generation;
+    } finally { await first.close(); }
+    // Different legacy values must not override the canonical shared key.
+    process.env.SFUD_GIT_TOKEN_SECRET = 'different-git-fixture-'.repeat(2);
+    process.env.SFUD_SF_TOKEN_SECRET = 'different-sf-fixture-'.repeat(2);
+    const second = await createFixture({ databasePath, secret });
+    try {
+      expect((await second.server.sfudRuntime.gitConnections.readCredentials(userId!, gitId!)).tokens.accessToken).toBe('shared-fixture-token');
+      expect(await second.server.sfudRuntime.sfConnections.authUrl(userId!, sfId!, sfGeneration!)).toBe(sfUrl);
+    } finally { await second.close(); }
+    const invalid = await createFixture({ databasePath, secret: '' });
+    try {
+      expect(invalid.server.sfudRuntime.gitTokenStorageStatus).toBe('invalid_key');
+      expect(invalid.server.sfudRuntime.sfTokenStorageStatus).toBe('invalid_key');
+    } finally { await invalid.close(); }
+  });
+
   it('repository bound 연결은 재시작 뒤에도 경로와 암호화 자격 증명을 유지한다', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-git-bound-restart-')); roots.push(root);
     const databasePath = path.join(root, 'data/sfud.db');
@@ -354,8 +457,8 @@ describe('Git PAT/API token 연결 라우트', { timeout: 30_000 }, () => {
 async function createFixture(options: { environment?: NodeJS.ProcessEnv; key?: boolean; databasePath?: string; keyPath?: string; secret?: string } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-git-token-routes-')); roots.push(root);
   const keyPath = options.keyPath ?? path.join(root, 'git-token.key');
-  if (options.secret === undefined) delete process.env.SFUD_GIT_TOKEN_SECRET;
-  else process.env.SFUD_GIT_TOKEN_SECRET = options.secret;
+  if (options.secret === undefined) delete process.env.SFUD_TOKEN_SECRET;
+  else process.env.SFUD_TOKEN_SECRET = options.secret;
   if (options.key !== false) {
     await writeFile(keyPath, Buffer.alloc(32, 7), { mode: 0o600 }); await chmod(keyPath, 0o600);
     process.env.SFUD_GIT_TOKEN_KEY_FILE = keyPath; process.env.SFUD_GIT_TOKEN_KEY_VERSION = '1';
