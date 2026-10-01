@@ -188,7 +188,7 @@ export async function runDeployCommand(
   const deployArgs = buildDeployArgs(deploymentSnapshot.packageRoot, targetAlias, testPlan);
   const coverageInventory = options.minimumCoverage === undefined
     ? undefined
-    : payloadApexCoverageInventory(await readFile(manifestPath, 'utf8'), testPlan.tests);
+    : payloadApexCoverageInventory(await readFile(path.join(deploymentSnapshot.packageRoot, 'package.xml'), 'utf8'), testPlan.tests);
   const payloadEmpty = generatedManifest?.sourceManifests[1]?.empty === true;
   const persistenceWarnings: string[] = [];
   const dryRunResult = options.skipDryRun === true

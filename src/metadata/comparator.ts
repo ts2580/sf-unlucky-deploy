@@ -14,6 +14,7 @@ import { hasXmlSemanticPolicy } from './xml-semantics.js';
 import { projectChildMetadata } from './child-metadata-projection.js';
 import { normalizedTextHash } from './normalized-text-hash.js';
 import { compareLargeXml } from './large-xml-diff.js';
+import { belongsToPackage, type PackageExclusion } from './package-exclusion.js';
 
 export type DifferenceStatus = 'ADDED' | 'REMOVED' | 'MODIFIED' | 'IDENTICAL' | 'SOURCE';
 export type FileKind = 'xml' | 'text' | 'binary';
@@ -52,6 +53,7 @@ export interface ComparisonSummary {
 }
 
 export interface ComparisonResult {
+  packageExclusion?: PackageExclusion & { excludedComponents: number };
   comparisonLimit?: { maximumFiles: number; fileCount: number; exceeded: boolean };
   generatedAt: string;
   strict: boolean;
@@ -70,6 +72,7 @@ interface SnapshotReference {
 }
 
 export interface CompareOptions {
+  packageExclusion?: PackageExclusion;
   maximumFiles?: number;
   strict?: boolean;
   metadataType?: string;
@@ -111,6 +114,23 @@ async function comparePreparedSnapshots(
 
   const leftComponents = await resolveMetadataComponents(left.packageRoot, left.metadataTypes);
   const rightComponents = await resolveMetadataComponents(right.packageRoot, right.metadataTypes);
+  const excludedKeys = new Set<string>();
+  for (const components of [leftComponents, rightComponents]) {
+    for (const [key, component] of components) {
+      if (belongsToPackage(component.fullName, options.packageExclusion?.namespaces ?? [], component.type)) {
+        excludedKeys.add(key);
+        components.delete(key);
+      }
+    }
+  }
+  const packageExclusion = options.packageExclusion === undefined ? undefined
+    : { ...options.packageExclusion, excludedComponents: excludedKeys.size };
+  const packageWarnings = packageExclusion === undefined ? [] : [
+    `설치 패키지 제외: ${packageExclusion.excludedComponents}개 컴포넌트 (네임스페이스: ${packageExclusion.namespaces.join(', ') || '없음'}).`,
+    ...(packageExclusion.unnamespacedPackages.length === 0 ? [] : [
+      `네임스페이스가 없어 제외하지 않은 패키지: ${packageExclusion.unnamespacedPackages.join(', ')}.`,
+    ]),
+  ];
   // Count each relative path once, including companion metadata but excluding package.xml.
   const fileCount = new Set([...leftComponents.values(), ...rightComponents.values()]
     .flatMap((component) => component.files)).size;
@@ -128,7 +148,8 @@ async function comparePreparedSnapshots(
       generatedAt: new Date().toISOString(), strict: options.strict ?? false,
       left: snapshotReference(left), right: snapshotReference(right),
       summary: summarize(components), components, comparisonLimit,
-      warnings: [`비교 대상 파일 ${fileCount.toLocaleString('ko-KR')}개가 설정한 최대 ${options.maximumFiles!.toLocaleString('ko-KR')}개를 초과하여 비교하지 않았습니다. Source 목록에서 배포 대상을 선택할 수 있습니다. 설정 변경 후 다시 불러오면 재확인합니다.`],
+      ...(packageExclusion === undefined ? {} : { packageExclusion }),
+      warnings: [...packageWarnings, `비교 대상 파일 ${fileCount.toLocaleString('ko-KR')}개가 설정한 최대 ${options.maximumFiles!.toLocaleString('ko-KR')}개를 초과하여 비교하지 않았습니다. Source 목록에서 배포 대상을 선택할 수 있습니다. 설정 변경 후 다시 불러오면 재확인합니다.`],
     };
   }
   const keys = [...new Set([...leftComponents.keys(), ...rightComponents.keys()])].sort((a, b) =>
@@ -154,6 +175,7 @@ async function comparePreparedSnapshots(
   const warnings = hasPermissionMetadata
     ? ['Profile과 PermissionSet 결과는 동일 manifest에 포함된 메타데이터 범위 안에서만 유효합니다.']
     : [];
+  warnings.push(...packageWarnings);
   if (components.some((component) => component.files.some((file) => file.diffTruncated === true))) {
     warnings.push('비교 판정은 전체 내용을 기준으로 수행했으며 상세 diff 일부를 생략했습니다. 대형 XML은 자식 항목 단위의 요약을 표시합니다.');
   }
@@ -170,6 +192,7 @@ async function comparePreparedSnapshots(
 
   return {
     ...(comparisonLimit === undefined ? {} : { comparisonLimit }),
+    ...(packageExclusion === undefined ? {} : { packageExclusion }),
     generatedAt: new Date().toISOString(),
     strict: options.strict ?? false,
     left: snapshotReference(left),
@@ -500,7 +523,9 @@ function boundedUnifiedDiff(value: string): { unifiedDiff: string; diffTruncated
 }
 
 function normalizeText(value: string): string {
-  return value.replace(/^\uFEFF/u, '').replace(/\r\n?/gu, '\n');
+  const text = value.replace(/^\uFEFF/u, '').replace(/\r\n?/gu, '\n');
+  // Ignore a missing final line terminator, while preserving extra blank lines.
+  return text.length === 0 || text.endsWith('\n') ? text : `${text}\n`;
 }
 
 function sha256(value: Buffer): string {

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -220,6 +220,68 @@ describe('XML normalization regressions', () => {
     if (_kind === 'xml') {
       expect(normalFile).toMatchObject({ xmlSemanticStatus: 'EQUAL', rawContentChanged: true });
       expect(strictFile).toMatchObject({ xmlSemanticStatus: 'EQUAL', rawContentChanged: true });
+    }
+  });
+
+  it.each([
+    [0, '\n'], [0, '\r\n'], [0, '\r'],
+    [MAX_DIFF_INPUT_BYTES + 1, '\n'],
+    [MAX_DIFF_INPUT_BYTES + 1, '\r\n'],
+    [MAX_DIFF_INPUT_BYTES + 1, '\r'],
+  ] as const)('ignores a missing final newline (padding %i, ending %j) without changing source bytes', async (padding, ending) => {
+    const root = await createComparisonRoots(temporaryDirectories);
+    const files = {
+      'classes/FinalNewline.cls': `public class FinalNewline {\n//${'x'.repeat(padding)}\n}`,
+      'docs/FinalNewline.xml': `<Root><text>${'x'.repeat(padding)}</text></Root>`,
+    };
+    await Promise.all([
+      writeFixtureFiles(root.left, files),
+      writeFixtureFiles(root.right, Object.fromEntries(
+        Object.entries(files).map(([name, content]) => [name, `${content.replace(/\n/gu, ending)}${ending}`]),
+      )),
+    ]);
+    for (const strict of [false, true]) {
+      for (const [left, right] of [[root.left, root.right], [root.right, root.left]] as const) {
+        const result = await compareSnapshots(snapshot(left, 'left'), snapshot(right, 'right'), { strict });
+        expect(result.summary).toMatchObject({ total: 2, identical: 2, modified: 0 });
+        for (const file of result.components.flatMap((component) => component.files)) {
+          expect(file.unifiedDiff).toBeUndefined();
+          expect(file.leftSha256).toBeDefined();
+          expect(file.leftSha256).not.toBe(file.rightSha256);
+        }
+      }
+    }
+    for (const [name, content] of Object.entries(files)) {
+      expect(await readFile(path.join(root.left, name), 'utf8')).toBe(content);
+      expect(await readFile(path.join(root.right, name), 'utf8')).toBe(`${content.replace(/\n/gu, ending)}${ending}`);
+    }
+  });
+
+  it.each([0, MAX_DIFF_INPUT_BYTES + 1])('retains code, whitespace and extra blank-line differences (padding %i)', async (padding) => {
+    const root = await createComparisonRoots(temporaryDirectories);
+    const prefix = `public class Changed {\n//${'x'.repeat(padding)}\n`;
+    await Promise.all([
+      writeFixtureFiles(root.left, {
+        'classes/Code.cls': `${prefix}String value = 'before';\n}`,
+        'classes/Blank.cls': `${prefix}}\n`,
+        'classes/Space.cls': `${prefix}}`,
+        'classes/Empty.cls': '',
+      }),
+      writeFixtureFiles(root.right, {
+        'classes/Code.cls': `${prefix}String value = 'after';\n}\n`,
+        'classes/Blank.cls': `${prefix}}\n\n`,
+        'classes/Space.cls': `${prefix}} \n`,
+        'classes/Empty.cls': '\n',
+      }),
+    ]);
+    const result = await compareSnapshots(snapshot(root.left, 'left'), snapshot(root.right, 'right'));
+    expect(result.summary).toMatchObject({ total: 4, modified: 4, identical: 0 });
+    if (padding === 0) {
+      const diff = result.components.find((component) => component.key === 'ApexClass:Code')?.files[0]?.unifiedDiff;
+      expect(diff).toContain("-String value = 'before';");
+      expect(diff).toContain("+String value = 'after';");
+      expect(diff).not.toContain('No newline at end of file');
+      expect(diff?.split('\n')).not.toContain('-}');
     }
   });
 

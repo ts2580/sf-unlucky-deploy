@@ -126,8 +126,19 @@ export class DeploymentAttemptRepository {
       `, input.attemptId, input.jobId);
       if (attempt === undefined || attempt.operation !== input.operation
         || attempt.submission_state !== 'SUBMITTING'
-        || attempt.validation_id !== null || attempt.deployment_id !== null) {
+        || (attempt.operation === 'VALIDATE' ? attempt.validation_id : attempt.deployment_id) !== null) {
         throw new SfudError('INVALID_JOB_STATE', '관리자 연결 대상인 ID 없는 제출 attempt가 아닙니다.');
+      }
+      const duplicate = await transaction.get<{ id: string }>(`
+        SELECT id FROM deployment_attempts
+        WHERE id <> ? AND (validation_id = ? OR deployment_id = ?)
+      `, input.attemptId, input.deploymentId, input.deploymentId);
+      const legacyDuplicate = await transaction.get<{ id: string }>(`
+        SELECT id FROM deployment_jobs
+        WHERE id <> ? AND salesforce_deployment_id = ?
+      `, input.jobId, input.deploymentId);
+      if (duplicate !== undefined || legacyDuplicate !== undefined) {
+        throw new SfudError('INVALID_JOB_STATE', '원격 배포 ID가 다른 작업에 이미 연결되어 있습니다.');
       }
       const changed = await transaction.run(`
         UPDATE deployment_attempts SET
@@ -138,7 +149,8 @@ export class DeploymentAttemptRepository {
       `, input.deploymentId, input.deploymentId, input.attemptId, attempt.version);
       if (changed.changes !== 1) throw new SfudError('INVALID_JOB_STATE', '관리자 확인 중 attempt가 변경되었습니다.');
       await transaction.run(`
-        UPDATE deployment_jobs SET salesforce_deployment_id = ?, remote_status = 'SUBMITTED', updated_at = ?
+        UPDATE deployment_jobs SET salesforce_deployment_id = ?, remote_status = 'SUBMITTED',
+          execution_evidence = 'MANUALLY_ATTESTED', updated_at = ?
         WHERE id = ? AND active_attempt_id = ? AND status = 'RECONCILE_REQUIRED'
       `, input.deploymentId, timestamp, input.jobId, input.attemptId);
       await transaction.run(`

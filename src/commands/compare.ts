@@ -12,8 +12,11 @@ import { parseSourceSpec } from '../sources/source-spec.js';
 import { createSnapshot } from '../sources/snapshot.js';
 import { createRunContext, writeRunMetadata } from './run-context.js';
 import { salesforceWaitCommandTimeoutMs } from '../core/deadline.js';
+import { resolvePackageExclusion, validateExcludedPackageIds } from '../metadata/package-exclusion.js';
 
 export interface CompareCommandOptions {
+  excludedPackageIds?: string[];
+  excludePackageMetadata?: boolean;
   left: string;
   right: string;
   sourceOnly?: boolean;
@@ -54,7 +57,15 @@ export async function runCompareCommand(
   const sfClient = dependencies.sfClient ?? new ProcessSfClient();
   const leftSource = parseSourceSpec(options.left, cwd);
   const rightSource = parseSourceSpec(options.right, cwd);
+  const excludedPackageIds = validateExcludedPackageIds(options.excludedPackageIds);
+  if (options.excludePackageMetadata === true && excludedPackageIds.length > 0) {
+    throw new SfudError('INVALID_ARGUMENT', '패키지 전체 제외와 개별 제외는 함께 선택할 수 없습니다.');
+  }
   return await withRequestWorkspace(cwd, async (commandProjectPath) => {
+    const packageExclusion = options.excludePackageMetadata === true || excludedPackageIds.length > 0
+      ? await resolvePackageExclusion(options.sourceOnly === true ? [rightSource] : [leftSource, rightSource],
+        sfClient, commandProjectPath, dependencies.signal, excludedPackageIds.length > 0 ? excludedPackageIds : undefined)
+      : undefined;
     const context = await createRunContext(cwd, options.reportDir, 'compare');
     const generatedManifest = options.allMetadata === true || options.metadataType !== undefined
       ? await generateDeployableManifest({
@@ -114,6 +125,7 @@ export async function runCompareCommand(
     ]);
 
     const comparison = await compareSnapshots(leftSnapshot, rightSnapshot, { strict: options.strict ?? false,
+      ...(packageExclusion === undefined ? {} : { packageExclusion }),
       ...(options.maximumComparisonFiles === undefined || options.sourceOnly === true
         ? {} : { maximumFiles: options.maximumComparisonFiles }),
       ...(options.metadataType === undefined ? {} : { metadataType: options.metadataType }) });

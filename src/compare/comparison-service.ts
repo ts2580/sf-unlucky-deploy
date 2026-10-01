@@ -6,12 +6,15 @@ import { assertGitMetadataScope } from '../sources/git-metadata-scope.js';
 import { runCompareCommand } from '../commands/compare.js';
 import { SfudError } from '../core/errors.js';
 import { redactSensitiveText, type SfClient } from '../salesforce/sf-client.js';
-import { SingleJobQueue } from '../deploy/single-job-queue.js';
+import { JobQueueCapacityError, JobQueueClosedError, type JobQueueReservation, SingleJobQueue } from '../deploy/single-job-queue.js';
 import { ComparisonJobRepository, type ComparisonJob } from './comparison-job-repository.js';
 import type { WorkspaceService } from '../web/server/workspace-service.js';
 import { immutableSourceSnapshot } from '../sources/source-provenance.js';
+import { validateExcludedPackageIds } from '../metadata/package-exclusion.js';
 
 export interface CreateComparisonInput {
+  excludedPackageIds?: string[];
+  excludePackageMetadata?: boolean;
   sessionWorkspaceId?: string;
   projectId?: string;
   scope?: 'manifest' | 'all';
@@ -53,18 +56,26 @@ export class ComparisonService {
     };
     this.queue.assertAccepting();
     if (input.sourceOnly !== true && input.leftSourceId === input.rightSourceId) throw new Error('서로 다른 비교 소스를 선택하세요.');
+    let reservation: JobQueueReservation | undefined;
     try {
+      reservation = this.queue.reserve();
       const rightSourceId = await prepare(input.rightSourceId, 'right');
       const leftSourceId = input.sourceOnly === true ? rightSourceId : await prepare(input.leftSourceId, 'left');
-      return await this.createPrepared({ ...input, leftSourceId, rightSourceId }, jobId);
+      return await this.createPrepared({ ...input, leftSourceId, rightSourceId }, jobId, reservation);
     } catch (error) {
       for (const release of releases) release();
       for (const id of prepared) await this.workspace.gitImports?.remove(id, input.createdBy).catch(() => undefined);
+      if (error instanceof JobQueueCapacityError) {
+        throw new SfudError('REQUEST_CAPACITY_EXCEEDED', '비교 대기 수가 서버 수용량에 도달했습니다. 잠시 후 다시 시도하세요.');
+      }
       throw error;
-    } finally { for (const release of releases) release(); }
+    } finally {
+      reservation?.release();
+      for (const release of releases) release();
+    }
   }
 
-  private async createPrepared(input: CreateComparisonInput, jobId: string): Promise<ComparisonJob> {
+  private async createPrepared(input: CreateComparisonInput, jobId: string, reservation: JobQueueReservation): Promise<ComparisonJob> {
     this.queue.assertAccepting();
     const scope = input.scope ?? 'manifest';
     const rightResolved = await this.workspace.resolveSourceSnapshot(input.rightSourceId, input.createdBy);
@@ -73,6 +84,13 @@ export class ComparisonService {
       : await this.workspace.resolveSourceSnapshot(input.leftSourceId, input.createdBy);
     const rightSource = rightResolved.source;
     const leftSource = leftResolved.source;
+    const excludedPackageIds = validateExcludedPackageIds(input.excludedPackageIds);
+    if (input.excludePackageMetadata === true && excludedPackageIds.length > 0) {
+      throw new Error('패키지 전체 제외와 개별 제외는 함께 선택할 수 없습니다.');
+    }
+    if ((input.excludePackageMetadata === true || excludedPackageIds.length > 0) && ![leftSource, rightSource].some((source) => source.startsWith('org:'))) {
+      throw new Error('설치 패키지 제외에는 연결된 Salesforce Org가 하나 이상 필요합니다.');
+    }
     for (const source of [leftSource, rightSource]) {
       assertGitMetadataScope(source === leftSource ? leftResolved.snapshot : rightResolved.snapshot,
         input.metadataType === undefined ? undefined : [input.metadataType]);
@@ -112,6 +130,8 @@ export class ComparisonService {
     try {
       this.queue.assertAccepting();
       job = await this.repository.create({
+        excludedPackageIds,
+        excludePackageMetadata: input.excludePackageMetadata === true,
         id: jobId,
         scope: scope === 'all' ? 'ALL' : 'MANIFEST',
         ...(input.metadataType === undefined ? {} : { metadataType: input.metadataType }),
@@ -125,8 +145,7 @@ export class ComparisonService {
         strict: input.strict,
         showIdentical: input.showIdentical,
         createdBy: input.createdBy,
-        ...([input.leftSourceId, input.rightSourceId, input.projectId].some((id) => /^(git|upload):/u.test(id ?? ''))
-          ? { accessOwnerUserId: input.createdBy } : {}),
+        accessOwnerUserId: input.createdBy,
       });
     } catch (error) {
       releaseSources();
@@ -138,7 +157,13 @@ export class ComparisonService {
       } finally {
         releaseSources();
       }
-    }).catch(() => releaseSources());
+    }, reservation).catch(async (error: unknown) => {
+      releaseSources();
+      if (error instanceof JobQueueClosedError && (await this.repository.getRequired(job.id)).status === 'QUEUED') {
+        await this.repository.markFailed(job.id, 'JOB_QUEUE_REJECTED',
+          redactSensitiveText(error instanceof Error ? error.message : String(error)));
+      }
+    }).catch(() => undefined);
     return job;
   }
 
@@ -148,6 +173,8 @@ export class ComparisonService {
     try {
       const settings = await this.settings?.get(job.createdBy);
       const result = await runCompareCommand({
+        excludedPackageIds: job.excludedPackageIds ?? [],
+        excludePackageMetadata: job.excludePackageMetadata === true,
         maximumComparisonFiles: settings?.maximumComparisonFiles ?? 2000,
         left: job.leftSource,
         right: job.rightSource,

@@ -145,7 +145,7 @@ export class DeploymentJobRepository {
         timestamp,
         timestamp,
       );
-      await initializeJobAccess(transaction, 'deployment', id, input.accessOwnerUserId);
+      await initializeJobAccess(transaction, 'deployment', id, input.accessOwnerUserId ?? input.createdBy);
       await transaction.run('UPDATE deployment_jobs SET source_provenance_json = ? WHERE id = ?',
         input.sourceSnapshot === undefined ? null : JSON.stringify(input.sourceSnapshot), id);
       await this.writeAudit(transaction, input.createdBy, 'DRY_RUN_QUEUED', id, {
@@ -223,7 +223,7 @@ export class DeploymentJobRepository {
         timestamp,
         timestamp,
       );
-      await initializeJobAccess(transaction, 'deployment', id, input.accessOwnerUserId);
+      await initializeJobAccess(transaction, 'deployment', id, input.accessOwnerUserId ?? input.createdBy);
       await transaction.run('UPDATE deployment_jobs SET source_provenance_json = ? WHERE id = ?',
         input.sourceSnapshot === undefined ? null : JSON.stringify(input.sourceSnapshot), id);
       await this.writeAudit(transaction, input.createdBy, 'DIRECT_DEPLOYMENT_QUEUED', id, {

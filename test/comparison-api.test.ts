@@ -137,6 +137,17 @@ describe('비교 API', () => {
       })).statusCode).toBe(403);
       await server.sfudRuntime.store.database.run("UPDATE users SET role = 'ADMIN'");
 
+      sfClient.includeUnchanged = true;
+      const reservations = Array.from({ length: 20 }, () => server.sfudRuntime.comparisonQueue.reserve());
+      try {
+        const saturated = await server.inject({
+          method: 'POST', url: '/api/v1/comparisons',
+          headers: { cookie, 'x-sfud-csrf': csrfToken }, payload: comparisonPayload,
+        });
+        expect(saturated.statusCode).toBe(503);
+        expect(saturated.json()).toMatchObject({ error: { code: 'REQUEST_CAPACITY_EXCEEDED' } });
+        expect(await server.sfudRuntime.store.database.get('SELECT COUNT(*) count FROM comparison_jobs')).toEqual({ count: 0 });
+      } finally { for (const reservation of reservations) reservation.release(); }
       const created = await server.inject({
         method: 'POST',
         url: '/api/v1/comparisons',
@@ -162,6 +173,17 @@ describe('비교 API', () => {
         },
       });
       expect(completed.body).not.toContain(projectPath);
+      expect(completed.json().job.result.components).toHaveLength(1);
+      const callsBeforeIdentical = sfClient.calls.length;
+      const withIdentical = await server.inject({ url: `/api/v1/comparisons/${jobId}?includeIdentical=true`, headers: { cookie } });
+      expect(withIdentical.statusCode).toBe(200);
+      expect(withIdentical.json().job.result.components).toEqual(expect.arrayContaining([
+        expect.objectContaining({ fullName: 'Unchanged', status: 'IDENTICAL' }),
+      ]));
+      expect(sfClient.calls).toHaveLength(callsBeforeIdentical);
+      expect((await server.inject({ url: `/api/v1/comparisons/${jobId}?includeIdentical=false`, headers: { cookie } })).json().job.result.components).toHaveLength(1);
+      expect((await server.inject({ url: `/api/v1/comparisons/${jobId}?includeIdentical=true` })).statusCode).toBe(401);
+      sfClient.includeUnchanged = false;
       const componentPage = await server.inject({
         url: `/api/v1/comparisons/${jobId}/components?page=1&pageSize=1`,
         headers: { cookie },
@@ -218,6 +240,43 @@ describe('비교 API', () => {
       expect(sfClient.calls.filter((args) =>
         args[0] === 'project' && args[1] === 'generate' && args[2] === 'manifest'))
         .toHaveLength(2);
+
+      sfClient.includePackaged = true;
+      expect((await server.inject({ method: 'POST', url: '/api/v1/comparisons',
+        headers: { cookie, 'x-sfud-csrf': csrfToken },
+        payload: { ...comparisonPayload, excludePackageMetadata: 'true' },
+      })).statusCode).toBe(400);
+      const filtered = await server.inject({ method: 'POST', url: '/api/v1/comparisons',
+        headers: { cookie, 'x-sfud-csrf': csrfToken },
+        payload: { ...comparisonPayload, excludedPackageIds: ['033000000000001'] },
+      });
+      expect(filtered.statusCode).toBe(202);
+      const filteredId = filtered.json().job.id as string;
+      await server.sfudRuntime.comparisonQueue.onIdle();
+      const filteredJob = (await server.inject({ url: `/api/v1/comparisons/${filteredId}`, headers: { cookie } })).json().job;
+      expect(filteredJob).toMatchObject({ status: 'SUCCEEDED', excludedPackageIds: ['033000000000001'],
+        result: { summary: { total: 2 }, packageExclusion: { namespaces: ['pkg'], excludedComponents: 1 } } });
+      expect(filteredJob.result.components.map((component: { fullName: string }) => component.fullName)).toEqual(['Hello', 'keep__Installed']);
+      expect((await server.sfudRuntime.comparisonJobs.getRequired(filteredId)).excludedPackageIds).toEqual(['033000000000001']);
+      expect((await server.sfudRuntime.comparisonJobs.listRecentSummary()).find((job) => job.id === filteredId)?.excludedPackageIds).toEqual(['033000000000001']);
+      expect(sfClient.calls.filter((args) => args[0] === 'package')).toHaveLength(2);
+      expect((await server.inject({ url: '/api/v1/installed-packages?sourceIds=org%3Aleft' })).statusCode).toBe(401);
+      const inventory = await server.inject({ url: '/api/v1/installed-packages?sourceIds=org%3Aleft%2Corg%3Aright', headers: { cookie } });
+      expect(inventory.statusCode).toBe(200);
+      expect(inventory.json().packages).toEqual([
+        { id: '033000000000001', name: 'Installed', namespace: 'pkg', orgAliases: ['left', 'right'] },
+        { id: '033000000000002', name: 'Keep', namespace: 'keep', orgAliases: ['left', 'right'] },
+      ]);
+      const callsBeforeInvalid = sfClient.calls.filter((args) => args[0] === 'package').length;
+      for (const sources of ['org:unknown', 'org:left,org:right,org:third', 'local:/tmp']) {
+        expect((await server.inject({ url: `/api/v1/installed-packages?sourceIds=${encodeURIComponent(sources)}`, headers: { cookie } })).statusCode).toBe(400);
+      }
+      expect(sfClient.calls.filter((args) => args[0] === 'package')).toHaveLength(callsBeforeInvalid);
+      for (const excludedPackageIds of ['033000000000001', ['bad'], [null]]) {
+        expect((await server.inject({ method: 'POST', url: '/api/v1/comparisons', headers: { cookie, 'x-sfud-csrf': csrfToken },
+          payload: { ...comparisonPayload, excludedPackageIds } })).statusCode).toBe(400);
+      }
+      sfClient.includePackaged = false;
 
       for (const maximumComparisonFiles of [1, 2]) {
         expect((await server.inject({ method: 'PUT', url: '/api/v1/settings',
@@ -386,10 +445,15 @@ describe('비교 API', () => {
 });
 
 class ComparisonSfClient implements SfClient {
+  public includePackaged = false;
+  public includeUnchanged = false;
   public readonly calls: string[][] = [];
 
   public async runJson(args: readonly string[], _options: SfRunOptions): Promise<unknown> {
     this.calls.push([...args]);
+    if (args[0] === 'package') {
+      return { result: [{ SubscriberPackageId: '033000000000001', SubscriberPackageName: 'Installed', SubscriberPackageNamespace: 'pkg' }, { SubscriberPackageId: '033000000000002', SubscriberPackageName: 'Keep', SubscriberPackageNamespace: 'keep' }] };
+    }
     if (args[0] === 'org' && args[1] === 'list' && args[2] === 'metadata-types') {
       return { status: 0, result: { metadataObjects: [
         { directoryName: 'classes', suffix: 'cls', xmlName: 'ApexClass' },
@@ -440,6 +504,15 @@ class ComparisonSfClient implements SfClient {
       'package.xml': '<Package/>\n',
       'classes/Hello.cls': `public class Hello { String value() { return '${alias}'; } }\n`,
       'classes/Hello.cls-meta.xml': '<?xml version="1.0"?><ApexClass><status>Active</status></ApexClass>',
+      ...(this.includeUnchanged ? {
+        'classes/Unchanged.cls': 'public class Unchanged {}',
+        'classes/Unchanged.cls-meta.xml': '<ApexClass><status>Active</status></ApexClass>',
+      } : {}),
+      ...(this.includePackaged ? {
+        'classes/pkg__Installed.cls': `public class pkg__Installed { String value = '${alias}'; }`,
+        'classes/pkg__Installed.cls-meta.xml': '<ApexClass/>',
+        'classes/keep__Installed.cls': `public class keep__Installed { String value = '${alias}'; }`,
+      } : {}),
     });
     return { status: 0 };
   }

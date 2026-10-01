@@ -58,4 +58,14 @@ describe('Quick Deploy 적격성', () => {
     expect(evaluateQuickDeployEligibility({ dryRun: job('DRY_RUN'), deploy, validationAttempt: validation() }))
       .toMatchObject({ mode: 'REVALIDATION_REQUIRED' });
   });
+
+  it('같은 alias의 연결 generation이 바뀌면 Quick Deploy 증거를 재사용하지 않는다', () => {
+    const dryRun = job('DRY_RUN');
+    dryRun.targetOrgIdentity = { ...identity, connectionId: 'connection-1', connectionGeneration: 8 };
+    const deploy = job('DEPLOY');
+    deploy.targetOrgIdentity = { ...identity, connectionId: 'connection-1', connectionGeneration: 9 };
+    const attempt = validation({ targetOrgIdentity: { ...identity, connectionId: 'connection-1', connectionGeneration: 8 } });
+    expect(evaluateQuickDeployEligibility({ dryRun, deploy, validationAttempt: attempt }))
+      .toMatchObject({ mode: 'REVALIDATION_REQUIRED' });
+  });
 });
