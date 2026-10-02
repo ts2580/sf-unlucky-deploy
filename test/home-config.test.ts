@@ -220,11 +220,11 @@ describe('사용자 홈 설정 보안', { timeout: process.platform === 'win32' 
     const configFile = path.join(directory, 'config.json');
     const script = String.raw`
 $ErrorActionPreference = 'Stop'
-$acl = Get-Acl -LiteralPath $env:SFUD_ACL_PATH
+$acl = [IO.File]::GetAccessControl($env:SFUD_ACL_PATH)
 $sid = [Security.Principal.SecurityIdentifier]::new('S-1-1-0')
 $rule = [Security.AccessControl.FileSystemAccessRule]::new($sid, [Security.AccessControl.FileSystemRights]::Read, [Security.AccessControl.AccessControlType]::Allow)
 $acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $env:SFUD_ACL_PATH -AclObject $acl
+[IO.File]::SetAccessControl($env:SFUD_ACL_PATH, $acl)
 `;
     await runWindowsPowerShell(script, { SFUD_ACL_PATH: configFile });
     await expect(loadHomeConfiguration(environment)).rejects.toThrow(/ACL/u);
