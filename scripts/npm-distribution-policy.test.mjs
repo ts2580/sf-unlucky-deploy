@@ -9,6 +9,60 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { assertPackedMetadataMatches, assertSafeArchive, verifyUiAssetPaths } from './package-archive-policy.mjs';
 import { assertPublicationAllowed, assertSamePublishedArtifact, classifyRegistryLookup } from './npm-publish-policy.mjs';
+import { getReleasePolicy } from './release-policy.mjs';
+
+test('RC는 canary, 정식 버전은 main으로 분류하고 다른 태그는 거부한다', () => {
+  assert.deepEqual(getReleasePolicy('v0.4.0-rc.3'), { branch: 'canary', prerelease: true });
+  assert.deepEqual(getReleasePolicy('v0.4.0'), { branch: 'main', prerelease: false });
+  for (const tag of ['v0.4.0-beta.1', 'v0.4.0-rc', 'v0.4.0-rc.01', 'v00.4.0', 'v0.4.0+build', '0.4.0', undefined]) {
+    assert.throws(() => getReleasePolicy(tag), /태그/u);
+  }
+});
+
+test('실제 Git 이력에서 RC·정식 브랜치, annotated tag, 재시도 소스를 검증한다', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'sfud-release-source-'));
+  const script = fileURLToPath(new URL('./check-release-source.mjs', import.meta.url));
+  const env = { ...process.env, GITHUB_OUTPUT: '' };
+  const options = { cwd: directory, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] };
+  const git = (...args) => execFileSync('git', args, options).trim();
+  const verify = (tag, mode = 'create') => execFileSync(process.execPath, [script, tag, mode], options);
+  try {
+    git('init');
+    git('config', 'user.name', 'Release Policy Test');
+    git('config', 'user.email', 'release-policy@example.invalid');
+    git('-c', 'commit.gpgSign=false', 'commit', '--allow-empty', '-m', 'main source');
+    const main = git('rev-parse', 'HEAD');
+    git('update-ref', 'refs/remotes/origin/main', main);
+    git('-c', 'tag.gpgSign=false', 'tag', '-a', 'v0.4.0', '-m', 'stable');
+    git('-c', 'tag.gpgSign=false', 'tag', '-a', 'v0.4.0-rc.0', '-m', 'wrong RC branch');
+    git('-c', 'commit.gpgSign=false', 'commit', '--allow-empty', '-m', 'canary source');
+    const canary = git('rev-parse', 'HEAD');
+    git('update-ref', 'refs/remotes/origin/canary', canary);
+    git('-c', 'tag.gpgSign=false', 'tag', '-a', 'v0.4.1-rc.1', '-m', 'RC');
+    git('-c', 'tag.gpgSign=false', 'tag', '-a', 'v0.4.1', '-m', 'wrong stable branch');
+    git('-c', 'tag.gpgSign=false', 'tag', 'v0.4.1-rc.2');
+    assert.match(verify('v0.4.1-rc.1'), /canary/u);
+    assert.throws(() => verify('v0.4.1'), /최신 main/u);
+    assert.throws(() => verify('v0.4.1', 'publish'), /main 이력/u);
+    assert.throws(() => verify('v0.4.1-rc.2'), /annotated/u);
+    assert.throws(() => verify('v0.4.0'), /checkout/u);
+    git('checkout', '--detach', main);
+    assert.match(verify('v0.4.0'), /main/u);
+    assert.throws(() => verify('v0.4.0-rc.0'), /최신 canary/u);
+    // 발행 재시도는 원본 Release 증거와 함께 검증하므로 브랜치가 전진해도 허용한다.
+    git('update-ref', 'refs/remotes/origin/main', canary);
+    assert.throws(() => verify('v0.4.0'), /최신 main/u);
+    assert.match(verify('v0.4.0', 'publish'), /main, publish/u);
+    git('checkout', '--detach', canary);
+    git('-c', 'commit.gpgSign=false', 'commit', '--allow-empty', '-m', 'later canary');
+    git('update-ref', 'refs/remotes/origin/canary', git('rev-parse', 'HEAD'));
+    git('checkout', '--detach', canary);
+    assert.throws(() => verify('v0.4.1-rc.1'), /최신 canary/u);
+    assert.match(verify('v0.4.1-rc.1', 'publish'), /canary, publish/u);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('허용된 npm 배포 파일과 UI asset 경로를 승인한다', () => {
   const files = ['package/package.json', 'package/dist/cli.js', 'package/dist/ui/index.html', 'package/dist/ui/assets/app.js', 'package/dist/ui/assets/app.css'];

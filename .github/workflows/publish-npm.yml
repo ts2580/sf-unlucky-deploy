@@ -34,11 +34,22 @@ jobs:
           registry-url: https://registry.npmjs.org/
           package-manager-cache: false
 
+      - name: RC·정식 소스 브랜치와 태그 검증
+        id: release-policy
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          git fetch origin --no-tags \
+            '+refs/heads/canary:refs/remotes/origin/canary' \
+            '+refs/heads/main:refs/remotes/origin/main'
+          node scripts/check-release-source.mjs "${INPUT_TAG}" publish
+
       - name: tag·실행 ref·commit 일치와 GitHub Release 확인
         env:
           INPUT_TAG: ${{ inputs.release_tag }}
           REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ steps.release-policy.outputs.prerelease }}
         run: |
           set -euo pipefail
           test "${INPUT_TAG}" = "${GITHUB_REF_NAME}"
@@ -48,6 +59,7 @@ jobs:
           test "$(git rev-parse "refs/tags/${INPUT_TAG}^{commit}")" = "${GITHUB_SHA}"
           release_json="$(gh api "repos/${REPOSITORY}/releases/tags/${INPUT_TAG}")"
           test "$(jq -r '.draft' <<<"${release_json}")" = false
+          test "$(jq -r '.prerelease' <<<"${release_json}")" = "${PRERELEASE}"
           test "$(jq -r '.target_commitish' <<<"${release_json}")" = "${GITHUB_SHA}"
           test "$(gh api "repos/${REPOSITORY}" --jq '.private')" = false
 
