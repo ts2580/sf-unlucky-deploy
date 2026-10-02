@@ -10,6 +10,28 @@ import test from 'node:test';
 import { assertPackedMetadataMatches, assertSafeArchive, verifyUiAssetPaths } from './package-archive-policy.mjs';
 import { assertPublicationAllowed, assertSamePublishedArtifact, classifyRegistryLookup } from './npm-publish-policy.mjs';
 import { getReleasePolicy } from './release-policy.mjs';
+import { assertWindowsBundleArchive, assertWindowsX64Binary } from './windows-bundle-policy.mjs';
+
+test('Windows bundle은 SQLite DLL과 고지를 요구하고 credential·탈출 경로를 거부한다', () => {
+  const entries = ['package/package.json', 'package/node_modules/sqlite3/LICENSE',
+    'package/node_modules/sqlite3/build/Release/node_sqlite3.node'];
+  assert.doesNotThrow(() => assertWindowsBundleArchive(entries));
+  for (const entry of ['package/../outside', 'package/node_modules/x/.npmrc', 'package/.sf/config.json',
+    'package/.env', 'package/node_modules/other/native.node', 'C:/outside', 'package\\outside']) {
+    assert.throws(() => assertWindowsBundleArchive([...entries, entry]));
+  }
+  assert.throws(() => assertWindowsBundleArchive(entries.slice(0, 2)), /binding/u);
+  assert.throws(() => assertWindowsBundleArchive(entries.filter((p) => !p.endsWith('LICENSE'))), /라이선스/u);
+});
+
+test('Windows bundle은 Linux 또는 잘못된 CPU native binary를 거부한다', () => {
+  assert.throws(() => assertWindowsX64Binary(Buffer.from('\x7fELF')));
+  const binary = Buffer.alloc(128);
+  binary.write('MZ'); binary.writeUInt32LE(64, 0x3c); binary.write('PE\0\0', 64); binary.writeUInt16LE(0x8664, 68);
+  assert.doesNotThrow(() => assertWindowsX64Binary(binary));
+  binary.writeUInt16LE(0xaa64, 68);
+  assert.throws(() => assertWindowsX64Binary(binary), /x64/u);
+});
 
 test('RC는 canary, 정식 버전은 main으로 분류하고 다른 태그는 거부한다', () => {
   assert.deepEqual(getReleasePolicy('v0.4.0-rc.3'), { branch: 'canary', prerelease: true });
