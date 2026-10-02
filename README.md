@@ -103,7 +103,7 @@ node dist/cli.js --help
 
 ### npm 배포 준비 상태
 
-npm 패키지 이름은 `@trstyq/sf-unlucky-deploy`이고 실행 명령은 `sfud`입니다. 현재 npm 시험 배포 후보는 `0.4.0-rc.1`이며 공개 발행 전입니다. 시험 채널은 `next`를 사용하고 프로젝트 라이선스는 MIT입니다. 공개 GitHub Release는 `v0.3.0`까지 확인됐습니다. 아래 npm 명령은 발행 이후 사용할 설치 형태입니다. 공개 배포가 완료되기 전에는 GitHub Release tarball을 사용하세요.
+npm 패키지 이름은 `@trstyq/sf-unlucky-deploy`이고 실행 명령은 `sfud`입니다. 시험판은 `next` 채널로 설치하며 프로젝트 라이선스는 MIT입니다. 특정 시험판을 고정하려면 `@next` 대신 발행된 버전 번호를 지정하세요.
 
 ```bash
 npm install --global --allow-scripts=sqlite3 @trstyq/sf-unlucky-deploy@next
@@ -111,7 +111,7 @@ sfud --version
 sfud --help
 ```
 
-Salesforce CLI v2(`sf`)와 Git은 별도로 설치하고, 필요한 Org를 미리 로그인해야 합니다. 설치된 `sfud`는 현재 디렉터리의 `.env`를 자동으로 읽지 않습니다. 다음 배포부터 `sfud ui`, `sfud compare`, `sfud deploy`를 처음 실행하면 사용자 홈에 `.sfud/config.json`과 `.sfud/secrets.env`를 자동으로 생성합니다. Linux의 기본 경로는 `~/.sfud/config.json`, Windows는 `%USERPROFILE%\.sfud\config.json`입니다. npm 설치 시에는 생성하지 않으므로 설치 스크립트를 끈 환경에서도 첫 실행 시 동작합니다. `--help`, `--version`, `config path` 조회는 파일을 만들지 않습니다. 현재 공개 시험판 `0.4.0-rc.1`은 자동 생성을 지원하지 않으므로 아래 초기화 명령이 필요합니다.
+Salesforce CLI v2(`sf`)와 Git은 별도로 설치하고, 필요한 Org를 미리 로그인해야 합니다. 설치된 `sfud`는 현재 디렉터리의 `.env`를 자동으로 읽지 않습니다. `0.4.0-rc.2`부터 `sfud ui`, `sfud compare`, `sfud deploy`를 처음 실행하면 사용자 홈에 `.sfud/config.json`과 `.sfud/secrets.env`를 자동으로 생성합니다. Linux의 기본 경로는 `~/.sfud/config.json`, Windows는 `%USERPROFILE%\.sfud\config.json`입니다. npm 설치 시에는 생성하지 않으므로 설치 스크립트를 끈 환경에서도 첫 실행 시 동작합니다. `--help`, `--version`, `config path` 조회는 파일을 만들지 않습니다. 이전 시험판 `0.4.0-rc.1`은 자동 생성을 지원하지 않으므로 아래 초기화 명령이 필요합니다.
 
 자동 생성 파일은 `{ "version": 1, "env": {} }`로 시작하여 현재 실행 모드와 데이터 경로를 유지합니다. 기존 설정은 덮어쓰거나 권한을 자동 변경하지 않습니다. 설정이 없을 때 개인 LOCAL 모드를 명시적으로 초기화하려면 다음 명령을 사용합니다.
 
@@ -164,7 +164,7 @@ npm install --global --allow-scripts=sqlite3 ./sf-unlucky-deploy-0.3.0.tgz
 sfud --version
 ```
 
-`sqlite3` native binding과 `esbuild`의 설치 스크립트만 명시적으로 허용한다. npm 12에서는 lockfile의 resolved identity를 사용할 수 없는 경우가 있으므로 `allowScripts` 키는 버전을 붙이지 않은 패키지 이름으로 유지한다. Release는 `package.json`과 같은 버전의 annotated tag가 최신 `main` 커밋을 정확히 가리킬 때만 발행한다.
+`sqlite3` native binding과 `esbuild`의 설치 스크립트만 명시적으로 허용한다. npm 12에서는 lockfile의 resolved identity를 사용할 수 없는 경우가 있으므로 `allowScripts` 키는 버전을 붙이지 않은 패키지 이름으로 유지한다. Release는 `package.json`과 같은 버전의 annotated tag로 발행한다. RC 태그(`vX.Y.Z-rc.N`)는 최신 `canary`, 정식 태그(`vX.Y.Z`)는 최신 `main` 커밋을 정확히 가리켜야 한다.
 
 아래 예시의 `sfud`는 빌드된 CLI를 뜻한다. 개발 중에는 `sfud` 대신 `npm run dev --`를 앞에 사용하면 된다.
 
@@ -962,6 +962,10 @@ feat/* 또는 fix/* → canary → main
 - `canary` 병합 후 전체 검증
 - `main` 병합 전 canary 결과 재확인
 - 기능 단위로 커밋하고 작은 중간 커밋을 남발하지 않음
+
+RC는 `canary`에서 GitHub prerelease와 npm `next`로 공개한다. RC 검증 후 정식 버전으로 변경하고 `canary → main` PR을 병합한 다음 정식 태그를 생성한다. 브랜치 병합만으로 패키지를 발행하지 않는다.
+
+GitHub Release의 설치 검증이 완료되면 `publish-npm.yml`을 해당 태그 ref로 수동 실행한다. npm은 정식 버전도 우선 `next`에 발행하고, registry 산출물 검증 후 소유자가 `latest`로 별도 승격한다. 원본 Release와 동일한 태그·커밋·파일의 발행 재시도는 허용하며, 해당 커밋이 RC는 `canary`, 정식은 `main` 이력에 있어야 한다.
 
 ## 현재 검증 범위
 

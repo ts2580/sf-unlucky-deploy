@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
+import { getReleasePolicy } from './release-policy.mjs';
 
 export function assertPublicationAllowed({ packageJson, releaseTag, workflowRef, workflowSha, releaseSha }) {
   if (packageJson.private !== false) throw new Error('package.json private=false가 필요합니다. 라이선스 승인 전 npm 발행 차단 상태입니다.');
   if (typeof packageJson.license !== 'string' || packageJson.license.length === 0) {
     throw new Error('프로젝트 라이선스를 확정하기 전에는 npm 발행할 수 없습니다.');
   }
-  if (!/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(releaseTag)) throw new Error(`릴리즈 태그 형식 오류: ${releaseTag}`);
+  getReleasePolicy(releaseTag);
   if (releaseTag !== `v${packageJson.version}`) throw new Error(`릴리즈 태그와 패키지 버전 불일치: ${releaseTag} != v${packageJson.version}`);
   if (workflowRef !== `refs/tags/${releaseTag}`) throw new Error(`workflow_dispatch 실행 ref는 대상 annotated tag여야 합니다: ${workflowRef}`);
   if (!/^[0-9a-f]{40}$/iu.test(releaseSha) || workflowSha.toLowerCase() !== releaseSha.toLowerCase()) {

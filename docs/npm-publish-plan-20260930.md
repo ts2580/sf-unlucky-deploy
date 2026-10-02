@@ -2,7 +2,9 @@
 
 작성일: 2026-09-30 KST
 
-상태: `IMPLEMENTED_LOCAL` — 현재 후보 `0.4.0-rc.1` / `next`, MIT / private=false. 패키지·CI·문서 구현 및 Linux 로컬 검증 완료. 실제 npm publish 명령은 registry DNS EAI_AGAIN으로 실패하여 미발행.
+이 문서의 상태·발행 기록은 작성 시점의 이력이다. 이후 발행 결과는 아래 후속 기록과 실제 registry를 확인한다.
+
+2026-10-02 릴리스 정책 변경: RC(`vX.Y.Z-rc.N`)의 신규 GitHub Release는 최신 `canary`, 정식(`vX.Y.Z`)은 최신 `main`의 annotated tag에서 생성한다. 아래 초기 계획의 “RC도 최신 main에서 생성” 조건은 이 정책으로 대체한다. npm `next` 발행 및 registry 검증 후 `latest` 별도 승격 절차는 유지한다. 수동 npm 발행 시 대상 브랜치 이력과 GitHub Release의 prerelease 여부를 재검증하며, 브랜치가 전진해도 같은 릴리스 산출물의 재시도를 허용한다. `workflow_dispatch` 워크플로는 기본 브랜치에도 존재해야 한다.
 
 ## 목표와 작업 범위
 

@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { getReleasePolicy } from './release-policy.mjs';
 
 const tag = process.argv[2];
 if (tag === undefined) {
@@ -12,9 +13,7 @@ const program = readFileSync(new URL('../src/program.ts', import.meta.url), 'utf
 const cliVersion = program.match(/export const CLI_VERSION = '([^']+)'/u)?.[1];
 const expectedTag = `v${packageJson.version}`;
 
-if (!/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(tag)) {
-  throw new Error(`릴리즈 태그는 vSemVer 형식이어야 합니다: ${tag}`);
-}
+getReleasePolicy(tag);
 if (tag !== expectedTag) {
   throw new Error(`태그 ${tag}와 package.json 버전 ${packageJson.version}이 일치하지 않습니다. 예상 태그: ${expectedTag}`);
 }
