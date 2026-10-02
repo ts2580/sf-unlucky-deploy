@@ -71,6 +71,22 @@ function project(prefix = ''): Entry[] {
 }
 
 describe('Git 원시 파일 추출', { timeout: 30_000 }, () => {
+  it('긴 Windows 작업 경로에서도 Apex 파일과 companion을 복원한다', async () => {
+    const className = 'AladinHomePageComponentController_Test';
+    const relative = `force-app/main/default/classes/${className}.cls`;
+    const f = await fixture([
+      ...project(),
+      { name: relative, content: `public class ${className} {}` },
+      { name: `${relative}-meta.xml`, content: '<ApexClass/>' },
+    ]);
+    const target = path.join(f.root, 'workspace'.repeat(8), 'comparison'.repeat(8), 'project');
+    expect(path.join(target, relative).length).toBeGreaterThan(260);
+    await mkdir(path.dirname(target), { recursive: true });
+    await f.materializer.materialize(f.commit, '.', target);
+    expect(await readFile(path.join(target, relative), 'utf8')).toBe(`public class ${className} {}`);
+    expect(await readFile(path.join(target, `${relative}-meta.xml`), 'utf8')).toBe('<ApexClass/>');
+  });
+
   it.each([true, false])('하위 폴더 Apex와 companion을 평탄화하고 원본 blob·다른 타입은 보존한다 (restore=%s)', async (restore) => {
     const entries = [
       ...project('salesforce/'),

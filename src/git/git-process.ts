@@ -37,6 +37,8 @@ export async function runIsolatedGit(args: readonly string[], options: GitProces
   const settings = [
     'credential.helper=', 'core.askPass=', `core.hooksPath=${emptyFile}`,
     'core.fsmonitor=false', 'core.attributesFile=', 'core.autocrlf=false',
+    // Managed workspaces plus Salesforce paths can exceed Windows MAX_PATH.
+    ...(process.platform === 'win32' ? ['core.longpaths=true'] : []),
     'protocol.allow=never', 'protocol.https.allow=always', 'http.followRedirects=false',
     'http.proxy=', 'http.sslVerify=true', 'gc.auto=0', 'maintenance.auto=false',
     'fetch.recurseSubmodules=false', 'submodule.recurse=false', 'init.templateDir=',
