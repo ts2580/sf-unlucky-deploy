@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { assertPackedMetadataMatches, assertSafeArchive, verifyUiAssetPaths } from './package-archive-policy.mjs';
+import { WINDOWS_BUNDLE, assertWindowsBundleArchive } from './windows-bundle-policy.mjs';
 
 const root = process.cwd();
 const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'sfud-package-smoke-'));
@@ -14,18 +15,26 @@ let successMessage;
 try {
   const arguments_ = process.argv.slice(2);
   const useExistingBuild = arguments_.includes('--use-existing-build');
-  const positionalArguments = arguments_.filter((argument) => argument !== '--use-existing-build');
+  const windowsBundle = arguments_.includes('--windows-bundle');
+  const positionalArguments = arguments_.filter((argument) => !['--use-existing-build', '--windows-bundle'].includes(argument));
   if (positionalArguments.length > 1) throw new Error('package smoke에는 tarball 경로를 하나만 지정할 수 있습니다.');
   const [suppliedTarball] = positionalArguments;
+  if (windowsBundle && (!suppliedTarball || process.platform !== 'win32' || process.arch !== 'x64' || !process.env.SFUD_SMOKE_NPM_CLI)) {
+    throw new Error('Windows bundle 검사는 Windows x64, tarball 경로 및 고정 npm CLI 경로가 필요합니다.');
+  }
   const tarball = suppliedTarball === undefined
     ? await createTarball(temporaryDirectory, useExistingBuild)
     : path.resolve(root, suppliedTarball);
   const entries = (await readTarball(tarball, '-tf')).split(/\r?\n/u).filter(Boolean);
-  assertSafeArchive(entries);
+  if (windowsBundle) assertWindowsBundleArchive(entries);
+  else assertSafeArchive(entries);
   if (!entries.includes('package/npm-shrinkwrap.json')) throw new Error('릴리즈 tarball에 npm-shrinkwrap.json이 없습니다.');
   const archivePackageJson = JSON.parse(await readTarball(tarball, '-xOf', 'package/package.json'));
   const sourcePackageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
-  assertPackedMetadataMatches(archivePackageJson, sourcePackageJson);
+  assertPackedMetadataMatches(archivePackageJson, windowsBundle ? { ...sourcePackageJson, version: WINDOWS_BUNDLE.version,
+    publishConfig: { ...sourcePackageJson.publishConfig, tag: 'win32-x64' } } : sourcePackageJson);
+  if (windowsBundle && (JSON.stringify(archivePackageJson.os) !== '["win32"]' || JSON.stringify(archivePackageJson.cpu) !== '["x64"]'
+    || archivePackageJson.scripts || !Array.isArray(archivePackageJson.bundleDependencies))) throw new Error('Windows bundle metadata 오류');
   if (!entries.includes('package/dist/cli.js') || !entries.includes('package/dist/ui/index.html')) {
     throw new Error('tarball에 실행 파일 또는 UI index.html이 없습니다.');
   }
@@ -33,8 +42,10 @@ try {
   await verifySourceMaps(tarball, entries);
 
   const prefix = path.join(temporaryDirectory, 'installed');
-  await runNpm(['install', '--global', '--prefix', prefix, '--allow-scripts=sqlite3', tarball]);
-  await runNpm(['ls', '--global', '--all', '--prefix', prefix]);
+  const offlineArgs = windowsBundle ? ['--offline', '--cache', path.join(temporaryDirectory, 'empty-npm-cache'),
+    '--registry=http://127.0.0.1:9/', '--no-audit', '--no-fund'] : [];
+  await runNpm(['install', '--global', '--prefix', prefix, ...(windowsBundle ? ['--ignore-scripts'] : ['--allow-scripts=sqlite3']), ...offlineArgs, tarball]);
+  await runNpm(['ls', '--global', '--all', '--prefix', prefix, ...offlineArgs]);
   const executable = process.platform === 'win32' ? path.join(prefix, 'sfud.cmd') : path.join(prefix, 'bin', 'sfud');
   const actualVersion = (await run(executable, ['--version'], temporaryDirectory)).trim();
   if (actualVersion !== sourcePackageJson.version) throw new Error(`설치된 sfud 버전 불일치: ${actualVersion} != ${sourcePackageJson.version}`);
@@ -104,7 +115,7 @@ async function verifyUiAssets(tarball, entries) {
 }
 
 async function verifySourceMaps(tarball, entries) {
-  for (const entry of entries.filter((item) => item.endsWith('.map'))) {
+  for (const entry of entries.filter((item) => item.startsWith('package/dist/') && item.endsWith('.map'))) {
     const map = JSON.parse(await readTarball(tarball, '-xOf', entry));
     if (Array.isArray(map.sourcesContent) && map.sourcesContent.some((source) => typeof source === 'string' && source.length > 0)) {
       throw new Error(`소스가 포함된 source map은 배포할 수 없습니다: ${entry}`);
@@ -130,7 +141,10 @@ async function createTarball(destination, useExistingBuild) {
   return path.join(destination, pack[0].filename);
 }
 
-async function runNpm(args) { return await run('npx', ['--yes', 'npm@11.20.0', ...args], root); }
+async function runNpm(args) {
+  if (process.env.SFUD_SMOKE_NPM_CLI) return await run(process.execPath, [process.env.SFUD_SMOKE_NPM_CLI, ...args], root);
+  return await run('npx', ['--yes', 'npm@11.20.0', ...args], root);
+}
 
 async function reservePort() {
   const server = net.createServer();
