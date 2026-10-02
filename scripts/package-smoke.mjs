@@ -19,10 +19,10 @@ try {
   const tarball = suppliedTarball === undefined
     ? await createTarball(temporaryDirectory, useExistingBuild)
     : path.resolve(root, suppliedTarball);
-  const entries = (await run('tar', ['-tf', tarball], root)).split(/\r?\n/u).filter(Boolean);
+  const entries = (await readTarball(tarball, '-tf')).split(/\r?\n/u).filter(Boolean);
   assertSafeArchive(entries);
   if (!entries.includes('package/npm-shrinkwrap.json')) throw new Error('릴리즈 tarball에 npm-shrinkwrap.json이 없습니다.');
-  const archivePackageJson = JSON.parse(await run('tar', ['-xOf', tarball, 'package/package.json'], root));
+  const archivePackageJson = JSON.parse(await readTarball(tarball, '-xOf', 'package/package.json'));
   const sourcePackageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
   assertPackedMetadataMatches(archivePackageJson, sourcePackageJson);
   if (!entries.includes('package/dist/cli.js') || !entries.includes('package/dist/ui/index.html')) {
@@ -99,13 +99,13 @@ try {
 }
 
 async function verifyUiAssets(tarball, entries) {
-  const html = await run('tar', ['-xOf', tarball, 'package/dist/ui/index.html'], root);
+  const html = await readTarball(tarball, '-xOf', 'package/dist/ui/index.html');
   verifyUiAssetPaths(html, entries);
 }
 
 async function verifySourceMaps(tarball, entries) {
   for (const entry of entries.filter((item) => item.endsWith('.map'))) {
-    const map = JSON.parse(await run('tar', ['-xOf', tarball, entry], root));
+    const map = JSON.parse(await readTarball(tarball, '-xOf', entry));
     if (Array.isArray(map.sourcesContent) && map.sourcesContent.some((source) => typeof source === 'string' && source.length > 0)) {
       throw new Error(`소스가 포함된 source map은 배포할 수 없습니다: ${entry}`);
     }
@@ -113,6 +113,12 @@ async function verifySourceMaps(tarball, entries) {
       throw new Error(`절대 개발 경로를 포함한 source map: ${entry}`);
     }
   }
+}
+
+async function readTarball(tarball, operation, ...entries) {
+  // Git Bash의 GNU tar는 D:\\...의 콜론을 원격 호스트 구분자로 해석한다.
+  // archive가 있는 디렉터리에서 파일명만 전달하면 GNU/BSD tar 모두 동작한다.
+  return await run('tar', [operation, path.basename(tarball), ...entries], path.dirname(tarball));
 }
 
 async function createTarball(destination, useExistingBuild) {

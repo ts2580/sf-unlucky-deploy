@@ -128,3 +128,7 @@ jobs:
 
       - name: CLI UI 빌드
         run: npm run build
+
+      - name: Git Bash에서 Windows tarball 설치 스모크
+        shell: bash
+        run: npm run package:smoke -- --use-existing-build
