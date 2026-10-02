@@ -38,6 +38,10 @@ async function writeConfig(directory: string, env: Record<string, unknown>): Pro
 }
 
 describe('사용자 홈 설정 보안', { timeout: process.platform === 'win32' ? 120_000 : 5_000 }, () => {
+  it.skipIf(process.platform !== 'win32')('Windows PowerShell은 제한된 환경에서 설정 경로 없이 시작하고 종료한다', async () => {
+    await runWindowsPowerShell('exit 0', {});
+  });
+
   it('기본 사용자 홈에 빈 설정을 자동 생성하고 기존 실행 모드와 사용자 설정을 보존한다', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'sfud automatic home '));
     roots.push(root);

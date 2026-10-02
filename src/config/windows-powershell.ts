@@ -23,10 +23,16 @@ export async function runWindowsPowerShell(script: string, variables: Readonly<R
   await new Promise<void>((resolve, reject) => {
     const child = spawn(path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
       '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
-    ], { env: environment, windowsHide: true, shell: false, stdio: 'ignore' });
+    ], { env: environment, windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'ignore'] });
+    let stage = 'startup';
+    let output = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      output = (output + chunk.toString('utf8')).slice(-1024);
+      for (const match of output.matchAll(/SFUD_ACL_STAGE=(identity|item|read-acl|protect|replace-rules|write-acl|verify-owner|verify-rules)\b/gu)) stage = match[1]!;
+    });
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      reject(aclError(`PowerShell 시간 초과: ${TIMEOUT_MS}ms`));
+      reject(aclError(`PowerShell 시간 초과: ${TIMEOUT_MS}ms, 단계: ${stage}`));
     }, TIMEOUT_MS);
     child.once('error', () => {
       clearTimeout(timer);

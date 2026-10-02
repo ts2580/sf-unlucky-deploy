@@ -120,11 +120,11 @@ jobs:
       - name: 의존성 설치
         run: npm ci
 
-      - name: process path Git 관리 저장소 sqlite 스모크
-        run: npm run test:platform
-
       - name: 홈 설정 권한·주입 방지 회귀 검사
         run: npx vitest run test/home-config.test.ts test/home-config-cli.test.ts test/windows-powershell.test.ts
+
+      - name: process path Git 관리 저장소 sqlite 스모크
+        run: npm run test:platform
 
       - name: CLI UI 빌드
         run: npm run build

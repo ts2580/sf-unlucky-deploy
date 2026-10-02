@@ -33,14 +33,19 @@ $ErrorActionPreference = 'Stop'
 $target = [Environment]::GetEnvironmentVariable('SFUD_ACL_PATH')
 $mode = [Environment]::GetEnvironmentVariable('SFUD_ACL_MODE')
 if ([string]::IsNullOrWhiteSpace($target)) { exit 20 }
+[Console]::Out.WriteLine('SFUD_ACL_STAGE=identity')
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $sid = $identity.User.Value
 $sidObject = [Security.Principal.SecurityIdentifier]::new($sid)
+[Console]::Out.WriteLine('SFUD_ACL_STAGE=item')
 $item = Get-Item -LiteralPath $target -Force
 if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { exit 21 }
+[Console]::Out.WriteLine('SFUD_ACL_STAGE=read-acl')
 $acl = Get-Acl -LiteralPath $target
 if ($mode -eq 'set') {
+  [Console]::Out.WriteLine('SFUD_ACL_STAGE=protect')
   $acl.SetAccessRuleProtection($true, $false)
+  [Console]::Out.WriteLine('SFUD_ACL_STAGE=replace-rules')
   foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRuleSpecific($rule) }
   $inherit = [Security.AccessControl.InheritanceFlags]::None
   $propagate = [Security.AccessControl.PropagationFlags]::None
@@ -50,11 +55,14 @@ if ($mode -eq 'set') {
   $rule = [Security.AccessControl.FileSystemAccessRule]::new($sidObject, [Security.AccessControl.FileSystemRights]::FullControl, $inherit, $propagate, [Security.AccessControl.AccessControlType]::Allow)
   $acl.SetAccessRule($rule)
   $acl.SetOwner([Security.Principal.SecurityIdentifier]::new($sid))
+  [Console]::Out.WriteLine('SFUD_ACL_STAGE=write-acl')
   Set-Acl -LiteralPath $target -AclObject $acl
   $acl = Get-Acl -LiteralPath $target
 }
+[Console]::Out.WriteLine('SFUD_ACL_STAGE=verify-owner')
 if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid) { exit 22 }
 if ($item.PSIsContainer -and -not $acl.AreAccessRulesProtected) { exit 23 }
+[Console]::Out.WriteLine('SFUD_ACL_STAGE=verify-rules')
 $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
 if ($rules.Count -ne 1) { exit 24 }
 $entry = $rules[0]

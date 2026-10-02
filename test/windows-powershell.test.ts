@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
@@ -14,8 +15,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function childProcess(): EventEmitter & { kill: ReturnType<typeof vi.fn> } {
-  const child = Object.assign(new EventEmitter(), { kill: vi.fn(() => true) });
+function childProcess(): EventEmitter & { kill: ReturnType<typeof vi.fn>; stdout: PassThrough } {
+  const child = Object.assign(new EventEmitter(), { kill: vi.fn(() => true), stdout: new PassThrough() });
   vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
   return child;
 }
@@ -36,7 +37,7 @@ describe('Windows ACL PowerShell 실행 경계', () => {
     expect(executable).toBe(path.join('C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'));
     expect(args?.at(-2)).toBe('-EncodedCommand');
     expect(Buffer.from(args!.at(-1)!, 'base64').toString('utf16le')).toBe(script);
-    expect(options).toMatchObject({ shell: false, stdio: 'ignore', windowsHide: true,
+    expect(options).toMatchObject({ shell: false, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
       env: { SYSTEMROOT: 'C:\\Windows', TEMP: 'C:\\Temp', USERPROFILE: 'C:\\Users\\runner', SFUD_ACL_PATH: target } });
     expect(options?.env?.PSModulePath).toBe(path.join('C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'));
     for (const key of Object.keys(options?.env ?? {})) {
@@ -71,6 +72,19 @@ describe('Windows ACL PowerShell 실행 경계', () => {
     await vi.advanceTimersByTimeAsync(10_000);
     await rejected;
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+    child.emit('close', null, 'SIGKILL');
+  });
+
+  it('타임아웃은 마지막 고정 단계만 보고하고 임의의 프로세스 출력은 숨긴다', async () => {
+    vi.useFakeTimers();
+    const child = childProcess();
+    const operation = runWindowsPowerShell('exit 0', {});
+    child.stdout.write('private-value\nSFUD_ACL_STA');
+    child.stdout.write('GE=read-acl\n');
+    const rejected = expect(operation).rejects.toThrow('10000ms, 단계: read-acl');
+    await vi.advanceTimersByTimeAsync(10_000);
+    await rejected;
+    await expect(operation).rejects.not.toThrow('private-value');
     child.emit('close', null, 'SIGKILL');
   });
 });
