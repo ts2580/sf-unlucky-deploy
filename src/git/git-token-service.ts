@@ -78,7 +78,7 @@ export class GitTokenService {
         const repository = await provider.inspect(address, undefined, AbortSignal.timeout(20_000));
         return await this.connections.save({ ownerUserId: owner, provider: input.provider, providerHost: address.host,
           providerAccountId: repository.repositoryId, displayName: address.repositoryPath.slice(0, 200),
-          repositoryPath: connectionRepositoryPath(address), grantedPermissions: [], tokens },
+          repositoryPath: connectionRepositoryPath(address), grantedPermissions: [], tokens, ...(input.alias === undefined ? {} : { alias: input.alias }) },
         previous === undefined ? undefined : { id: replaceId!, tokenVersion: previous.tokenVersion, changeTarget: input.changeTarget === true });
       }
       if (previous?.connection.repositoryPath !== undefined && !input.changeTarget) throw new GitError('GIT_CONNECTION_REQUIRED');
@@ -110,7 +110,7 @@ export class GitTokenService {
       const grantedPermissions = typeof scopes === 'string' ? scopes.split(',').map((scope) => scope.trim()).filter(Boolean) : [];
       return await this.connections.save({ ownerUserId: owner, provider: input.provider,
         providerHost: normalizeRepository('account/repository', input.provider).host, providerAccountId, displayName,
-        grantedPermissions, tokens }, previous === undefined ? undefined : { id: replaceId!, tokenVersion: previous.tokenVersion, changeTarget: input.changeTarget === true });
+        grantedPermissions, tokens, ...(input.alias === undefined ? {} : { alias: input.alias }) }, previous === undefined ? undefined : { id: replaceId!, tokenVersion: previous.tokenVersion, changeTarget: input.changeTarget === true });
     } catch (error) {
       if (error instanceof GitError) throw error;
       throw new GitError('GIT_REAUTH_REQUIRED');

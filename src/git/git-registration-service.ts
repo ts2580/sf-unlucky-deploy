@@ -126,8 +126,12 @@ export class GitRegistrationService {
     await Promise.allSettled(this.tails.values());
   }
   public async sources(owner: string): Promise<WorkspaceSource[]> {
+    const connections = await this.database.all<{ id: string; alias: string | null }[]>(
+      "SELECT id, alias FROM git_connections WHERE owner_user_id = ? AND status <> 'REVOKED'", owner,
+    );
+    const aliases = new Map(connections.map((connection) => [connection.id, connection.alias]));
     return (await this.list(owner)).filter((item) => !item.requiresRepositoryUrl).map((item) => ({ id: `git-registered:${item.id}`, kind: 'local', location: 'git',
-      label: `${item.alias ?? item.request.repositoryPath} · ${item.request.ref.name}`,
+      label: `${item.alias ?? (item.request.connectionId === undefined ? undefined : aliases.get(item.request.connectionId)) ?? item.request.repositoryPath} · ${item.request.ref.name}`,
       detail: '등록 브랜치 · 비교 시작 시 자동 동기화' }));
   }
 }
