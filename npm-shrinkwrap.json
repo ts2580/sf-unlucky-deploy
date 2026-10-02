@@ -7,6 +7,7 @@
     "": {
       "name": "@trstyq/sf-unlucky-deploy",
       "version": "0.4.0-rc.3",
+      "license": "MIT",
       "dependencies": {
         "@fastify/static": "^10.1.3",
         "@salesforce/core": "8.32.6",
@@ -46,8 +47,7 @@
       },
       "engines": {
         "node": ">=22.19.0"
-      },
-      "license": "MIT"
+      }
     },
     "node_modules/@babel/helper-string-parser": {
       "version": "7.29.7",
@@ -3393,7 +3393,9 @@
       }
     },
     "node_modules/ajv/node_modules/fast-uri": {
-      "version": "3.1.6",
+      "version": "3.1.8",
+      "resolved": "https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.8.tgz",
+      "integrity": "sha512-GZMtZUTNRpOVIECoXwLNZS5xUGE+mVNbTB8h/7Rwh2TFWcBQiPzTgyZi05BF9UMZKkLJv8XBRJTlU7zg8+ZfMg==",
       "funding": [
         {
           "type": "github",
@@ -3506,7 +3508,9 @@
       }
     },
     "node_modules/brace-expansion": {
-      "version": "5.0.9",
+      "version": "5.0.12",
+      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.12.tgz",
+      "integrity": "sha512-YovQ3rzhaLMIrDjNDMkNS01tea93qhEhG5xy8f6+R0l+dw3Ki+5sCoIoI942iuLZTHWogWktgwVDhU09iNEimQ==",
       "license": "MIT",
       "dependencies": {
         "balanced-match": "^4.0.2"
@@ -4259,7 +4263,9 @@
       "license": "MIT"
     },
     "node_modules/fast-uri": {
-      "version": "4.1.3",
+      "version": "4.2.1",
+      "resolved": "https://registry.npmjs.org/fast-uri/-/fast-uri-4.2.1.tgz",
+      "integrity": "sha512-TmHQgewjHtMq1E5QKA0tOE0yeYGQs25KZC/ziJpubRtWI15W92e6vPFydWOeZBVROSHBYw/QhD9d5OefdD6LDg==",
       "funding": [
         {
           "type": "github",
@@ -4317,7 +4323,9 @@
       }
     },
     "node_modules/fastify": {
-      "version": "5.12.1",
+      "version": "5.12.5",
+      "resolved": "https://registry.npmjs.org/fastify/-/fastify-5.12.5.tgz",
+      "integrity": "sha512-OB2k1dlxs5/NAABqeKV2FUHkSD2BbENsCak8yULVcymn3fHIPDVa9TI3SDnJSWYSllZmSYuZXy2gTnsT+Sut1A==",
       "funding": [
         {
           "type": "github",
@@ -6895,7 +6903,9 @@
       }
     },
     "node_modules/undici": {
-      "version": "6.28.0",
+      "version": "6.29.0",
+      "resolved": "https://registry.npmjs.org/undici/-/undici-6.29.0.tgz",
+      "integrity": "sha512-R+RODBqp6i2pPflGdq+xIOUkl+RNfGgHwoinecKu/JCuf2uO06cOKoDbI2P7Dn6KcswdKwrczbU6IYJ6K8X+wg==",
       "license": "MIT",
       "optional": true,
       "engines": {
