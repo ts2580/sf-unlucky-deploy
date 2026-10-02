@@ -15,7 +15,7 @@ import {
 import { gitHostPolicyFromAddresses, gitHostPolicyFromEnvironment } from './git/git-network.js';
 import { getHomeConfigPaths, initializeHomeConfiguration } from './config/user-config.js';
 
-export const CLI_VERSION = '0.4.0-rc.2';
+export const CLI_VERSION = '0.4.0-rc.3';
 
 export interface ProgramDependencies extends CommandDependencies, DeployCommandDependencies {}
 
