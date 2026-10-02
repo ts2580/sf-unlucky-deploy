@@ -1,5 +1,5 @@
 import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
-import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,6 +9,7 @@ import { assertPackedMetadataMatches, assertSafeArchive, verifyUiAssetPaths } fr
 const root = process.cwd();
 const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'sfud-package-smoke-'));
 let ui;
+let successMessage;
 
 try {
   const arguments_ = process.argv.slice(2);
@@ -19,10 +20,10 @@ try {
   const tarball = suppliedTarball === undefined
     ? await createTarball(temporaryDirectory, useExistingBuild)
     : path.resolve(root, suppliedTarball);
-  const entries = (await run('tar', ['-tf', tarball], root)).split(/\r?\n/u).filter(Boolean);
+  const entries = (await readTarball(tarball, '-tf')).split(/\r?\n/u).filter(Boolean);
   assertSafeArchive(entries);
   if (!entries.includes('package/npm-shrinkwrap.json')) throw new Error('릴리즈 tarball에 npm-shrinkwrap.json이 없습니다.');
-  const archivePackageJson = JSON.parse(await run('tar', ['-xOf', tarball, 'package/package.json'], root));
+  const archivePackageJson = JSON.parse(await readTarball(tarball, '-xOf', 'package/package.json'));
   const sourcePackageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
   assertPackedMetadataMatches(archivePackageJson, sourcePackageJson);
   if (!entries.includes('package/dist/cli.js') || !entries.includes('package/dist/ui/index.html')) {
@@ -76,36 +77,35 @@ try {
   const databasePath = path.join(dataDirectory, 'sfud.db');
   const databaseBytes = await readFile(databasePath);
   if (databaseBytes.subarray(0, 16).toString('ascii') !== 'SQLite format 3\0') throw new Error('UI가 SQLite 데이터베이스를 생성하지 않았습니다.');
-  const packageRequire = createRequire(path.join(packageRoot, 'package.json'));
-  const sqlite3 = packageRequire('sqlite3');
-  const configuredMode = await sqliteGet(sqlite3, databasePath, 'SELECT mode FROM runtime_mode WHERE id = 1');
+  const configuredMode = await sqlite(packageRoot, databasePath, 'get', 'SELECT mode FROM runtime_mode WHERE id = 1');
   if (configuredMode?.mode !== 'local') throw new Error('홈 설정의 LOCAL=true가 설치된 UI에 적용되지 않았습니다.');
-  await sqliteExec(sqlite3, databasePath, 'CREATE TABLE IF NOT EXISTS package_smoke (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO package_smoke(value) VALUES ("sqlite-write-ok");');
-  const written = await sqliteGet(sqlite3, databasePath, 'SELECT value FROM package_smoke ORDER BY id DESC LIMIT 1');
+  await sqlite(packageRoot, databasePath, 'exec', 'CREATE TABLE IF NOT EXISTS package_smoke (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO package_smoke(value) VALUES ("sqlite-write-ok");');
+  const written = await sqlite(packageRoot, databasePath, 'get', 'SELECT value FROM package_smoke ORDER BY id DESC LIMIT 1');
   if (written?.value !== 'sqlite-write-ok') throw new Error('SQLite native binding 쓰기 검증 실패');
 
   const restartPort = await reservePort();
   ui = startUi(path.join(packageRoot, 'dist/cli.js'), temporaryDirectory, ['ui', '--port', String(restartPort), '--no-open'], env);
   const restarted = await waitForUi(`http://127.0.0.1:${restartPort}`, ui);
   if (restarted.version !== actualVersion) throw new Error('SQLite 데이터가 있는 디렉터리에서 UI 재시작이 실패했습니다.');
-  const persisted = await sqliteGet(sqlite3, databasePath, 'SELECT value FROM package_smoke ORDER BY id DESC LIMIT 1');
+  const persisted = await sqlite(packageRoot, databasePath, 'get', 'SELECT value FROM package_smoke ORDER BY id DESC LIMIT 1');
   if (persisted?.value !== 'sqlite-write-ok') throw new Error('SQLite 재시작 후 기록이 보존되지 않았습니다.');
   await stopUi(ui);
   ui = undefined;
-  console.log(`package smoke PASS: ${path.basename(tarball)} · sfud ${actualVersion} · Node ${process.version} · home-config/init/no-overwrite/UI/SQLite/cross-cwd-restart`);
+  successMessage = `package smoke PASS: ${path.basename(tarball)} · sfud ${actualVersion} · Node ${process.version} · home-config/init/no-overwrite/UI/SQLite/cross-cwd-restart`;
 } finally {
   if (ui !== undefined) await stopUi(ui).catch(() => {});
   await rm(temporaryDirectory, { recursive: true, force: true });
 }
+console.log(successMessage);
 
 async function verifyUiAssets(tarball, entries) {
-  const html = await run('tar', ['-xOf', tarball, 'package/dist/ui/index.html'], root);
+  const html = await readTarball(tarball, '-xOf', 'package/dist/ui/index.html');
   verifyUiAssetPaths(html, entries);
 }
 
 async function verifySourceMaps(tarball, entries) {
   for (const entry of entries.filter((item) => item.endsWith('.map'))) {
-    const map = JSON.parse(await run('tar', ['-xOf', tarball, entry], root));
+    const map = JSON.parse(await readTarball(tarball, '-xOf', entry));
     if (Array.isArray(map.sourcesContent) && map.sourcesContent.some((source) => typeof source === 'string' && source.length > 0)) {
       throw new Error(`소스가 포함된 source map은 배포할 수 없습니다: ${entry}`);
     }
@@ -113,6 +113,12 @@ async function verifySourceMaps(tarball, entries) {
       throw new Error(`절대 개발 경로를 포함한 source map: ${entry}`);
     }
   }
+}
+
+async function readTarball(tarball, operation, ...entries) {
+  // Git Bash의 GNU tar는 D:\\...의 콜론을 원격 호스트 구분자로 해석한다.
+  // archive가 있는 디렉터리에서 파일명만 전달하면 GNU/BSD tar 모두 동작한다.
+  return await run('tar', [operation, path.basename(tarball), ...entries], path.dirname(tarball));
 }
 
 async function createTarball(destination, useExistingBuild) {
@@ -165,27 +171,16 @@ async function stopUi(child) {
   globalThis.clearTimeout(timer);
 }
 
-async function sqliteExec(sqlite3, filename, sql) {
-  await new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(filename, (openError) => {
-      if (openError) { reject(openError); return; }
-      db.exec(sql, (error) => db.close((closeError) => error ?? closeError ? reject(error ?? closeError) : resolve()));
-    });
-  });
-}
-
-async function sqliteGet(sqlite3, filename, sql) {
-  return await new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(filename, (openError) => {
-      if (openError) { reject(openError); return; }
-      db.get(sql, (error, row) => db.close((closeError) => error ?? closeError ? reject(error ?? closeError) : resolve(row)));
-    });
-  });
+async function sqlite(packageRoot, filename, operation, sql) {
+  // Windows는 로드된 native DLL을 잠그므로 검사 프로세스 종료 후에만 설치 폴더를 삭제한다.
+  const script = fileURLToPath(new URL('./package-smoke-sqlite.mjs', import.meta.url));
+  return JSON.parse(await run(process.execPath, [script, packageRoot, filename, operation, sql], root));
 }
 
 async function run(command, args, cwd, env = selectedNodeEnvironment()) {
   return await new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, env, shell: process.platform === 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
+    const shell = process.platform === 'win32' && (command === 'npm' || command === 'npx' || command.endsWith('.cmd'));
+    const child = spawn(command, args, { cwd, env, shell, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
