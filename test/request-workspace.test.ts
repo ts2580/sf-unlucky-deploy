@@ -1,6 +1,8 @@
 import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -21,7 +23,7 @@ describe('요청별 임시 DX workspace', () => {
     for (let index = 0; index < 2; index += 1) {
       await withRequestWorkspace(template, async (workspacePath) => {
         observed.push(workspacePath);
-        expect((await stat(workspacePath)).mode & 0o777).toBe(0o700);
+        if (process.platform !== 'win32') expect((await stat(workspacePath)).mode & 0o777).toBe(0o700);
         expect(JSON.parse(await readFile(path.join(workspacePath, 'sfdx-project.json'), 'utf8')))
           .toMatchObject({
             name: 'sfud-request-workspace',
@@ -47,6 +49,32 @@ describe('요청별 임시 DX workspace', () => {
     })).rejects.toThrow('request failed');
 
     await expect(access(observed)).rejects.toThrow();
+  });
+
+  it.skipIf(process.platform !== 'win32')('Windows 자식 프로세스의 cwd 잠금이 풀리면 재시도로 정리한다', async () => {
+    const template = await createTemplate();
+    let child: ChildProcess | undefined;
+    let closed: Promise<unknown> | undefined;
+    let observed = '';
+    try {
+      await expect(withRequestWorkspace(template, async (workspacePath) => {
+        observed = workspacePath;
+        temporaryDirectories.push(workspacePath);
+        child = spawn(process.execPath, ['-e',
+          "process.on('message', () => setTimeout(() => process.exit(0), 500)); process.send('ready');"],
+        { cwd: workspacePath, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true });
+        closed = once(child, 'close');
+        await once(child, 'message');
+        await expect(rm(workspacePath, { recursive: true, force: true }))
+          .rejects.toMatchObject({ code: 'EBUSY' });
+        child.send('release');
+        return 'completed';
+      })).resolves.toBe('completed');
+      await expect(access(observed)).rejects.toThrow();
+    } finally {
+      child?.kill();
+      await closed;
+    }
   });
 });
 

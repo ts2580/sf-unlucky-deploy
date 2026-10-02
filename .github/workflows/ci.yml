@@ -123,6 +123,9 @@ jobs:
       - name: 홈 설정 권한·주입 방지 회귀 검사
         run: npx vitest run test/home-config.test.ts test/home-config-cli.test.ts test/windows-powershell.test.ts
 
+      - name: 임시 작업 폴더 잠금·정리 오류 회귀 검사
+        run: npx vitest run test/request-workspace.test.ts test/request-workspace-cleanup.test.ts
+
       - name: process path Git 관리 저장소 sqlite 스모크
         run: npm run test:platform
 

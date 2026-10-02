@@ -13,12 +13,19 @@ export async function withRequestWorkspace<T>(
   task: (workspacePath: string) => Promise<T>,
 ): Promise<T> {
   const workspacePath = await mkdtemp(path.join(os.tmpdir(), 'sfud-request-'));
-  await chmod(workspacePath, 0o700);
   try {
+    await chmod(workspacePath, 0o700);
     await initializeWorkspace(workspacePath, await readProjectApiVersion(templateProjectPath));
     return await task(workspacePath);
   } finally {
-    await rm(workspacePath, { recursive: true, force: true });
+    try {
+      await rm(workspacePath, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch {
+      // Cleanup must not replace a completed comparison/deployment or its original error.
+      process.emitWarning(`임시 작업 폴더를 정리하지 못했습니다. 작업 종료 후 삭제해 주세요: ${workspacePath}`, {
+        code: 'SFUD_WORKSPACE_CLEANUP_FAILED',
+      });
+    }
   }
 }
 
