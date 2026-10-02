@@ -680,10 +680,14 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
                 if (!checked) setShowIdentical(false);
               }} />
               <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} disabled={!compareCurrentType || comparisonLimitExceeded} />
-              <button className={`button button-secondary comparison-run-button${comparing ? ' comparison-run-loading' : ''}`} type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesStatus !== 'ready' || !scopeValid || !sourceId || (compareCurrentType && (!targetOrgId || sourceId === targetOrgId))}><Icon name={comparing ? 'refresh' : 'compare'} /><span>{comparing ? '메타데이터 받는 중……' : '메타데이터 받아오기'}</span></button>
+              <PackageExclusions key={packageOrgIds} sourceIds={packageOrgIds} selectedIds={excludedPackageIds}
+                onChange={(ids) => setPackageSelection({ sourceIds: packageOrgIds, ids })} />
             </div>
-            <PackageExclusions key={packageOrgIds} sourceIds={packageOrgIds} selectedIds={excludedPackageIds}
-              onChange={(ids) => setPackageSelection({ sourceIds: packageOrgIds, ids })} />
+            <div className="comparison-run-actions">
+              <button className={`button button-primary comparison-run-button${comparing ? ' comparison-run-loading' : ''}`} type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesStatus !== 'ready' || !scopeValid || !sourceId || (compareCurrentType && (!targetOrgId || sourceId === targetOrgId))}><Icon name={comparing ? 'refresh' : 'compare'} /><span>{compareCurrentType && !comparisonLimitExceeded
+                ? comparing ? '메타데이터 비교 중……' : '메타데이터 비교'
+                : comparing ? '메타데이터 다운로드 중……' : '메타데이터 다운로드'}</span></button>
+            </div>
           </section>
 
           {comparisonJob !== null && !['QUEUED', 'RUNNING'].includes(comparisonJob.status) && <ComparisonResultPanel

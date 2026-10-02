@@ -121,12 +121,7 @@ test('큰 화면의 작업 공간을 활용하고 좁은 화면에서는 패널�
     } else {
       expect(metrics.search.y).toBeGreaterThanOrEqual(metrics.source.bottom);
     }
-    if (width > 700) {
-      expect(metrics.button.y).toBeGreaterThanOrEqual(metrics.options.y);
-      expect(metrics.button.bottom).toBeLessThanOrEqual(metrics.options.bottom);
-    } else {
-      expect(metrics.button.y).toBeGreaterThanOrEqual(metrics.options.bottom);
-    }
+    expect(metrics.button.y).toBeGreaterThanOrEqual(metrics.options.bottom);
     if ([2560, 1920, 390, 320].includes(width)) {
       await page.screenshot({ path: testInfo.outputPath(`deploy-${width}.png`), fullPage: true });
     }
@@ -388,7 +383,7 @@ test('metadata type 조회 전 상태를 오류로 표시하지 않는다', asyn
     .toHaveClass(/field-hint-error/u);
 });
 
-test('설치 패키지 목록 오류 재시도와 선택 해제를 지원한다', async ({ page }) => {
+test('설치 패키지 목록 오류와 토글 선택 및 해제를 표시한다', async ({ page }) => {
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.route('**/api/v1/workspace', (route) => route.fulfill({ json: { orgs: [], projects: [], sources: [
@@ -408,15 +403,19 @@ test('설치 패키지 목록 오류 재시도와 선택 해제를 지원한다'
   });
   await login(page, '/deploy');
   const packages = page.getByRole('group', { name: '비교에서 제외할 설치 패키지' });
+  await page.locator('.package-exclusions-summary').click();
   await expect(packages.getByRole('alert')).toContainText('목록 조회 권한');
-  await packages.getByRole('button', { name: '목록 새로고침' }).click();
+  await expect(packages.getByRole('button')).toHaveCount(0);
+  await page.reload();
+  await page.locator('.package-exclusions-summary').click();
   await packages.getByRole('checkbox', { name: 'Installed CRM 비교에서 제외' }).check();
-  await expect(packages.getByText('1개 선택')).toBeVisible();
-  await packages.getByRole('button', { name: '선택 해제', exact: true }).click();
+  await expect(page.locator('.package-exclusions-summary')).toContainText('1개 패키지 제외');
+  await packages.getByRole('checkbox', { name: 'Installed CRM 비교에서 제외' }).uncheck();
   await expect(packages.getByRole('checkbox')).not.toBeChecked();
   await page.setViewportSize({ width: 320, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await packages.getByRole('button', { name: '목록 새로고침' }).click();
+  await page.reload();
+  await page.locator('.package-exclusions-summary').click();
   await expect(packages.getByText('설치된 패키지가 없습니다.')).toBeVisible();
   expect(pageErrors).toEqual([]);
 });
@@ -499,7 +498,9 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(page.getByText('전체 메타데이터', { exact: true })).toHaveCount(0);
   await expect(page.getByText('3개 metadata type 검색 가능 · source와 target의 합집합')).toBeVisible();
   const comparisonOptions = page.getByRole('region', { name: '메타데이터 검색' });
-  const comparisonButton = comparisonOptions.getByRole('button', { name: '메타데이터 받아오기' });
+  const comparisonButton = comparisonOptions.locator('.comparison-run-button');
+  await expect(comparisonButton).toHaveAccessibleName('메타데이터 비교');
+  await expect(comparisonButton).toHaveClass(/button-primary/u);
   const apexTestOptions = page.getByRole('region', { name: 'Apex 테스트 설정' });
   await expect(comparisonOptions.getByText('Strict 비교')).toHaveCount(0);
   await expect(comparisonOptions.getByText('현재 타입 비교 실행')).toBeVisible();
@@ -517,10 +518,8 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   expect(desktopCurrentTypeToggleBox).not.toBeNull();
   expect(desktopIdenticalToggleBox).not.toBeNull();
   expect(desktopApexTestOptionsBox).not.toBeNull();
-  expect(desktopComparisonButtonBox!.y).toBeGreaterThanOrEqual(desktopCurrentTypeToggleBox!.y);
-  expect(desktopComparisonButtonBox!.y + desktopComparisonButtonBox!.height).toBeLessThanOrEqual(desktopCurrentTypeToggleBox!.y + desktopCurrentTypeToggleBox!.height);
-  expect(desktopComparisonButtonBox!.y).toBeGreaterThanOrEqual(desktopIdenticalToggleBox!.y);
-  expect(desktopComparisonButtonBox!.y + desktopComparisonButtonBox!.height).toBeLessThanOrEqual(desktopIdenticalToggleBox!.y + desktopIdenticalToggleBox!.height);
+  expect(desktopComparisonButtonBox!.y).toBeGreaterThan(desktopCurrentTypeToggleBox!.y + desktopCurrentTypeToggleBox!.height);
+  expect(desktopComparisonButtonBox!.y).toBeGreaterThan(desktopIdenticalToggleBox!.y + desktopIdenticalToggleBox!.height);
   expect(desktopIdenticalToggleBox!.x + desktopIdenticalToggleBox!.width).toBeLessThan(desktopComparisonButtonBox!.x);
   expect(desktopComparisonButtonBox!.y + desktopComparisonButtonBox!.height).toBeLessThan(desktopApexTestOptionsBox!.y);
   await page.setViewportSize({ width: 390, height: 844 });
@@ -542,11 +541,14 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   const compareCurrentType = comparisonOptions.getByRole('checkbox', { name: /현재 타입 비교 실행/u });
   const showIdentical = comparisonOptions.getByRole('checkbox', { name: /동일 항목 표시/u });
   const excludePackages = comparisonOptions.getByRole('checkbox', { name: 'Installed CRM 비교에서 제외' });
+  await comparisonOptions.locator('.package-exclusions-summary').click();
   await expect(excludePackages).not.toBeChecked();
   await excludePackages.check();
   await expect(comparisonOptions.getByRole('checkbox', { name: 'Keep Reports 비교에서 제외' })).not.toBeChecked();
   await expect(comparisonOptions.getByRole('checkbox', { name: 'Unlocked 비교에서 제외' })).toBeDisabled();
   await compareCurrentType.uncheck();
+  await expect(comparisonButton).toHaveAccessibleName('메타데이터 다운로드');
+  await comparisonOptions.locator('.package-exclusions-summary').click();
   await expect(excludePackages).not.toBeChecked();
   await excludePackages.check();
   await expect(showIdentical).toBeDisabled();
@@ -558,7 +560,7 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
     excludedPackageIds: ['033000000000001'],
   });
   expect(sourceOnlyRequest).not.toHaveProperty('leftSourceId');
-  const sourceOnlyLoadingButton = comparisonOptions.getByRole('button', { name: '메타데이터 받는 중……' });
+  const sourceOnlyLoadingButton = comparisonOptions.getByRole('button', { name: '메타데이터 다운로드 중……' });
   await expect(sourceOnlyLoadingButton).toBeVisible();
   await expect(sourceOnlyLoadingButton.locator('.icon').first()).toHaveCSS('animation-name', 'spin');
   await expect(page.locator('.comparison-progress')).toHaveCount(0);
@@ -574,8 +576,8 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(showIdentical).toBeEnabled();
   await showIdentical.check();
   await expect(comparisonOptions.getByText('3개 metadata type 검색 가능 · source와 target의 합집합')).toBeVisible();
-  await comparisonOptions.getByRole('button', { name: '메타데이터 받아오기' }).click();
-  await expect(comparisonOptions.getByRole('button', { name: '메타데이터 받는 중……' })).toBeVisible({ timeout: 300 });
+  await comparisonOptions.getByRole('button', { name: '메타데이터 비교' }).click();
+  await expect(comparisonOptions.getByRole('button', { name: '메타데이터 비교 중……' })).toBeVisible({ timeout: 300 });
   await expect(comparisonOptions.getByText('읽기 전용 비교')).toHaveCount(0);
   await expect(comparisonOptions.getByText('현재 metadata type과 옵션으로 source와 target을 비교합니다.')).toHaveCount(0);
   await expect(page.getByLabel('비교 현황')).toContainText(/대기열|진행 중/u);
@@ -583,6 +585,23 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(page.getByRole('heading', { name: 'right → left' })).toBeVisible({ timeout: 5_000 });
   await expect(page.getByLabel('비교 현황')).toContainText('완료');
   await expect(page.getByText('Hello', { exact: true })).toBeVisible();
+  const statusFilters = page.getByRole('group', { name: '메타데이터 상태 필터' });
+  const modifiedFilter = statusFilters.getByRole('button', { name: /MODIFIED/u });
+  const identicalFilter = statusFilters.getByRole('button', { name: /IDENTICAL/u });
+  await expect(page.locator('.metadata-result-filters').getByRole('button', { name: '전체', exact: true })).toHaveCount(0);
+  await modifiedFilter.click();
+  await expect(modifiedFilter).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.component-result .component-status')).toHaveText(['MODIFIED']);
+  await identicalFilter.click();
+  await expect(modifiedFilter).toHaveAttribute('aria-pressed', 'true');
+  await expect(identicalFilter).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.component-result .component-status')).toHaveText(['MODIFIED', 'IDENTICAL']);
+  await modifiedFilter.click();
+  await expect(modifiedFilter).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('.component-result .component-status')).toHaveText(['IDENTICAL']);
+  await identicalFilter.click();
+  await expect(statusFilters.locator('[aria-pressed="true"]')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '필터 초기화' })).toHaveCount(0);
   const semanticEqualComponent = page.locator('details.component-result').filter({ hasText: 'Admin' });
   await expect(semanticEqualComponent.locator('.component-status')).toHaveText('IDENTICAL');
   await semanticEqualComponent.locator('summary').click();
@@ -658,12 +677,12 @@ test('선택 변경 후 이전 비교 polling 결과를 폐기한다', async ({ 
   });
 
   await login(page, '/deploy');
-  await page.getByRole('button', { name: '메타데이터 받아오기' }).click();
-  await expect(page.getByRole('button', { name: '메타데이터 받는 중……' })).toBeVisible();
+  await page.getByRole('button', { name: '메타데이터 비교' }).click();
+  await expect(page.getByRole('button', { name: '메타데이터 비교 중……' })).toBeVisible();
   await expect(page.locator('.comparison-progress')).toHaveCount(0);
   await expect.poll(() => pollingStarted, { timeout: 3_000 }).toBe(true);
   await page.getByLabel('DESIRED SOURCE 비교 소스').selectOption('org:third');
-  await expect(page.getByRole('button', { name: '메타데이터 받아오기' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '메타데이터 비교' })).toBeEnabled();
   await page.waitForTimeout(600);
 
   await expect(page.getByRole('heading', { name: 'right → left' })).toHaveCount(0);
@@ -708,7 +727,7 @@ for (const width of [1440, 390]) {
     });
     await login(page, '/deploy');
     await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue(registered.id);
-    await page.getByRole('button', { name: '메타데이터 받아오기' }).click();
+    await page.getByRole('button', { name: '메타데이터 비교' }).click();
     await expect(page.getByText('비교 제한 초과 · 배포 목록 준비 완료')).toBeVisible();
     await expect(page.getByText(/비교 대상 파일 2,001개/)).toBeVisible();
     await expect(page.getByLabel('현재 타입 비교 실행')).toBeDisabled();
@@ -874,8 +893,8 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByText('일치하는 source Apex 클래스가 없습니다.')).toHaveCount(0);
   await expect(directTestInput).toHaveAttribute('aria-expanded', 'false');
   await directTestInput.clear();
-  await page.getByRole('button', { name: '메타데이터 받아오기' }).click();
-  const metadataLoadingButton = page.getByRole('button', { name: '메타데이터 받는 중……' });
+  await page.getByRole('button', { name: '메타데이터 비교' }).click();
+  const metadataLoadingButton = page.getByRole('button', { name: '메타데이터 비교 중……' });
   await expect(metadataLoadingButton).toBeVisible();
   await expect(metadataLoadingButton.locator('.icon').first()).toHaveCSS('animation-name', 'spin');
   await expect(page.locator('.comparison-progress')).toHaveCount(0);
@@ -1029,7 +1048,7 @@ for (const width of [1440, 320]) {
       json: route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/v1/comparisons' ? { jobs: [] } : { job },
     }));
     await login(page, '/deploy');
-    await page.getByRole('button', { name: '메타데이터 받아오기' }).click();
+    await page.getByRole('button', { name: '메타데이터 비교' }).click();
     const pagination = page.getByRole('navigation', { name: '메타데이터 검색 결과 페이지' });
     const numbers = pagination.locator('.component-page-numbers button');
     const previous = pagination.getByRole('button', { name: '이전 페이지' });
@@ -1062,7 +1081,7 @@ for (const width of [1440, 320]) {
     await page.getByRole('searchbox', { name: '메타데이터 검색', exact: true }).fill('Paged201');
     await expect(pagination).toHaveCount(0);
     await expect(page.locator('.component-result')).toHaveCount(1);
-    await page.getByRole('button', { name: '필터 초기화' }).click();
+    await page.getByRole('searchbox', { name: '메타데이터 검색', exact: true }).fill('');
     await expect(numbers).toHaveText(['1', '2', '3', '4', '5']);
     await expect(previous).toBeDisabled();
     await expect(page.getByLabel('Paged001 배포 대상으로 선택')).toBeChecked();

@@ -61,7 +61,7 @@ export function ComparisonResultPanel({
   comparisonOnly?: boolean;
 }) {
   const [resultPage, setResultPage] = useState(1);
-  const [statusFilter, setStatusFilter] = useState<'ALL' | ComparisonComponent['status']>('ALL');
+  const [statusFilters, setStatusFilters] = useState<ComparisonComponent['status'][]>([]);
   const [query, setQuery] = useState('');
   const [expandedResult, setExpandedResult] = useState<{ id: string; components: ComparisonComponent[] }>();
   const [identicalLoading, setIdenticalLoading] = useState(false);
@@ -69,9 +69,10 @@ export function ComparisonResultPanel({
   const [loadAttempt, setLoadAttempt] = useState(0);
   const components = expandedResult?.id === job.id ? expandedResult.components : job.result?.components ?? [];
   const identicalMissing = (job.result?.summary.identical ?? 0) > components.filter((item) => item.status === 'IDENTICAL').length;
-  useEffect(() => { setResultPage(1); setStatusFilter('ALL'); setQuery(''); setExpandedResult(undefined); setFilterError(''); }, [job.id]);
+  const identicalSelected = statusFilters.includes('IDENTICAL');
+  useEffect(() => { setResultPage(1); setStatusFilters([]); setQuery(''); setExpandedResult(undefined); setFilterError(''); }, [job.id]);
   useEffect(() => {
-    if (statusFilter !== 'IDENTICAL' || !identicalMissing) { setIdenticalLoading(false); return; }
+    if (!identicalSelected || !identicalMissing) { setIdenticalLoading(false); return; }
     const controller = new AbortController();
     setIdenticalLoading(true); setFilterError('');
     void getComparisonJob(job.id, controller.signal, true).then((response) => {
@@ -82,7 +83,7 @@ export function ComparisonResultPanel({
       if (!controller.signal.aborted) setFilterError(error instanceof Error ? error.message : '동일 항목을 불러오지 못했습니다.');
     }).finally(() => { if (!controller.signal.aborted) setIdenticalLoading(false); });
     return () => controller.abort();
-  }, [job.id, statusFilter, identicalMissing, loadAttempt]);
+  }, [job.id, identicalSelected, identicalMissing, loadAttempt]);
   const sourceOnly = job.result?.comparisonLimit?.exceeded === true || (deploymentView && job.mode === 'source');
   const displaySource = deploymentView || sourceOnly ? job.right : job.left;
   const displayTarget = deploymentView ? job.left : job.right;
@@ -96,7 +97,7 @@ export function ComparisonResultPanel({
   const summary = job.result.summary;
   const search = query.trim().toLocaleLowerCase();
   const filteredComponents = components.filter((component) =>
-    (statusFilter === 'ALL' || component.status === statusFilter) && (search === '' ||
+    (statusFilters.length === 0 || statusFilters.includes(component.status)) && (search === '' ||
       [component.fullName, component.type, ...component.files.map((file) => file.path)].some((text) => text.toLocaleLowerCase().includes(search))));
   const resultPageCount = Math.max(1, Math.ceil(filteredComponents.length / METADATA_RESULTS_PER_PAGE));
   const currentResultPage = Math.min(resultPage, resultPageCount);
@@ -104,8 +105,10 @@ export function ComparisonResultPanel({
   const visiblePages = Array.from({ length: Math.min(VISIBLE_RESULT_PAGES, resultPageCount) }, (_, index) => firstVisiblePage + index);
   const resultStart = (currentResultPage - 1) * METADATA_RESULTS_PER_PAGE;
   const visibleComponents = filteredComponents.slice(resultStart, resultStart + METADATA_RESULTS_PER_PAGE);
-  const chooseStatus = (status: typeof statusFilter) => {
-    setStatusFilter(status); setResultPage(1); setFilterError(''); setLoadAttempt((value) => value + 1);
+  const toggleStatus = (status: ComparisonComponent['status']) => {
+    setStatusFilters((current) => current.includes(status) ? current.filter((entry) => entry !== status) : [...current, status]);
+    setResultPage(1);
+    if (status === 'IDENTICAL') setFilterError('');
   };
   return (
     <section className="comparison-result" aria-labelledby="comparison-result-title">
@@ -125,22 +128,20 @@ export function ComparisonResultPanel({
               ['MODIFIED', 'MODIFIED', summary.modified, 'summary-modified'],
               ['IDENTICAL', 'IDENTICAL', summary.identical, ''],
             ] as const).map(([status, label, count, className]) => <button key={status} type="button" className={className}
-              aria-pressed={statusFilter === status} onClick={() => chooseStatus(status)}><span>{label}</span><strong>{count}</strong></button>)}
+              aria-pressed={statusFilters.includes(status)} onClick={() => toggleStatus(status)}><span>{label}</span><strong>{count}</strong></button>)}
           </div>}
       <div className="metadata-result-filters">
-        {!sourceOnly && <button type="button" className="small-button" aria-pressed={statusFilter === 'ALL'} onClick={() => chooseStatus('ALL')}>전체</button>}
         <label>메타데이터 검색<input type="search" value={query} onChange={(event) => { setQuery(event.target.value); setResultPage(1); }}
           placeholder="이름 · 타입 · 파일 경로 검색" autoComplete="off" /></label>
         <span role="status">{filteredComponents.length}개 일치 · 전체 {components.length}개</span>
-        {(query !== '' || statusFilter !== 'ALL') && <button type="button" className="small-button" onClick={() => { setQuery(''); chooseStatus('ALL'); }}>필터 초기화</button>}
       </div>
       {identicalLoading && <p className="comparison-warning" role="status">동일 항목 불러오는 중…</p>}
-      {filterError && <p className="comparison-warning" role="alert">{filterError} <button type="button" onClick={() => chooseStatus('IDENTICAL')}>다시 시도</button></p>}
+      {filterError && <p className="comparison-warning" role="alert">{filterError} <button type="button" onClick={() => { setFilterError(''); setLoadAttempt((value) => value + 1); }}>다시 시도</button></p>}
       {job.result.warnings.map((warning) => <p className="comparison-warning" key={warning}><Icon name="shield" />{warning}</p>)}
       {deploymentView && !comparisonOnly && !sourceOnly && summary.removed > 0 && <p className="comparison-warning"><Icon name="shield" />TARGET ONLY 항목은 destructive manifest 없이는 target org에서 삭제되지 않습니다.</p>}
       <div className="component-results">
         {filteredComponents.length === 0
-          ? !identicalLoading && !filterError && <p className="empty-result">{query.trim() !== '' || statusFilter !== 'ALL' ? '선택한 상태와 검색 조건에 맞는 메타데이터가 없습니다.' : sourceOnly ? 'Source에서 받아온 메타데이터가 없습니다.' : '표시할 차이가 없습니다. 동일 항목은 IDENTICAL을 눌러 확인하세요.'}</p>
+          ? !identicalLoading && !filterError && <p className="empty-result">{query.trim() !== '' || statusFilters.length > 0 ? '선택한 상태와 검색 조건에 맞는 메타데이터가 없습니다.' : sourceOnly ? 'Source에서 받아온 메타데이터가 없습니다.' : '표시할 차이가 없습니다. 동일 항목은 IDENTICAL을 눌러 확인하세요.'}</p>
           : visibleComponents.map((component) => <details key={component.key} className={`component-result${deploymentView ? ' component-selectable' : ''}${selectedKeys.has(component.key) ? ' component-selected' : ''}`}>
               <summary>{deploymentView && <label className={`component-cart-check${component.status === 'REMOVED' || selectionDisabled ? ' component-cart-disabled' : ''}`} onClick={(event) => event.stopPropagation()}>
                 <input
