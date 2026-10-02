@@ -2,9 +2,9 @@ import { constants as fsConstants } from 'node:fs';
 import { open, lstat, mkdir, realpath, unlink, rmdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { parseEnv } from 'node:util';
 import { SfudError } from '../core/errors.js';
+import { runWindowsPowerShell } from './windows-powershell.js';
 
 const CONFIG_FILE = 'config.json';
 const SECRETS_FILE = 'secrets.env';
@@ -385,16 +385,7 @@ function resolveFilePath(key: string, value: string, directory: string): string 
 
 async function verifyWindowsAcl(target: string, mode: 'check' | 'set'): Promise<void> {
   if (process.platform !== 'win32') return;
-  const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
-  const result = spawnSync(path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
-    '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', POWERSHELL_ACL_SCRIPT,
-  ], {
-    encoding: 'utf8',
-    windowsHide: true,
-    env: { SystemRoot: systemRoot, SFUD_ACL_PATH: target, SFUD_ACL_MODE: mode },
-    timeout: 10_000,
-  });
-  if (result.error !== undefined || result.status !== 0) throw configurationError('Windows 사용자 ACL을 안전하게 확인하거나 설정하지 못했습니다.');
+  await runWindowsPowerShell(POWERSHELL_ACL_SCRIPT, { SFUD_ACL_PATH: target, SFUD_ACL_MODE: mode });
 }
 
 function noFollowFlag(): number {

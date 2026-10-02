@@ -3,12 +3,12 @@ import { lstat, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
 const cliFile = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
-const loaderFile = createRequire(import.meta.url).resolve('tsx');
+const loaderUrl = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href;
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -34,10 +34,10 @@ async function run(args: string[], cwd: string, environment: NodeJS.ProcessEnv):
   const stderrHandle = await open(stderrPath, 'w', 0o600);
   try {
     const code = await new Promise<number | null>((resolve, reject) => {
-      const child = spawn(process.execPath, ['--import', loaderFile, cliFile, ...args], {
+      const child = spawn(process.execPath, ['--import', loaderUrl, cliFile, ...args], {
         cwd, env: environment, stdio: ['ignore', stdoutHandle.fd, stderrHandle.fd],
       });
-      const timer = setTimeout(() => child.kill('SIGKILL'), 10_000);
+      const timer = setTimeout(() => child.kill('SIGKILL'), process.platform === 'win32' ? 60_000 : 10_000);
       child.once('error', (error) => { clearTimeout(timer); reject(error); });
       child.once('close', (code) => { clearTimeout(timer); resolve(code); });
     });
@@ -45,11 +45,13 @@ async function run(args: string[], cwd: string, environment: NodeJS.ProcessEnv):
   } finally { await stdoutHandle.close(); await stderrHandle.close(); }
 }
 
+const CLI_TEST_TIMEOUT_MS = process.platform === 'win32' ? 180_000 : 20_000;
+
 describe('홈 설정 CLI 실행 경계', () => {
   it('첫 UI 실행에서 자동 생성하고 환경변수·기존 설정을 보존하며 도움말과 경로 조회는 생성하지 않는다', async () => {
     const { cwd, environment, configFile } = await fixture();
     for (const args of [['--version'], ['ui', '--help'], ['config', 'path']]) {
-      expect((await run(args, cwd, environment)).code).toBe(0);
+      expect(await run(args, cwd, environment)).toMatchObject({ code: 0, stderr: '' });
       await expect(lstat(path.dirname(configFile))).rejects.toMatchObject({ code: 'ENOENT' });
     }
     // An invalid port stops before binding a socket, after the real CLI preAction hook.
@@ -69,22 +71,22 @@ describe('홈 설정 CLI 실행 경계', () => {
     expect((await run(['ui', '--no-open'], cwd, environment)).stderr).toContain('포트는 1부터 65535');
     expect(await readFile(secretsFile, 'utf8')).toContain('# SFUD_TOKEN_SECRET=');
     expect(await readFile(configFile)).toEqual(original);
-  }, 20_000);
+  }, CLI_TEST_TIMEOUT_MS);
 
   it('다른 작업 디렉터리에서 init/path를 실행하고 기존 설정을 보존한다', async () => {
     const { cwd, environment, configFile } = await fixture();
     expect(await run(['config', 'path'], cwd, environment)).toMatchObject({ code: 0, stdout: `${configFile}\n` });
-    expect((await run(['config', 'init'], cwd, environment)).code).toBe(0);
+    expect(await run(['config', 'init'], cwd, environment)).toMatchObject({ code: 0, stderr: '' });
     const original = await readFile(configFile, 'utf8');
     expect(await readFile(path.join(path.dirname(configFile), 'secrets.env'), 'utf8')).toContain('# SFUD_TOKEN_SECRET=');
     expect(JSON.parse(original)).toMatchObject({ version: 1, env: { LOCAL: 'true', SFUD_DATA_DIR: 'data/local' } });
     expect((await run(['config', 'init'], cwd, environment)).code).toBe(2);
     expect(await readFile(configFile, 'utf8')).toBe(original);
-  }, 20_000);
+  }, CLI_TEST_TIMEOUT_MS);
 
   it('옵션 값으로 받은 --help/-h가 설정 검사를 우회하지 않고 실제 도움말은 비밀 파일을 읽지 않는다', async () => {
     const { cwd, environment, configFile } = await fixture();
-    expect((await run(['config', 'init'], cwd, environment)).code).toBe(0);
+    expect(await run(['config', 'init'], cwd, environment)).toMatchObject({ code: 0, stderr: '' });
     const privateValue = 'fixture-value-never-print-in-error';
     await writeFile(configFile, JSON.stringify({ version: 1, env: { NODE_OPTIONS: privateValue } }));
     for (const helpValue of ['--help', '-h']) {
@@ -100,5 +102,5 @@ describe('홈 설정 CLI 실행 경계', () => {
     expect(help.stdout + help.stderr).not.toContain(privateValue);
     expect((await run(['--version'], cwd, environment)).code).toBe(0);
     expect((await run(['config', 'path'], cwd, environment)).code).toBe(0);
-  }, 20_000);
+  }, CLI_TEST_TIMEOUT_MS);
 });

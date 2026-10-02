@@ -1,8 +1,8 @@
 import { chmod, link, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { runWindowsPowerShell } from '../src/config/windows-powershell.js';
 
 import {
   getHomeConfigPaths,
@@ -19,7 +19,7 @@ afterEach(async () => {
 });
 
 async function configHome(): Promise<{ root: string; directory: string; environment: NodeJS.ProcessEnv }> {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-home-config-'));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'sfud home [ACL] & % ! '));
   roots.push(root);
   const directory = path.join(root, '.sfud');
   const environment = { SFUD_CONFIG_DIR: directory };
@@ -37,7 +37,7 @@ async function writeConfig(directory: string, env: Record<string, unknown>): Pro
   await chmod(path.join(directory, 'config.json'), 0o600);
 }
 
-describe('사용자 홈 설정 보안', () => {
+describe('사용자 홈 설정 보안', { timeout: process.platform === 'win32' ? 120_000 : 5_000 }, () => {
   it('기본 사용자 홈에 빈 설정을 자동 생성하고 기존 실행 모드와 사용자 설정을 보존한다', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'sfud automatic home '));
     roots.push(root);
@@ -222,11 +222,7 @@ $rule = [Security.AccessControl.FileSystemAccessRule]::new($sid, [Security.Acces
 $acl.AddAccessRule($rule)
 Set-Acl -LiteralPath $env:SFUD_ACL_PATH -AclObject $acl
 `;
-    const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
-    const result = spawnSync(path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
-      { encoding: 'utf8', windowsHide: true, env: { SystemRoot: systemRoot, SFUD_ACL_PATH: configFile }, timeout: 10_000 });
-    expect(result.status).toBe(0);
+    await runWindowsPowerShell(script, { SFUD_ACL_PATH: configFile });
     await expect(loadHomeConfiguration(environment)).rejects.toThrow(/ACL/u);
   });
 });
