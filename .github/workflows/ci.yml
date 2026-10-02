@@ -58,6 +58,9 @@ jobs:
       - name: 배포 잠금 파일 그래프 동기화
         run: npm run lockfile:check
 
+      - name: npm 패키징·발행 정책 회귀 검사
+        run: npm run test:npm-policy
+
       - name: 타입·단위 테스트·빌드
         run: npm run check
 
@@ -72,8 +75,8 @@ jobs:
       - name: 릴리스 tarball 설치 스모크
         run: npm run package:smoke -- --use-existing-build
 
-  linux-node20:
-    name: linux-node20-unit-build
+  linux-node22-minimum:
+    name: linux-node22.19-minimum
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -84,7 +87,7 @@ jobs:
       - name: Node.js 설정
         uses: actions/setup-node@v7
         with:
-          node-version: 20.19
+          node-version: '22.19.0'
           cache: npm
 
       - name: 의존성 설치
@@ -100,7 +103,7 @@ jobs:
         run: npm run build
 
   windows-smoke:
-    name: windows-node20.19-smoke
+    name: windows-node24-smoke
     runs-on: windows-latest
     timeout-minutes: 20
 
@@ -111,11 +114,14 @@ jobs:
       - name: Node.js 설정
         uses: actions/setup-node@v7
         with:
-          node-version: 20.19
+          node-version: 24
           cache: npm
 
       - name: 의존성 설치
         run: npm ci
+
+      - name: 홈 설정 권한·주입 방지 회귀 검사
+        run: npx vitest run test/home-config.test.ts test/home-config-cli.test.ts test/windows-powershell.test.ts
 
       - name: process path Git 관리 저장소 sqlite 스모크
         run: npm run test:platform

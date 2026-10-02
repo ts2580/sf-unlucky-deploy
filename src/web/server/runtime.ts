@@ -1,4 +1,5 @@
 import { GitCache } from '../../git/git-cache.js';
+import path from 'node:path';
 import { GitRegistrationService } from '../../git/git-registration-service.js';
 import { GitRepositoryAccess } from '../../git/git-repository-access.js';
 import { GitRepositoryCatalog } from '../../git/git-repository-catalog.js';
@@ -26,6 +27,8 @@ import { UserRepository } from '../../storage/user-repository.js';
 import { AuthService } from '../../auth/auth-service.js';
 import { randomBytes } from 'node:crypto';
 import { ProcessSfClient, type SfClient } from '../../salesforce/sf-client.js';
+import { UserSfClient } from '../../salesforce/user-sf-client.js';
+import { SalesforceConnectionRepository } from '../../storage/salesforce-connection-repository.js';
 import { ComparisonJobRepository } from '../../compare/comparison-job-repository.js';
 import { ComparisonService } from '../../compare/comparison-service.js';
 import { WorkspaceService, type WorkspaceServiceOptions } from './workspace-service.js';
@@ -34,8 +37,17 @@ import { DeploymentService } from '../../deploy/deployment-service.js';
 import { WorkflowEventHub } from './workflow-events.js';
 import { UserSettingsRepository } from '../../storage/user-settings-repository.js';
 import { RuntimeRunStorage } from '../../storage/runtime-run-storage.js';
+import { GitClient } from '../../git/git-client.js';
+import { gitHostPolicyFromEnvironment, type GitHostPolicy } from '../../git/git-network.js';
+import { GitAllowedIpRepository } from '../../storage/git-allowed-ip-repository.js';
+import { GitAllowedIpService } from '../../git/git-allowed-ip-service.js';
 
 export interface WebRuntime {
+  localMode: boolean;
+  sfConnections: SalesforceConnectionRepository;
+  sfTokenStorageStatus: 'ready' | 'not_configured' | 'invalid_key';
+  sfClient: SfClient;
+  sfConnectionClient: UserSfClient;
   store: SqliteStore;
   jobAccess: JobAccessRepository;
   orgExecutionAccess: OrgExecutionAccessRepository;
@@ -45,6 +57,7 @@ export interface WebRuntime {
   gitRegistrations: GitRegistrationService;
   gitCatalog: GitRepositoryCatalog;
   gitTokens: GitTokenService;
+  gitAllowedIps: GitAllowedIpService;
   gitEnabled: boolean;
   gitTokenStorageStatus: 'ready' | 'not_configured' | 'invalid_key';
   users: UserRepository;
@@ -66,7 +79,9 @@ export interface WebRuntime {
 }
 
 export interface WebRuntimeOptions {
+  localMode?: boolean;
   quickDeployEnabled?: boolean;
+  gitHostPolicy?: GitHostPolicy;
 }
 
 export async function createWebRuntime(
@@ -74,7 +89,7 @@ export async function createWebRuntime(
   bootstrapToken?: string,
   projectPaths: string[] = [],
   cwd = process.cwd(),
-  sfClient: SfClient = new ProcessSfClient(),
+  sfClient?: SfClient,
   workspaceOptions: WorkspaceServiceOptions = {},
   runtimeOptions: WebRuntimeOptions = {},
 ): Promise<WebRuntime> {
@@ -83,9 +98,24 @@ export async function createWebRuntime(
   try { store = await openSqliteStore({ databasePath }); }
   catch (error) { await gitCache.close(); throw error; }
   try {
+    const localMode = runtimeOptions.localMode === true;
+    await store.database.transaction(async (transaction) => {
+      const existing = await transaction.get<{ mode: string }>('SELECT mode FROM runtime_mode WHERE id = 1');
+      const expected = localMode ? 'local' : 'multiuser';
+      if (existing === undefined) {
+        const users = await transaction.get<{ count: number }>('SELECT COUNT(*) count FROM users');
+        if (localMode && (users?.count ?? 0) > 0) {
+          throw new Error('기존 사용자 DB를 LOCAL=true로 전환할 수 없습니다. 별도 데이터 디렉터리를 사용하세요.');
+        }
+        await transaction.run('INSERT INTO runtime_mode (id, mode) VALUES (1, ?)', expected);
+      } else if (existing.mode !== expected) {
+        throw new Error('기존 DB의 local 모드와 시작 설정이 다릅니다. 별도 데이터 디렉터리를 사용하세요.');
+      }
+    });
     let vault: TokenVault | undefined;
     let gitTokenStorageStatus: WebRuntime['gitTokenStorageStatus'] = 'not_configured';
-    const tokenSecret = process.env.SFUD_GIT_TOKEN_SECRET;
+    const sharedTokenSecret = process.env.SFUD_TOKEN_SECRET;
+    const tokenSecret = sharedTokenSecret ?? process.env.SFUD_GIT_TOKEN_SECRET;
     if (tokenSecret !== undefined || process.env.SFUD_GIT_TOKEN_KEY_FILE !== undefined) {
       try {
         const version = Number(process.env.SFUD_GIT_TOKEN_KEY_VERSION ?? '1');
@@ -103,6 +133,23 @@ export async function createWebRuntime(
         gitTokenStorageStatus = 'ready';
       } catch { gitTokenStorageStatus = 'invalid_key'; }
     }
+    let sfVault: TokenVault | undefined;
+    let sfTokenStorageStatus: WebRuntime['sfTokenStorageStatus'] = 'not_configured';
+    const sfTokenSecret = sharedTokenSecret ?? process.env.SFUD_SF_TOKEN_SECRET;
+    if (sfTokenSecret !== undefined) {
+      try {
+        await store.database.run('INSERT INTO salesforce_token_key_parameters (id, salt) VALUES (1, ?) ON CONFLICT(id) DO NOTHING',
+          randomBytes(32).toString('base64url'));
+        const parameters = await store.database.get<{ salt: string }>('SELECT salt FROM salesforce_token_key_parameters WHERE id = 1');
+        const salt = Buffer.from(parameters!.salt, 'base64url');
+        if (salt.toString('base64url') !== parameters!.salt) throw new Error('Invalid Salesforce token KDF parameters');
+        sfVault = await TokenVault.fromSecret(sfTokenSecret, salt);
+        sfTokenStorageStatus = 'ready';
+      } catch { sfTokenStorageStatus = 'invalid_key'; }
+    }
+    const sfConnections = new SalesforceConnectionRepository(store.database, sfVault);
+    const sfConnectionClient = new UserSfClient(sfConnections, sfClient ?? new ProcessSfClient());
+    const activeSfClient: SfClient = sfClient ?? (localMode ? new ProcessSfClient() : sfConnectionClient);
     const workflowEvents = new WorkflowEventHub();
     const deploymentJobs = new DeploymentJobRepository(
       store.database,
@@ -125,7 +172,7 @@ export async function createWebRuntime(
     const deploymentExecutionLeases = new DeploymentExecutionLeaseRepository(store.database, {
       leaseMs: deploymentExecutionLeaseMsFromEnvironment(),
     });
-    const orgExecutionAccess = new OrgExecutionAccessRepository(store.database);
+    const orgExecutionAccess = new OrgExecutionAccessRepository(store.database, undefined, localMode);
     const userCount = await store.database.get<{ count: number }>('SELECT COUNT(*) count FROM users');
     const auth = new AuthService(
       store.database,
@@ -133,18 +180,27 @@ export async function createWebRuntime(
         ? bootstrapToken ?? process.env.SFUD_BOOTSTRAP_TOKEN ?? randomBytes(18).toString('base64url')
         : undefined,
     );
-    const workspace = await WorkspaceService.create(sfClient, cwd, projectPaths, workspaceOptions);
+    if (localMode) await auth.ensureLocalOperator();
+    const workspace = await WorkspaceService.create(activeSfClient, cwd, projectPaths, workspaceOptions,
+      !localMode && sfClient === undefined ? sfConnections : undefined);
     const gitConnections = new GitConnectionRepository(store.database, vault);
     const gitEnabled = process.env.SFUD_GIT_ENABLED !== 'false';
-    const gitTokens = new GitTokenService(gitConnections, undefined, gitEnabled && vault !== undefined);
+    const gitAllowedIps = new GitAllowedIpService(new GitAllowedIpRepository(store.database),
+      runtimeOptions.gitHostPolicy ?? gitHostPolicyFromEnvironment());
+    await gitAllowedIps.initialize();
+    const diagnosticsFile = databasePath === ':memory:' ? undefined : path.join(path.dirname(path.resolve(databasePath)), 'logs', 'git-diagnostics.jsonl');
+    const gitClient = new GitClient(gitAllowedIps.policy, diagnosticsFile);
+    const gitTokens = new GitTokenService(gitConnections, undefined, gitEnabled && vault !== undefined, process.env, gitClient);
     const gitConnectionService = new GitConnectionService(gitConnections, (owner, id) => gitImports.cancelConnection(owner, id));
     const gitImportHistory = new GitImportRepository(store.database);
     await gitImportHistory.recover();
     const gitImports = new GitImportService(gitImportHistory, workspace.managedProjects,
-      { cache: gitCache, enabled: gitEnabled, access: new GitRepositoryAccess(gitConnections, gitConnectionService, gitEnabled) });
+      { cache: gitCache, enabled: gitEnabled, client: gitClient,
+        ...(diagnosticsFile === undefined ? {} : { diagnosticsFile }),
+        access: new GitRepositoryAccess(gitConnections, gitConnectionService, gitEnabled, gitClient) });
     const gitCatalog = new GitRepositoryCatalog(gitConnections, gitConnectionService, gitEnabled);
     workspace.gitImports = gitImports;
-    const gitRegistrations = new GitRegistrationService(store.database, gitImports);
+    const gitRegistrations = new GitRegistrationService(store.database, gitImports, diagnosticsFile);
     await store.database.run("UPDATE git_registrations SET status = 'FAILED', error_message = '서버 재시작으로 동기화가 중단되었습니다. 다시 동기화하세요.' WHERE status IN ('PENDING', 'SYNCING')");
     workspace.gitRegistrations = gitRegistrations;
     const comparisonJobs = new ComparisonJobRepository(
@@ -178,12 +234,18 @@ export async function createWebRuntime(
     const deploymentCoordinator = new DeploymentCoordinator(deploymentJobs, deploymentQueue, deploymentExecutionLeases);
     let shutdownRequest: Promise<void> | undefined;
     const runtime: WebRuntime = {
+      localMode,
+      sfConnections,
+      sfTokenStorageStatus,
+      sfClient: activeSfClient,
+      sfConnectionClient,
       store,
       jobAccess: new JobAccessRepository(store.database),
       orgExecutionAccess,
       gitConnections,
       gitConnectionService,
       gitTokens,
+      gitAllowedIps,
       gitEnabled,
       gitImports,
       gitRegistrations,
@@ -202,7 +264,7 @@ export async function createWebRuntime(
         comparisonJobs,
         comparisonQueue,
         workspace,
-        sfClient,
+        activeSfClient,
         runsDirectory,
         new UserSettingsRepository(store.database),
       ),
@@ -210,7 +272,7 @@ export async function createWebRuntime(
         deploymentJobs,
         deploymentCoordinator,
         workspace,
-        sfClient,
+        activeSfClient,
         runsDirectory,
         new UserSettingsRepository(store.database),
         deploymentAdmissions,
@@ -221,7 +283,7 @@ export async function createWebRuntime(
         deploymentJobs,
         deploymentCoordinator,
         workspace,
-        sfClient,
+        activeSfClient,
         { quickDeployEnabled: runtimeOptions.quickDeployEnabled ?? process.env.SFUD_QUICK_DEPLOY_ENABLED !== 'false' },
         orgExecutionAccess,
       ),

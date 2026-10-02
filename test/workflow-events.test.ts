@@ -77,6 +77,7 @@ describe('작업 현황 SSE', () => {
       source: 'local:fixture', targetAlias: 'target', manifestPath: 'generated/package.xml',
       targetOrgIdentity: { alias: 'target', username: 'target@example.com', orgId: '00D000000000001' },
       payloadChecksum: 'a'.repeat(64),
+      createdBy: bootstrap.json<{ user: { id: string } }>().user.id,
     });
     const reader = response.body!.getReader();
     let stream = '';

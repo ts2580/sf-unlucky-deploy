@@ -1,7 +1,7 @@
 import type { ApiCredential } from '../git-credential-provider.js';
 import { GitError } from '../git-errors.js';
 import type { GitProvider, GitRefPage, GitRepositoryInfo } from '../git-provider.js';
-import { normalizeRepository, validateGitRef, type GitRef, type GitRepositoryAddress } from '../git-repository.js';
+import { connectionRepositoryPath, normalizeRepository, validateGitRef, type GitRef, type GitRepositoryAddress } from '../git-repository.js';
 import { arrayBody, commitSha, numberId, pageNumber, ProviderApi, record, stringField } from './provider-api.js';
 
 export class GithubProvider implements GitProvider {
@@ -50,6 +50,7 @@ export class GithubProvider implements GitProvider {
 
   private endpoint(address: GitRepositoryAddress): string {
     const normalized = normalizeRepository(address.cloneUrl, this.id);
+    if (connectionRepositoryPath(normalized) !== normalized.repositoryPath) throw new GitError('GIT_CONNECTION_REQUIRED');
     return `https://api.github.com/repos/${normalized.repositoryPath.split('/').map(encodeURIComponent).join('/')}`;
   }
 }

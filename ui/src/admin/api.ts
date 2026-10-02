@@ -20,10 +20,16 @@ export interface UpdateAdminUserRequest {
 }
 
 export interface OrgExecutionGrant {
-  targetAlias: string;
+  orgId: string;
   userId: string;
   grantedBy: string;
   createdAt: string;
+}
+
+export interface OrgExecutionPolicy {
+  orgId: string;
+  enabledAt: string;
+  grantCount: number;
 }
 
 export function listAdminUsers(signal?: AbortSignal): Promise<{ users: AdminUser[] }> {
@@ -43,18 +49,18 @@ export function updateAdminUser(
   });
 }
 
-export function listOrgExecutionGrants(signal?: AbortSignal): Promise<{ grants: OrgExecutionGrant[] }> {
+export function listOrgExecutionGrants(signal?: AbortSignal): Promise<{ grants: OrgExecutionGrant[]; policies: OrgExecutionPolicy[]; legacyPolicies: Array<{ targetAlias: string; grantCount: number }> }> {
   return apiRequest('/api/v1/admin/org-execution-access', { signal });
 }
 
-export function grantOrgExecutionAccess(targetAlias: string, userId: string): Promise<void> {
-  return apiRequest(`/api/v1/admin/org-execution-access/${encodeURIComponent(targetAlias)}/${encodeURIComponent(userId)}`, {
+export function grantOrgExecutionAccess(orgId: string, userId: string): Promise<void> {
+  return apiRequest(`/api/v1/admin/org-execution-access/${encodeURIComponent(orgId)}/${encodeURIComponent(userId)}`, {
     method: 'PUT', csrf: true,
   });
 }
 
-export function revokeOrgExecutionAccess(targetAlias: string, userId: string): Promise<void> {
-  return apiRequest(`/api/v1/admin/org-execution-access/${encodeURIComponent(targetAlias)}/${encodeURIComponent(userId)}`, {
+export function revokeOrgExecutionAccess(orgId: string, userId: string): Promise<void> {
+  return apiRequest(`/api/v1/admin/org-execution-access/${encodeURIComponent(orgId)}/${encodeURIComponent(userId)}`, {
     method: 'DELETE', csrf: true,
   });
 }

@@ -49,10 +49,38 @@ async function fixture() {
       runJson,
     };
   };
-  return { store, jobs, id: job.job.id, begin, progress, reconcile };
+  return { store, jobs, actor, id: job.job.id, begin, progress, reconcile };
 }
 
 describe('단계별 제출 의도와 복구', () => {
+  it('Quick Deploy 응답 유실 후 기존 검증 ID를 보존하며 실행 ID를 관리자 연결한다', async () => {
+    const f = await fixture();
+    const validationId = '0Af000000000001';
+    const deploymentId = '0Af000000000002';
+    const attemptId = await f.jobs.attempts.begin({
+      jobId: f.id, operation: 'QUICK_DEPLOY', validationId, ...payload,
+    });
+    await f.jobs.recoverInterruptedJobs();
+    const remote = f.reconcile({ result: {
+      id: deploymentId, checkOnly: false, done: true, status: 'Succeeded', success: true,
+      createdDate: new Date().toISOString(),
+    } });
+    await expect(remote.run()).rejects.toMatchObject({ code: 'INVALID_JOB_STATE' });
+    expect(remote.runJson).not.toHaveBeenCalled();
+    expect(await remote.bind({ deploymentId, operation: 'QUICK_DEPLOY',
+      evidence: 'Salesforce Deployment Status에서 Quick Deploy 실행 ID와 대상 org를 대조했습니다.',
+    })).toMatchObject({ status: 'SUCCEEDED', salesforceDeploymentId: deploymentId });
+    expect(await f.jobs.attempts.current(f.id)).toMatchObject({
+      validationId, deploymentId, submissionState: 'TERMINAL', operation: 'QUICK_DEPLOY',
+    });
+    expect(await f.jobs.getRequiredSummary(f.id)).toMatchObject({ executionEvidence: 'MANUALLY_ATTESTED' });
+    expect(remote.runJson.mock.calls.every(([args]) => args.slice(0, 3).join(' ') === 'project deploy report')).toBe(true);
+    await expect(f.jobs.attempts.bindForReconciliation({
+      jobId: f.id, attemptId, operation: 'QUICK_DEPLOY', deploymentId: '0Af000000000003',
+      actorUserId: f.actor.id, observedAt: new Date().toISOString(), evidence: 'cannot rebind',
+    })).rejects.toMatchObject({ code: 'INVALID_JOB_STATE' });
+  });
+
   it('제출 의도만 저장한 뒤 재시작하면 재확인으로 복구하며 새 제출을 막는다', async () => {
     const f = await fixture();
     const attemptId = await f.begin();
@@ -164,6 +192,7 @@ describe('단계별 제출 의도와 복구', () => {
     await f.jobs.recoverInterruptedJobs();
     const remote = f.reconcile({ result: {
       id: '0Af000000000001', checkOnly: true, done: true, status: 'Succeeded', success: true,
+      createdDate: new Date().toISOString(),
     } });
     expect(await remote.bind({
       deploymentId: '0Af000000000001', operation: 'VALIDATE',
@@ -197,6 +226,42 @@ describe('단계별 제출 의도와 복구', () => {
       deploymentId: '0Af000000000001', operation: 'VALIDATE', evidence: 'too short',
     })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     expect(await f.jobs.attempts.current(f.id)).toMatchObject({ id: attempt, submissionState: 'SUBMITTING' });
+  });
+
+  it.each([
+    { label: '과거 배포 시각', createdDate: new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString() },
+    { label: '누락된 배포 시각', createdDate: undefined },
+  ])('관리자 연결에서 $label 보고서를 거부한다', async ({ createdDate }) => {
+    const f = await fixture();
+    const attemptId = await f.begin();
+    await f.jobs.recoverInterruptedJobs();
+    const remote = f.reconcile({ result: {
+      id: '0Af000000000001', checkOnly: true, done: true, status: 'Succeeded', success: true,
+      ...(createdDate === undefined ? {} : { createdDate }),
+    } });
+    await expect(remote.bind({ deploymentId: '0Af000000000001', operation: 'VALIDATE',
+      evidence: '원격 배포 보고서와 제출 의도를 관리자 기록으로 대조했습니다.',
+    })).rejects.toMatchObject({ code: 'INVALID_JOB_STATE' });
+    expect(await f.jobs.attempts.current(f.id)).toMatchObject({ id: attemptId, submissionState: 'SUBMITTING' });
+  });
+
+  it('이미 다른 작업의 attempt에 결합한 원격 ID를 수동 연결하지 않는다', async () => {
+    const f = await fixture();
+    const unknownAttempt = await f.begin();
+    await f.jobs.recoverInterruptedJobs();
+    const other = await f.jobs.createDirectDeployment({
+      source: 'local:/fixture', targetAlias: identity.alias, targetOrgIdentity: identity,
+      manifestPath: 'package.xml', payloadChecksum: payload.payloadChecksum, requestHash: 'b'.repeat(64),
+      createdBy: f.actor.id, clientRequestId: 'other-direct-fixture', requestedTestLevel: 'RunLocalTests', requestedTests: [],
+      targetConfirmation: identity.alias, confirmation: '실제 배포',
+    });
+    await f.jobs.transition(other.job.id, 'DEPLOYING');
+    const otherAttempt = await f.jobs.attempts.begin({ jobId: other.job.id, operation: 'VALIDATE', ...payload });
+    await f.jobs.recordSalesforceSubmission(other.job.id, '0Af000000000001', otherAttempt);
+    await expect(f.jobs.attempts.bindForReconciliation({
+      jobId: f.id, attemptId: unknownAttempt, operation: 'VALIDATE', deploymentId: '0Af000000000001',
+      actorUserId: f.actor.id, observedAt: new Date().toISOString(), evidence: '관리자 수동 연결 시도',
+    })).rejects.toMatchObject({ code: 'INVALID_JOB_STATE' });
   });
 
   it('ADMIN 외 사용자는 ID 없는 제출을 연결할 수 없다', async () => {

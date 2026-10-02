@@ -1,14 +1,18 @@
 import type { FastifyInstance } from 'fastify';
 import { Type } from '@sinclair/typebox';
 import { WorkspaceResponseSchema } from '../../api/workspace-contracts.js';
+import { SfudError } from '../../core/errors.js';
 
 import type { ComparisonJob } from '../../compare/comparison-job-repository.js';
 import { redactSensitiveText } from '../../salesforce/sf-client.js';
 import { hasTestClassSuffix } from '../../deploy/test-plan.js';
 import { requireAuthenticatedSession } from './auth-routes.js';
 import { maskOrgId } from './workspace-service.js';
+import { validateExcludedPackageIds } from '../../metadata/package-exclusion.js';
 
 interface CreateComparisonBody {
+  excludedPackageIds?: string[];
+  excludePackageMetadata?: boolean;
   projectId?: string;
   scope?: 'manifest' | 'all';
   manifest?: string;
@@ -90,6 +94,18 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     }
   });
 
+  app.get<{ Querystring: MetadataTypesQuery }>('/api/v1/installed-packages', async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply);
+    if (session === undefined) return;
+    try {
+      const sourceIds = (request.query.sourceIds ?? '').split(',').filter(Boolean);
+      return reply.send({ packages: await app.sfudRuntime.workspace.listPackages(sourceIds, session.user.id) });
+    } catch (error) {
+      return reply.code(400).send({ error: { code: 'INSTALLED_PACKAGES_LOAD_FAILED',
+        message: redactSensitiveText(error instanceof Error ? error.message : String(error)) } });
+    }
+  });
+
   app.get<{ Querystring: MetadataTypesQuery }>('/api/v1/metadata-types', async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
@@ -138,8 +154,13 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     try {
       const scope = comparisonScope(request.body?.scope);
       const sourceOnly = request.body?.sourceOnly === true;
+      if (request.body?.excludePackageMetadata !== undefined && typeof request.body.excludePackageMetadata !== 'boolean') {
+        throw new Error('설치 패키지 제외 여부는 boolean이어야 합니다.');
+      }
       const rightSourceId = requiredString(request.body?.rightSourceId, 'SOURCE 소스');
       const job = await app.sfudRuntime.comparisons.create({
+        excludedPackageIds: validateExcludedPackageIds(request.body?.excludedPackageIds),
+        excludePackageMetadata: request.body?.excludePackageMetadata === true,
         ...(scope === 'manifest'
           ? { projectId: requiredString(request.body?.projectId, 'manifest 프로젝트') }
           : {}),
@@ -160,6 +181,9 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
       });
       return reply.code(202).send({ job: publicJob(app, job, false) });
     } catch (error) {
+      if (error instanceof SfudError && error.code === 'REQUEST_CAPACITY_EXCEEDED') {
+        return reply.code(503).send({ error: { code: error.code, message: error.message } });
+      }
       return reply.code(400).send({ error: {
         code: 'INVALID_COMPARISON_REQUEST',
         message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
@@ -174,7 +198,9 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     return reply.send({ jobs: jobs.map((job) => publicJob(app, job, false)) });
   });
 
-  app.get<{ Params: { id: string } }>('/api/v1/comparisons/:id', async (request, reply) => {
+  app.get<{ Params: { id: string }; Querystring: { includeIdentical?: boolean } }>('/api/v1/comparisons/:id', {
+    schema: { querystring: Type.Object({ includeIdentical: Type.Optional(Type.Boolean()) }, { additionalProperties: false }) },
+  }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
     if (!await app.sfudRuntime.jobAccess.canAccess('comparison', request.params.id, session.user.id)) {
@@ -184,7 +210,7 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     if (job === undefined) {
       return reply.code(404).send({ error: { code: 'COMPARISON_NOT_FOUND', message: '비교 작업을 찾을 수 없습니다.' } });
     }
-    return reply.send({ job: publicJob(app, job, true) });
+    return reply.send({ job: publicJob(app, job, true, request.query.includeIdentical === true) });
   });
 
   app.get<{ Params: { id: string }; Querystring: ComponentPageQuery }>(
@@ -226,14 +252,14 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
   );
 }
 
-function publicJob(app: FastifyInstance, job: ComparisonJob, includeResult: boolean) {
+function publicJob(app: FastifyInstance, job: ComparisonJob, includeResult: boolean, includeIdentical = false) {
   const left = job.sourceSnapshot?.left ?? app.sfudRuntime.workspace.publicSource(job.leftSource);
   const right = job.sourceSnapshot?.right ?? app.sfudRuntime.workspace.publicSource(job.rightSource);
   const result = includeResult && job.result !== undefined ? {
     ...job.result,
     left: { ...job.result.left, displayName: left.label },
     right: { ...job.result.right, displayName: right.label },
-    components: job.showIdentical
+    components: job.showIdentical || includeIdentical
       ? job.result.components
       : job.result.components.filter((component) => component.status !== 'IDENTICAL'),
   } : undefined;
@@ -252,6 +278,8 @@ function publicJob(app: FastifyInstance, job: ComparisonJob, includeResult: bool
     right,
     strict: job.strict,
     showIdentical: job.showIdentical,
+    excludePackageMetadata: job.excludePackageMetadata === true,
+    excludedPackageIds: job.excludedPackageIds ?? [],
     ...(job.summary === undefined ? {} : { summary: job.summary }),
     ...(result === undefined ? {} : { result }),
     ...(job.errorCode === undefined ? {} : { errorCode: job.errorCode }),

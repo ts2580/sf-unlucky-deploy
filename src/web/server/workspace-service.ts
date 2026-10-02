@@ -10,10 +10,16 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { listFiles } from '../../core/files.js';
+import { isOrgIdentifier } from '../../salesforce/org-identifier.js';
+import { SfudError } from '../../core/errors.js';
+import { currentSalesforceConnectionPin, currentSalesforceUserId, pinSalesforceConnection } from '../../salesforce/user-context.js';
+import type { SalesforceConnectionRepository } from '../../storage/salesforce-connection-repository.js';
 import { readProjectApiVersion, withRequestWorkspace } from '../../core/request-workspace.js';
 import type { SfClient } from '../../salesforce/sf-client.js';
 import type { OrgIdentitySnapshot } from '../../deploy/org-identity.js';
 import { discoverLocalMetadataTypes, resolveLocalPackageDirectories } from '../../metadata/local-metadata.js';
+import { listInstalledPackages } from '../../metadata/package-exclusion.js';
+import type { InstalledPackage } from '../../api/package-contracts.js';
 
 const IMPORT_TTL_MS = 4 * 60 * 60 * 1_000;
 const DEFAULT_USER_IMPORT_QUOTA_BYTES = 500 * 1024 * 1024;
@@ -26,6 +32,8 @@ export interface WorkspaceServiceOptions {
 
 export interface WorkspaceOrg {
   id: string;
+  connectionId?: string;
+  connectionGeneration?: number;
   alias: string;
   label: string;
   edition?: string;
@@ -59,8 +67,9 @@ interface RawOrg {
 export class WorkspaceService {
   public gitImports?: GitImportService;
   public gitRegistrations?: GitRegistrationService;
-  private orgCache: { expiresAt: number; value: WorkspaceOrg[] } | undefined;
-  private orgRequest: Promise<WorkspaceOrg[]> | undefined;
+  private readonly orgCache = new Map<string, { fingerprint: string | undefined; value: WorkspaceOrg[] }>();
+  private readonly orgRequests = new Map<string, Promise<WorkspaceOrg[]>>();
+  private readonly orgCacheEpoch = new Map<string, number>();
   private readonly metadataTypeCache = new Map<string, { expiresAt: number; value: WorkspaceMetadataType[] }>();
   private readonly metadataTypeRequests = new Map<string, Promise<WorkspaceMetadataType[]>>();
   private readonly apexTestClassCache = new Map<string, { expiresAt: number; value: string[] }>();
@@ -72,6 +81,7 @@ export class WorkspaceService {
     private readonly commandProject: AllowedProject,
     private readonly importRoot: string,
     public readonly managedProjects: ManagedProjectService,
+    private readonly connections?: SalesforceConnectionRepository,
   ) {}
 
   public static async create(
@@ -79,6 +89,7 @@ export class WorkspaceService {
     cwd: string,
     configuredPaths: string[],
     options: WorkspaceServiceOptions = {},
+    connections?: SalesforceConnectionRepository,
   ): Promise<WorkspaceService> {
     const commandProjectPath = await realpath(cwd);
     const projects: AllowedProject[] = [];
@@ -112,7 +123,7 @@ export class WorkspaceService {
       options.serverImportQuotaBytes,
       process.env.SFUD_SERVER_IMPORT_QUOTA_BYTES ?? process.env.SFUD_SERVER_UPLOAD_QUOTA_BYTES,
       DEFAULT_SERVER_IMPORT_QUOTA_BYTES,
-    ), IMPORT_TTL_MS, 'Git 프로젝트'));
+    ), IMPORT_TTL_MS, 'Git 프로젝트'), connections);
   }
 
   public listProjects(): WorkspaceProject[] {
@@ -124,15 +135,26 @@ export class WorkspaceService {
   }
 
   public async listOrgs(): Promise<WorkspaceOrg[]> {
-    if (this.orgCache !== undefined && this.orgCache.expiresAt > Date.now()) return this.orgCache.value;
-    if (this.orgRequest !== undefined) return this.orgRequest;
-    this.orgRequest = this.loadOrgs();
+    const key = currentSalesforceUserId() ?? 'local';
+    const fingerprint = await this.connectionFingerprint(key);
+    const cached = this.orgCache.get(key);
+    if (cached !== undefined && cached.fingerprint === fingerprint) return this.pinConnections(cached.value);
+    if (cached !== undefined) this.clearOrgCache(key);
+    const epoch = this.orgCacheEpoch.get(key) ?? 0;
+    let request = this.orgRequests.get(key);
+    if (request === undefined) {
+      request = this.loadOrgs();
+      this.orgRequests.set(key, request);
+    }
     try {
-      const value = await this.orgRequest;
-      this.orgCache = { expiresAt: Date.now() + 5_000, value };
-      return value;
+      const value = await request;
+      if ((this.orgCacheEpoch.get(key) ?? 0) === epoch) {
+        this.orgCache.set(key, { fingerprint, value });
+      }
+      // Each caller has a distinct ALS store even when sharing the same CLI request.
+      return this.pinConnections(value);
     } finally {
-      this.orgRequest = undefined;
+      if (this.orgRequests.get(key) === request) this.orgRequests.delete(key);
     }
   }
 
@@ -145,10 +167,23 @@ export class WorkspaceService {
     }
     return {
       alias: org.alias,
+      ...(org.connectionId === undefined ? {} : { connectionId: org.connectionId }),
+      ...(org.connectionGeneration === undefined ? {} : { connectionGeneration: org.connectionGeneration }),
       username: org.username,
       orgId: org.orgId,
       ...(org.instanceUrlHash === undefined ? {} : { instanceUrlHash: org.instanceUrlHash }),
     };
+  }
+
+  public async listPackages(sourceIds: readonly string[], ownerUserId: string): Promise<InstalledPackage[]> {
+    if (sourceIds.length === 0 || sourceIds.length > 2 || sourceIds.some((id) => !id.startsWith('org:'))) {
+      throw new Error('설치 패키지 목록은 Salesforce Org 1~2개를 선택해야 합니다.');
+    }
+    const sources = await Promise.all(sourceIds.map((id) => this.resolveSource(id, ownerUserId)));
+    return withRequestWorkspace(this.defaultProject().realPath, async (cwd) => listInstalledPackages(
+      sources.map((source) => ({ kind: 'org' as const, alias: source.slice(4), displayName: source.slice(4) })),
+      this.sfClient, cwd,
+    ));
   }
 
   public async listMetadataTypes(
@@ -192,20 +227,21 @@ export class WorkspaceService {
 
   public async listApexTestClasses(sourceId: string, ownerUserId?: string): Promise<string[]> {
     const source = await this.resolveSource(sourceId, ownerUserId);
-    const cached = this.apexTestClassCache.get(source);
+    const cacheKey = `${currentSalesforceUserId() ?? 'local'}:${source}`;
+    const cached = this.apexTestClassCache.get(cacheKey);
     if (cached !== undefined && cached.expiresAt > Date.now()) return cached.value;
-    const pending = this.apexTestClassRequests.get(source);
+    const pending = this.apexTestClassRequests.get(cacheKey);
     if (pending !== undefined) return pending;
     const request = source.startsWith('org:')
       ? this.listOrgApexTestClasses(source.slice('org:'.length), this.projectForSources([source]))
       : listLocalApexTestClasses(source.slice('local:'.length));
-    this.apexTestClassRequests.set(source, request);
+    this.apexTestClassRequests.set(cacheKey, request);
     try {
       const value = await request;
-      this.apexTestClassCache.set(source, { expiresAt: Date.now() + 60_000, value });
+      this.apexTestClassCache.set(cacheKey, { expiresAt: Date.now() + 60_000, value });
       return value;
     } finally {
-      this.apexTestClassRequests.delete(source);
+      this.apexTestClassRequests.delete(cacheKey);
     }
   }
 
@@ -230,7 +266,7 @@ export class WorkspaceService {
     project: AllowedProject,
   ): Promise<WorkspaceMetadataType[]> {
     const apiVersion = await readProjectApiVersion(project.realPath);
-    const cacheKey = `${alias}:${apiVersion}`;
+    const cacheKey = `${currentSalesforceUserId() ?? 'local'}:${alias}:${apiVersion}`;
     const cached = this.metadataTypeCache.get(cacheKey);
     if (cached !== undefined && cached.expiresAt > Date.now()) return cached.value;
     const pending = this.metadataTypeRequests.get(cacheKey);
@@ -272,10 +308,20 @@ export class WorkspaceService {
       if (!isRecord(entry)) continue;
       const rawOrg = entry as RawOrg;
       const alias = stringValue(rawOrg.alias) ?? stringValue(rawOrg.username);
-      if (alias === undefined || !/^[A-Za-z0-9._@+-]+$/u.test(alias)) continue;
+      if (alias === undefined || !isOrgIdentifier(alias)) continue;
       if (!unique.has(alias)) {
+        const userId = currentSalesforceUserId();
+        const connection = this.connections === undefined || userId === undefined
+          ? undefined : await this.connections.getByAlias(userId, alias);
+        if (this.connections !== undefined && connection === undefined) continue;
+        const pin = currentSalesforceConnectionPin(alias);
+        if (connection !== undefined && pin !== undefined
+          && (pin.id !== connection.id || pin.generation !== connection.generation)) {
+          throw new SfudError('ORG_IDENTITY_CHANGED', '실행 중 Salesforce 연결이 교체되었습니다. 작업을 다시 시작하세요.');
+        }
         unique.set(alias, {
           id: `org:${alias}`,
+          ...(connection === undefined ? {} : { connectionId: connection.id, connectionGeneration: connection.generation }),
           alias,
           label: stringValue(rawOrg.name) ?? alias,
           ...(stringValue(rawOrg.orgEdition) === undefined ? {} : { edition: stringValue(rawOrg.orgEdition)! }),
@@ -292,9 +338,35 @@ export class WorkspaceService {
   }
 
   private async refreshOrgs(): Promise<WorkspaceOrg[]> {
+    const key = currentSalesforceUserId() ?? 'local';
+    const fingerprint = await this.connectionFingerprint(key);
+    const epoch = this.orgCacheEpoch.get(key) ?? 0;
     const value = await this.loadOrgs();
-    this.orgCache = { expiresAt: Date.now() + 5_000, value };
-    return value;
+    if ((this.orgCacheEpoch.get(key) ?? 0) === epoch) this.orgCache.set(key, { fingerprint, value });
+    return this.pinConnections(value);
+  }
+
+  private async connectionFingerprint(ownerUserId: string): Promise<string | undefined> {
+    if (this.connections === undefined) return undefined;
+    // Persisted credentials stay in the repository. Cache only public Org metadata,
+    // shared by the same user across browser sessions and invalidated on DB changes.
+    const connections = await this.connections.list(ownerUserId);
+    return JSON.stringify(connections.map(({ id, generation, status }) => [id, generation, status]));
+  }
+
+  public clearOrgCache(ownerUserId: string): void {
+    this.orgCache.delete(ownerUserId);
+    this.orgCacheEpoch.set(ownerUserId, (this.orgCacheEpoch.get(ownerUserId) ?? 0) + 1);
+    this.orgRequests.delete(ownerUserId);
+  }
+
+  private pinConnections(orgs: WorkspaceOrg[]): WorkspaceOrg[] {
+    for (const org of orgs) {
+      if (org.connectionId !== undefined && org.connectionGeneration !== undefined) {
+        pinSalesforceConnection(org.alias, org.connectionId, org.connectionGeneration);
+      }
+    }
+    return orgs;
   }
 
   public async resolveProject(projectId: string, ownerUserId?: string): Promise<AllowedProject> {

@@ -247,6 +247,7 @@ function ExecutionEvidenceNote({ job }: { job: DryRunJobResponse }) {
 
 function executionEvidenceMessage(evidence: DryRunJobResponse['executionEvidence']): string | undefined {
   switch (evidence) {
+    case 'MANUALLY_ATTESTED': return '관리자가 원격 ID와 제출 시각을 대조해 연결했습니다. Salesforce report는 원래 제출 payload와의 완전한 일치를 증명하지 않습니다.';
     case 'LEGACY_NO_EXTERNAL_ID': return '이전 기록에 Salesforce 실행 ID가 없어 실제 실행 여부를 확인할 수 없습니다.';
     case 'LEGACY_VALIDATION_ONLY': return '이전 기록은 check-only 검증 근거만 있습니다. 실제 배포 성공을 뜻하지 않습니다.';
     case 'LEGACY_EXECUTION_REPORT_UNVERIFIED': return '이전 실행 report는 남아 있지만, 제출 attempt와 대조되지 않아 실제 실행을 확정할 수 없습니다.';

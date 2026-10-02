@@ -104,8 +104,9 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
       });
       return reply.code(202).send({ job: publicJob(app, job, false) });
     } catch (error) {
-      return reply.code(400).send({ error: {
-        code: 'DEPLOYMENT_APPROVAL_DENIED',
+      return reply.code(error instanceof SfudError && error.code === 'REQUEST_CAPACITY_EXCEEDED' ? 503 : 400).send({ error: {
+        code: error instanceof SfudError && error.code === 'REQUEST_CAPACITY_EXCEEDED'
+          ? 'REQUEST_CAPACITY_EXCEEDED' : 'DEPLOYMENT_APPROVAL_DENIED',
         message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
       } });
     }

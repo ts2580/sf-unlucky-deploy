@@ -50,7 +50,7 @@ export class GitRemoteProvider implements GitProvider {
 
   private assertAddress(address: GitRepositoryAddress) {
     const normalized = normalizeRepository(address.cloneUrl, this.id);
-    if (normalized.repositoryPath !== this.address.repositoryPath || normalized.host !== this.address.host) {
+    if (normalized.cloneUrl !== this.address.cloneUrl) {
       throw new GitError('GIT_CONNECTION_REQUIRED');
     }
   }
@@ -64,7 +64,7 @@ export class GitRemoteProvider implements GitProvider {
 }
 
 export function repositoryIdentity(address: GitRepositoryAddress): string {
-  return `git:${createHash('sha256').update(`${address.host}/${address.repositoryPath}`).digest('hex')}`;
+  return `git:${createHash('sha256').update(`${new URL(address.cloneUrl).host}/${address.repositoryPath}`).digest('hex')}`;
 }
 
 function parseRefs(output: Buffer): RemoteSnapshot {

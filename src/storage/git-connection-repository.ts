@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { GitError } from '../git/git-errors.js';
+import { normalizeGitAlias } from '../git/git-alias.js';
 import { normalizeRepository, type GitProviderId } from '../git/git-repository.js';
 import type { TokenContext, TokenVault } from '../git/token-vault.js';
 import type { DatabaseExecutor, DatabaseHandle } from './database-executor.js';
@@ -11,6 +12,7 @@ export interface GitConnection {
   providerHost: string;
   providerAccountId: string;
   displayName: string;
+  alias?: string;
   repositoryPath?: string;
   expiresAt?: string;
   grantedPermissions: string[];
@@ -24,9 +26,10 @@ interface ConnectionRow {
   provider_account_id: string; display_name: string; encrypted_access_token: string | null;
   encrypted_refresh_token: string | null; encrypted_api_username: string | null; credential_type: string; expires_at: string | null; granted_permissions_json: string;
   repository_path: string | null;
+  alias: string | null;
   status: GitConnection['status']; key_version: number; token_version: number; created_at: string; updated_at: string;
 }
-type SaveConnection = Omit<GitConnection, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'expiresAt'> & { tokens: GitTokens };
+type SaveConnection = Omit<GitConnection, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'expiresAt' | 'alias'> & { tokens: GitTokens };
 
 export class GitConnectionRepository {
   public constructor(private readonly database: DatabaseExecutor, private readonly vault?: TokenVault) {}
@@ -40,19 +43,24 @@ export class GitConnectionRepository {
     return rows.map(publicConnection);
   }
 
-  public async save(input: SaveConnection, expected?: { id: string; tokenVersion: number }): Promise<GitConnection> {
+  public async save(input: SaveConnection, expected?: { id: string; tokenVersion: number; changeTarget?: boolean }): Promise<GitConnection> {
     const vault = this.requireVault();
     validateTokens(input.tokens);
-    if (normalizeRepository('account/repository', input.provider).host !== input.providerHost
+    const repository = input.repositoryPath === undefined ? undefined : normalizeRepository(input.repositoryPath, input.provider);
+    if ((repository === undefined ? normalizeRepository('account/repository', input.provider).host : repository.host) !== input.providerHost
       || !safeValue(input.providerAccountId, 200) || !safeValue(input.displayName, 200)
-      || (input.repositoryPath !== undefined && normalizeRepository(input.repositoryPath, input.provider).repositoryPath !== input.repositoryPath)
+      || (repository !== undefined && input.repositoryPath !== repository.repositoryPath && input.repositoryPath !== repository.cloneUrl)
       || input.grantedPermissions.length > 100 || input.grantedPermissions.some((value) => !safeValue(value, 200))) {
       throw new GitError('GIT_REAUTH_REQUIRED');
     }
     const save = async (db: DatabaseHandle) => {
-      const existing = await db.get<ConnectionRow>(`
+      let existing = await db.get<ConnectionRow>(`
         SELECT * FROM git_connections WHERE owner_user_id = ? AND provider = ? AND provider_host = ? AND provider_account_id = ?
       `, input.ownerUserId, input.provider, input.providerHost, input.providerAccountId);
+      if (expected?.changeTarget) {
+        if (existing !== undefined && existing.id !== expected.id) throw new GitError('GIT_CONNECTION_REQUIRED');
+        existing = await db.get<ConnectionRow>('SELECT * FROM git_connections WHERE id = ? AND owner_user_id = ?', expected.id, input.ownerUserId);
+      }
       if (expected !== undefined && (existing?.id !== expected.id || existing.token_version !== expected.tokenVersion
         || existing.status === 'REVOKED')) throw new GitError('GIT_REAUTH_REQUIRED');
       const id = existing?.id ?? randomUUID();
@@ -68,22 +76,32 @@ export class GitConnectionRepository {
       const access = vault.encrypt(input.tokens.accessToken, context(connection, 'access-token'));
       const apiUsername = input.tokens.apiUsername === undefined ? null
         : vault.encrypt(input.tokens.apiUsername, context(connection, 'api-username'));
-      await db.run(`
-        INSERT INTO git_connections (id, owner_user_id, provider, provider_host, provider_account_id,
-          display_name, encrypted_access_token, encrypted_refresh_token, expires_at, granted_permissions_json,
-          status, key_version, token_version, created_at, updated_at, credential_type, encrypted_api_username, repository_path)
-        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'ACTIVE', ?, 1, ?, ?, 'token', ?, ?)
-        ON CONFLICT(owner_user_id, provider, provider_host, provider_account_id) DO UPDATE SET
-          display_name = excluded.display_name, encrypted_access_token = excluded.encrypted_access_token,
-          encrypted_refresh_token = NULL, expires_at = excluded.expires_at,
-          credential_type = 'token', encrypted_api_username = excluded.encrypted_api_username,
-          repository_path = excluded.repository_path,
-          granted_permissions_json = excluded.granted_permissions_json, status = 'ACTIVE',
-          key_version = excluded.key_version, token_version = git_connections.token_version + 1,
-          updated_at = excluded.updated_at
-      `, id, input.ownerUserId, input.provider, input.providerHost, input.providerAccountId, input.displayName,
-      access, input.tokens.expiresAt ?? null, JSON.stringify(input.grantedPermissions),
-      vault.currentKeyVersion, now, now, apiUsername, input.repositoryPath ?? null);
+      if (expected?.changeTarget) {
+        await db.run(`UPDATE git_connections SET provider = ?, provider_host = ?, provider_account_id = ?,
+          display_name = ?, encrypted_access_token = ?, encrypted_refresh_token = NULL, expires_at = ?,
+          granted_permissions_json = ?, status = 'ACTIVE', key_version = ?, token_version = token_version + 1,
+          updated_at = ?, credential_type = 'token', encrypted_api_username = ?, repository_path = ?
+          WHERE id = ? AND owner_user_id = ?`, input.provider, input.providerHost, input.providerAccountId,
+        input.displayName, access, input.tokens.expiresAt ?? null, JSON.stringify(input.grantedPermissions),
+        vault.currentKeyVersion, now, apiUsername, input.repositoryPath ?? null, id, input.ownerUserId);
+      } else {
+        await db.run(`
+          INSERT INTO git_connections (id, owner_user_id, provider, provider_host, provider_account_id,
+            display_name, encrypted_access_token, encrypted_refresh_token, expires_at, granted_permissions_json,
+            status, key_version, token_version, created_at, updated_at, credential_type, encrypted_api_username, repository_path)
+          VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'ACTIVE', ?, 1, ?, ?, 'token', ?, ?)
+          ON CONFLICT(owner_user_id, provider, provider_host, provider_account_id) DO UPDATE SET
+            display_name = excluded.display_name, encrypted_access_token = excluded.encrypted_access_token,
+            encrypted_refresh_token = NULL, expires_at = excluded.expires_at,
+            credential_type = 'token', encrypted_api_username = excluded.encrypted_api_username,
+            repository_path = excluded.repository_path,
+            granted_permissions_json = excluded.granted_permissions_json, status = 'ACTIVE',
+            key_version = excluded.key_version, token_version = git_connections.token_version + 1,
+            updated_at = excluded.updated_at
+        `, id, input.ownerUserId, input.provider, input.providerHost, input.providerAccountId, input.displayName,
+        access, input.tokens.expiresAt ?? null, JSON.stringify(input.grantedPermissions),
+        vault.currentKeyVersion, now, now, apiUsername, input.repositoryPath ?? null);
+      }
       await audit(db, input.ownerUserId, id, 'GIT_CONNECTION_SAVED', now);
       return publicConnection((await db.get<ConnectionRow>('SELECT * FROM git_connections WHERE id = ?', id))!);
     };
@@ -95,6 +113,18 @@ export class GitConnectionRepository {
     const row = await this.database.get<ConnectionRow>("SELECT * FROM git_connections WHERE id = ? AND owner_user_id = ? AND status <> 'REVOKED'", id, owner);
     if (row === undefined) throw new GitError('GIT_CONNECTION_REQUIRED');
     return { connection: publicConnection(row), tokenVersion: row.token_version };
+  }
+
+  public async setAlias(owner: string, id: string, value: string): Promise<GitConnection> {
+    const alias = normalizeGitAlias(value);
+    return this.database.transaction(async (db) => {
+      const now = new Date().toISOString();
+      const result = await db.run("UPDATE git_connections SET alias = ?, updated_at = ? WHERE id = ? AND owner_user_id = ? AND status <> 'REVOKED'",
+        alias, now, id, owner);
+      if (result.changes !== 1) throw new GitError('GIT_CONNECTION_REQUIRED');
+      await audit(db, owner, id, 'GIT_CONNECTION_ALIAS_UPDATED', now);
+      return publicConnection((await db.get<ConnectionRow>('SELECT * FROM git_connections WHERE id = ?', id))!);
+    });
   }
 
   public async readCredentials(ownerUserId: string, id: string): Promise<{ connection: GitConnection; tokens: GitTokens; tokenVersion: number }> {
@@ -143,6 +173,7 @@ function publicConnection(row: ConnectionRow): GitConnection {
     providerAccountId: row.provider_account_id, displayName: row.display_name, grantedPermissions: JSON.parse(row.granted_permissions_json) as string[],
     status: row.status === 'ACTIVE' && row.expires_at !== null && Date.parse(row.expires_at) <= Date.now() ? 'REAUTH_REQUIRED' : row.status, createdAt: row.created_at, updatedAt: row.updated_at,
     ...(row.expires_at === null ? {} : { expiresAt: row.expires_at }),
+    ...(row.alias == null ? {} : { alias: row.alias }),
     ...(row.repository_path == null ? {} : { repositoryPath: row.repository_path }) };
 }
 function context(connection: GitConnection, purpose: TokenContext['purpose']): TokenContext {

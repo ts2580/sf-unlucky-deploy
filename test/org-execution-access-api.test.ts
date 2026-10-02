@@ -17,20 +17,26 @@ describe('대상 org 실제 배포 allowlist API', () => {
 
       expect((await server.inject('/api/v1/admin/org-execution-access')).statusCode).toBe(401);
       expect((await server.inject({
-        method: 'PUT', url: `/api/v1/admin/org-execution-access/production/${deployer.id}`, headers: { cookie: admin.cookie },
+        method: 'PUT', url: `/api/v1/admin/org-execution-access/00D000000000001/${deployer.id}`, headers: { cookie: admin.cookie },
       })).statusCode).toBe(403);
       expect((await server.inject({
-        method: 'PUT', url: `/api/v1/admin/org-execution-access/production/${deployer.id}`, headers: admin.headers,
+        method: 'PUT', url: `/api/v1/admin/org-execution-access/00D000000000001/${deployer.id}`, headers: admin.headers,
       })).statusCode).toBe(204);
       expect((await server.inject({
         url: '/api/v1/admin/org-execution-access', headers: { cookie: admin.cookie },
-      })).json()).toEqual({ grants: [expect.objectContaining({ targetAlias: 'production', userId: deployer.id })] });
+      })).json()).toEqual({ grants: [expect.objectContaining({ orgId: '00D000000000001EAA', userId: deployer.id })], policies: [expect.objectContaining({ orgId: '00D000000000001EAA', grantCount: 1 })], legacyPolicies: [] });
       expect((await server.inject({
-        method: 'DELETE', url: `/api/v1/admin/org-execution-access/production/${deployer.id}`, headers: admin.headers,
+        method: 'DELETE', url: `/api/v1/admin/org-execution-access/00D000000000001/${deployer.id}`, headers: admin.headers,
       })).statusCode).toBe(204);
       expect((await server.inject({
         url: '/api/v1/admin/org-execution-access', headers: { cookie: admin.cookie },
-      })).json()).toEqual({ grants: [] });
+      })).json()).toEqual({ grants: [], policies: [expect.objectContaining({ orgId: '00D000000000001EAA', grantCount: 0 })], legacyPolicies: [] });
+      const orgId = '00D000000000002';
+      const userUrl = `/api/v1/admin/org-execution-access/${orgId}/${deployer.id}`;
+      expect((await server.inject({ method: 'PUT', url: userUrl, headers: admin.headers })).statusCode).toBe(204);
+      expect((await server.inject({ url: '/api/v1/admin/org-execution-access', headers: admin.headers })).json())
+        .toEqual({ grants: [expect.objectContaining({ orgId: '00D000000000002EAA', userId: deployer.id })], policies: expect.arrayContaining([expect.objectContaining({ orgId: '00D000000000002EAA', grantCount: 1 })]), legacyPolicies: [] });
+      expect((await server.inject({ method: 'DELETE', url: userUrl, headers: admin.headers })).statusCode).toBe(204);
     } finally {
       await server.close();
     }

@@ -1,7 +1,7 @@
 import type { ApiCredential } from '../git-credential-provider.js';
 import { GitError } from '../git-errors.js';
 import type { GitProvider, GitRefPage, GitRepositoryInfo } from '../git-provider.js';
-import { normalizeRepository, validateGitRef, type GitRef, type GitRepositoryAddress } from '../git-repository.js';
+import { connectionRepositoryPath, normalizeRepository, validateGitRef, type GitRef, type GitRepositoryAddress } from '../git-repository.js';
 import { arrayBody, commitSha, numberId, pageNumber, ProviderApi, record, stringField } from './provider-api.js';
 
 export class GitlabProvider implements GitProvider {
@@ -10,6 +10,7 @@ export class GitlabProvider implements GitProvider {
 
   public async inspect(address: GitRepositoryAddress, token?: string | ApiCredential, signal?: AbortSignal): Promise<GitRepositoryInfo> {
     const normalized = normalizeRepository(address.cloneUrl, this.id);
+    if (connectionRepositoryPath(normalized) !== normalized.repositoryPath) throw new GitError('GIT_CONNECTION_REQUIRED');
     const body = record((await this.api.get(`https://gitlab.com/api/v4/projects/${encodeURIComponent(normalized.repositoryPath)}`, token, signal)).body);
     const canonical = normalizeRepository(stringField(body.path_with_namespace), this.id);
     if (!['public', 'internal', 'private'].includes(String(body.visibility))) throw new GitError('REPOSITORY_UNAVAILABLE');
@@ -40,7 +41,8 @@ export class GitlabProvider implements GitProvider {
   }
 
   private endpoint(repository: GitRepositoryInfo): string {
-    normalizeRepository(repository.cloneUrl, this.id);
+    const normalized = normalizeRepository(repository.cloneUrl, this.id);
+    if (connectionRepositoryPath(normalized) !== normalized.repositoryPath) throw new GitError('GIT_CONNECTION_REQUIRED');
     if (!/^[1-9]\d*$/u.test(repository.repositoryId)) throw new GitError('INVALID_REPOSITORY');
     return `https://gitlab.com/api/v4/projects/${repository.repositoryId}/repository`;
   }

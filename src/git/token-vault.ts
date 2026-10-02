@@ -6,9 +6,9 @@ import type { GitProviderId } from './git-repository.js';
 export interface TokenContext {
   ownerUserId: string;
   resourceId: string;
-  provider: GitProviderId;
+  provider: GitProviderId | 'salesforce';
   host: string;
-  purpose: 'access-token' | 'refresh-token' | 'api-username';
+  purpose: 'access-token' | 'refresh-token' | 'api-username' | 'sfdx-auth-url';
 }
 interface Envelope { keyVersion: number; iv: string; tag: string; ciphertext: string }
 

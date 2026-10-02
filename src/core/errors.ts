@@ -15,13 +15,16 @@ export type SfudErrorCode =
   | 'DEPLOY_FAILED'
   | 'UI_START_FAILED'
   | 'REMOTE_BIND_DENIED'
+  | 'LOCAL_MODE_BIND_DENIED'
+  | 'INVALID_LOCAL_MODE'
   | 'STORAGE_ERROR'
   | 'INVALID_JOB_STATE'
   | 'IDEMPOTENCY_CONFLICT'
   | 'REQUEST_USER_LIMIT'
   | 'REQUEST_CAPACITY_EXCEEDED'
   | 'ORG_IDENTITY_CHANGED'
-  | 'APPROVAL_DENIED';
+  | 'APPROVAL_DENIED'
+  | 'CONFIGURATION_ERROR';
 
 export class SfudError extends Error {
   public readonly code: SfudErrorCode;

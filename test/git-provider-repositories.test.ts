@@ -18,6 +18,17 @@ function fixture(responses: ProviderHttpResponse[]) {
 function ok(body: unknown, headers = {}): ProviderHttpResponse { return { status: 200, body, headers }; }
 
 describe('Git 제공자 저장소·ref API', () => {
+  it('사내 GitLab 주소를 클라우드 REST provider에 직접 전달해도 gitlab.com을 호출하지 않는다', async () => {
+    const f = fixture([]);
+    const provider = new GitlabProvider(f.api);
+    const address = normalizeRepository('https://gitlab.hmc.co.kr/group/project.git', 'gitlab');
+    const repository = { ...address, repositoryId: '42', private: true };
+    await expect(provider.inspect(address, 'internal-token')).rejects.toMatchObject({ code: 'GIT_CONNECTION_REQUIRED' });
+    await expect(provider.listRefs(repository, 'branch', undefined, 'internal-token')).rejects.toMatchObject({ code: 'GIT_CONNECTION_REQUIRED' });
+    await expect(provider.resolveCommit(repository, { kind: 'branch', name: 'main' }, 'internal-token')).rejects.toMatchObject({ code: 'GIT_CONNECTION_REQUIRED' });
+    expect(f.request).not.toHaveBeenCalled();
+  });
+
   it('GitHub 정식 저장소 식별, slash branch, annotated tag의 commit을 해석한다', async () => {
     const f = fixture([
       ok({ id: 123, full_name: 'owner/project', private: false, default_branch: 'release/main', clone_url: 'https://evil.test/ignore' }),

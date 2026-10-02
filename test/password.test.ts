@@ -7,11 +7,13 @@ const legacyDigest = 'scrypt$16384$8$1$YWJjZGVmZ2hpamtsbW5vcA$71iq-9jmTvOEflLj7t
 describe('비밀번호 digest migration', () => {
   it('새 digest는 target 비용을 사용하고 기존 digest는 검증만 허용한다', async () => {
     const target = await hashPassword('correct horse battery staple');
-    expect(target).toMatch(/^scrypt\$32768\$8\$1\$/u);
+    expect(target).toMatch(/^scrypt\$32768\$8\$3\$/u);
     await expect(verifyPassword('correct horse battery staple', target)).resolves.toBe(true);
     await expect(verifyPassword('legacy account password', legacyDigest)).resolves.toBe(true);
     expect(passwordNeedsRehash(target)).toBe(false);
     expect(passwordNeedsRehash(legacyDigest)).toBe(true);
+    const previousTarget = target.replace('scrypt$32768$8$3$', 'scrypt$32768$8$1$');
+    expect(passwordNeedsRehash(previousTarget)).toBe(true);
   });
 
   it('지원 범위 밖 비용과 비정상 digest를 KDF 전에 거부한다', async () => {

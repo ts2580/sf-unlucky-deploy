@@ -18,6 +18,7 @@ import { ExternalDeploymentStateUnknownError, reportSalesforceDeployment, runAsy
 import { assertDeploymentOrgIdentities } from './org-identity-verifier.js';
 import { sameOrgIdentity } from './org-identity.js';
 import { evaluateQuickDeployEligibility } from './quick-deploy-eligibility.js';
+import { JobQueueClosedError } from './single-job-queue.js';
 
 export interface ApproveDeploymentRequest {
   dryRunJobId: string;
@@ -50,8 +51,19 @@ export class DeploymentService {
 
   public async approveAndExecute(input: ApproveDeploymentRequest): Promise<DeploymentJob> {
     this.coordinator.assertAccepting();
-    await this.orgExecutionAccess?.assertCanExecute(input.targetAlias, input.approvedBy);
-    const job = await this.jobs.approveAndQueueDeployment(input);
+    const approvedDryRun = await this.jobs.getRequired(input.dryRunJobId);
+    if (approvedDryRun.targetAlias !== input.targetAlias || approvedDryRun.targetOrgIdentity === undefined) {
+      throw new SfudError('APPROVAL_DENIED', '대상 Salesforce Org identity가 일치하지 않습니다.');
+    }
+    await this.orgExecutionAccess?.assertCanExecute(approvedDryRun.targetOrgIdentity.orgId, input.approvedBy);
+    const reservation = this.coordinator.reserveQueueSlot();
+    let job: DeploymentJob;
+    try {
+      job = await this.jobs.approveAndQueueDeployment(input);
+    } catch (error) {
+      reservation.release();
+      throw error;
+    }
     void this.coordinator.runDeployment(job.id, async (signal) => {
       const persistenceWarnings: string[] = [];
       let attemptId: string | undefined;
@@ -113,8 +125,8 @@ export class DeploymentService {
             signal,
             beforeSubmit: async () => {
               await this.jobs.assertAccess(current.id, requiredString(current.createdBy, '배포 실행 사용자'));
-              await this.orgExecutionAccess?.assertCanExecute(current.targetAlias, requiredString(current.createdBy, '배포 실행 사용자'));
               await assertDeploymentOrgIdentities(current, this.jobs, this.workspace);
+              await this.orgExecutionAccess?.assertCanExecute(requiredString(current.targetOrgIdentity?.orgId, '대상 Org ID'), requiredString(current.createdBy, '배포 실행 사용자'));
               attemptId = await this.jobs.attempts.begin({
                 jobId: current.id, operation: quickDeploy ? 'QUICK_DEPLOY' : 'DEPLOY', payloadChecksum: actualChecksum,
                 digestVersion: 2, runDirectory: requiredString(dryRun.runDirectory, 'dry-run 실행 디렉터리'),
@@ -152,6 +164,13 @@ export class DeploymentService {
         if (error instanceof Error) error.message = redactSensitiveText(error.message);
         throw error;
       }
+    }, reservation).catch(async (error: unknown) => {
+      if (error instanceof JobQueueClosedError && (await this.jobs.getRequiredSummary(job.id)).status === 'QUEUED') {
+        await this.jobs.transition(job.id, 'FAILED', {
+          errorCode: 'JOB_QUEUE_REJECTED',
+          errorMessage: redactSensitiveText(error instanceof Error ? error.message : String(error)),
+        });
+      }
     }).catch(() => undefined);
     return job;
   }
@@ -179,7 +198,7 @@ export class DeploymentService {
     const attempt = await this.jobs.attempts.current(input.jobId);
     if (job.status !== 'RECONCILE_REQUIRED' || attempt === undefined
       || attempt.operation !== input.operation || attempt.submissionState !== 'SUBMITTING'
-      || attempt.validationId !== undefined || attempt.deploymentId !== undefined) {
+      || (attempt.operation === 'VALIDATE' ? attempt.validationId : attempt.deploymentId) !== undefined) {
       throw new SfudError('INVALID_JOB_STATE', '관리자 연결 대상인 ID 없는 Salesforce 제출이 아닙니다.');
     }
     await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
@@ -198,6 +217,7 @@ export class DeploymentService {
       || confirmation.progress.checkOnly !== (input.operation === 'VALIDATE')) {
       throw new SfudError('INVALID_JOB_STATE', '원격 report가 입력한 실행 ID 또는 제출 유형을 명시적으로 확인하지 않았습니다.');
     }
+    assertRemoteSubmissionTime(confirmation.report, attempt.startedAt);
     await this.jobs.attempts.bindForReconciliation({
       jobId: input.jobId, attemptId: attempt.id, operation: input.operation, deploymentId: input.deploymentId,
       actorUserId: input.actorUserId, observedAt: input.observedAt, evidence: input.evidence.trim(),
@@ -299,6 +319,20 @@ function assertObservationTime(observedAt: string, attemptStartedAt: string): vo
   if (!Number.isFinite(observed) || !Number.isFinite(started)
     || observed < started - 10 * 60 * 1_000 || observed > now + 5 * 60 * 1_000) {
     throw new SfudError('INVALID_ARGUMENT', '원격 작업 확인 시각은 제출 attempt 시작 시각 이후여야 합니다.');
+  }
+}
+
+function assertRemoteSubmissionTime(report: unknown, attemptStartedAt: string): void {
+  const outer = report !== null && typeof report === 'object' ? report as Record<string, unknown> : {};
+  const result = outer.result !== null && typeof outer.result === 'object'
+    ? outer.result as Record<string, unknown> : {};
+  const created = typeof result.createdDate === 'string' ? Date.parse(result.createdDate) : Number.NaN;
+  const started = Date.parse(attemptStartedAt);
+  if (!Number.isFinite(created) || !Number.isFinite(started)
+    || created < started - 10 * 60 * 1_000 || created > started + 10 * 60 * 1_000
+    || created > Date.now() + 5 * 60 * 1_000) {
+    throw new SfudError('INVALID_JOB_STATE',
+      '원격 report의 제출 시각이 없거나 현재 제출 attempt와 일치하지 않아 ID를 연결하지 않았습니다.');
   }
 }
 

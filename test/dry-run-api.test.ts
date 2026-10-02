@@ -11,6 +11,48 @@ import { createWebServer } from '../src/web/server/app.js';
 import { writeFixtureFiles } from './support/files.js';
 
 describe('dry-run API', () => {
+  it.each(['direct', 'approved'])('별칭 없는 username org에도 %s 배포한다', async (mode) => {
+    const client = new DryRunSfClient();
+    client.alias = undefined;
+    client.username = 'target+sandbox@example.com';
+    const fixture = await createFixture(client);
+    try {
+      const auth = await bootstrap(fixture.server);
+      const headers = { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken };
+      const workspace = (await fixture.server.inject({ url: '/api/v1/workspace', headers }))
+        .json<{ sources: Array<{ id: string; kind: string }>; orgs: Array<{ alias: string }> }>();
+      expect(workspace.orgs[0]!.alias).toBe(client.username);
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      const response = await fixture.server.inject({
+        method: 'POST', url: `/api/v1/deployments/${mode === 'direct' ? 'direct' : 'dry-run'}`,
+        headers: { ...headers, 'idempotency-key': `username-${mode}` },
+        payload: {
+          scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+          sourceId, targetOrgId: `org:${client.username}`, testLevel: 'RunLocalTests', tests: [],
+          ...(mode === 'direct' ? { targetConfirmation: client.username, confirmation: '실제 배포' } : {}),
+        },
+      });
+      expect(response.statusCode).toBe(202);
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+      let job = await fixture.server.sfudRuntime.deploymentJobs.getRequired(response.json<{ job: { id: string } }>().job.id);
+      if (mode === 'approved') {
+        expect(job.status).toBe('APPROVAL_PENDING');
+        const approved = await fixture.server.inject({
+          method: 'POST', url: '/api/v1/deployments/execute', headers,
+          payload: { dryRunJobId: job.id, payloadChecksum: job.payloadChecksum,
+            targetAlias: client.username, confirmation: '실제 배포' },
+        });
+        expect(approved.statusCode).toBe(202);
+        await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+        job = await fixture.server.sfudRuntime.deploymentJobs.getRequired(approved.json<{ job: { id: string } }>().job.id);
+      }
+      expect(job).toMatchObject({ status: 'SUCCEEDED', targetAlias: client.username });
+      for (const call of client.calls.filter(({ args }) => args[1] === 'deploy')) {
+        expect(call.args).toContain(client.username);
+      }
+    } finally { await fixture.close(); }
+  });
+
   it('보호된 실행 기록이 run quota를 넘으면 source 준비 전 새 요청을 503으로 거부한다', async () => {
     vi.stubEnv('SFUD_RUN_MAX_BYTES', '1');
     const fixture = await createFixture(new DryRunSfClient());
@@ -309,6 +351,20 @@ describe('dry-run API', () => {
       expect(retry.json<{ job: { id: string } }>().job.id).toBe(dryRun.id);
       expect(await readdir(path.join(fixture.root, 'data', 'runs'))).toEqual([dryRun.id]);
 
+      const reservations = Array.from({ length: 20 }, () => fixture.server.sfudRuntime.deploymentCoordinator.reserveQueueSlot());
+      const beforeCount = await fixture.server.sfudRuntime.store.database.get('SELECT COUNT(*) count FROM deployment_jobs');
+      try {
+        const saturated = await fixture.server.inject({
+          method: 'POST', url: '/api/v1/deployments/execute',
+          headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+          payload: { dryRunJobId: dryRun.id, payloadChecksum: dryRun.payloadChecksum,
+            targetAlias: 'target', confirmation: '실제 배포' },
+        });
+        expect(saturated.statusCode).toBe(503);
+        expect(saturated.json()).toMatchObject({ error: { code: 'REQUEST_CAPACITY_EXCEEDED' } });
+        expect(await fixture.server.sfudRuntime.store.database.get('SELECT COUNT(*) count FROM deployment_jobs')).toEqual(beforeCount);
+        expect(await fixture.server.sfudRuntime.deploymentJobs.getRequired(dryRun.id)).toMatchObject({ status: 'APPROVAL_PENDING' });
+      } finally { for (const reservation of reservations) reservation.release(); }
       const approved = await fixture.server.inject({
         method: 'POST', url: '/api/v1/deployments/execute',
         headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
@@ -434,7 +490,7 @@ describe('dry-run API', () => {
         actorUserId: admin!.id, email: 'deployer@example.com', displayName: 'Deployer', role: 'DEPLOYER',
         password: 'deployer correct horse battery staple',
       });
-      await fixture.server.sfudRuntime.orgExecutionAccess.grant('target', admin!.id, admin!.id);
+      await fixture.server.sfudRuntime.orgExecutionAccess.grant('00D000000000001', admin!.id, admin!.id);
       const login = await fixture.server.inject({
         method: 'POST', url: '/api/v1/auth/login',
         payload: { email: 'deployer@example.com', password: 'deployer correct horse battery staple' },
@@ -1217,6 +1273,8 @@ describe('dry-run API', () => {
 class DryRunSfClient implements SfClient {
   public readonly calls: Array<{ args: readonly string[]; options: SfRunOptions }> = [];
   public orgId = '00D000000000001';
+  public alias: string | undefined = 'target';
+  public username = 'target@example.com';
   private orgListCalls = 0;
 
   public constructor(
@@ -1238,7 +1296,7 @@ class DryRunSfClient implements SfClient {
         : this.orgId;
       return { status: 0, result: { nonScratchOrgs: [
         {
-          alias: 'target', username: 'target@example.com', orgId,
+          alias: this.alias, username: this.username, orgId,
           instanceUrl: 'https://target.example.my.salesforce.com', name: 'Target',
           orgEdition: 'Developer', connectedStatus: 'Connected',
         },
@@ -1260,6 +1318,9 @@ class DryRunSfClient implements SfClient {
     }
     if (args.includes('convert')) {
       await writeSnapshot(flagValue(args, '--output-dir'), 'source');
+      // The converted package carries the selected manifest, not an empty stub.
+      await writeFile(path.join(flagValue(args, '--output-dir'), 'package.xml'),
+        await readFile(flagValue(args, '--manifest'), 'utf8'));
       return { status: 0 };
     }
     if (args[0] === 'project' && args[1] === 'deploy' && ['start', 'quick'].includes(args[2]!)) {
@@ -1306,6 +1367,7 @@ class DryRunSfClient implements SfClient {
       }
       return { status: 0, result: {
         id,
+        ...(id === '0Af000000000001' ? { createdDate: new Date().toISOString() } : {}),
         ...(id === '0Af000000000001' || id === '0Af-check-only' ? { checkOnly: true } : {}),
         status: 'Succeeded',
         done: true,
@@ -1417,6 +1479,8 @@ async function bootstrap(server: Awaited<ReturnType<typeof createWebServer>>) {
       displayName: '관리자', password: 'dry run test password',
     },
   });
+  const userId = response.json<{ user: { id: string } }>().user.id;
+  await server.sfudRuntime.orgExecutionAccess.grant('00D000000000001', userId, userId);
   return {
     cookie: (response.headers['set-cookie'] as string[]).map((value) => value.split(';')[0]).join('; '),
     csrfToken: response.json<{ csrfToken: string }>().csrfToken,

@@ -1,5 +1,5 @@
 import { GitError } from './git-errors.js';
-import { normalizeRepository, type GitProviderId } from './git-repository.js';
+import { connectionRepositoryPath, normalizeRepository, type GitProviderId } from './git-repository.js';
 import { credentialProviderFor, providerApiCredential, validApiUsername } from './git-credential-provider.js';
 import { GitClient } from './git-client.js';
 import { GitRemoteProvider } from './git-remote-provider.js';
@@ -54,7 +54,7 @@ export class GitTokenService {
     try {
       // Never contact a provider for another user's connection id.
       const previous = replaceId === undefined ? undefined : await this.connections.replacementState(owner, replaceId);
-      if (previous !== undefined && previous.connection.provider !== input.provider) throw new GitError('GIT_CONNECTION_REQUIRED');
+      if (previous !== undefined && previous.connection.provider !== input.provider && !input.changeTarget) throw new GitError('GIT_CONNECTION_REQUIRED');
       const tokens: GitTokens = { accessToken: input.token,
         ...(input.apiUsername === undefined ? {} : { apiUsername: input.apiUsername.trim() }),
         ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }) };
@@ -68,15 +68,20 @@ export class GitTokenService {
       }
       if (input.repositoryPath !== undefined) {
         const address = normalizeRepository(input.repositoryPath, input.provider);
-        if (previous !== undefined && previous.connection.repositoryPath !== address.repositoryPath) throw new GitError('GIT_CONNECTION_REQUIRED');
+        if (previous?.connection.repositoryPath !== undefined && !input.changeTarget) {
+          const previousAddress = normalizeRepository(previous.connection.repositoryPath, input.provider);
+          if (previousAddress.cloneUrl !== address.cloneUrl) {
+            throw new GitError('GIT_CONNECTION_REQUIRED');
+          }
+        }
         const provider = new GitRemoteProvider(address, credentialProviderFor(input.provider, tokens), this.remote);
         const repository = await provider.inspect(address, undefined, AbortSignal.timeout(20_000));
         return await this.connections.save({ ownerUserId: owner, provider: input.provider, providerHost: address.host,
           providerAccountId: repository.repositoryId, displayName: address.repositoryPath.slice(0, 200),
-          repositoryPath: address.repositoryPath, grantedPermissions: [], tokens },
-        previous === undefined ? undefined : { id: replaceId!, tokenVersion: previous.tokenVersion });
+          repositoryPath: connectionRepositoryPath(address), grantedPermissions: [], tokens },
+        previous === undefined ? undefined : { id: replaceId!, tokenVersion: previous.tokenVersion, changeTarget: input.changeTarget === true });
       }
-      if (previous?.connection.repositoryPath !== undefined) throw new GitError('GIT_CONNECTION_REQUIRED');
+      if (previous?.connection.repositoryPath !== undefined && !input.changeTarget) throw new GitError('GIT_CONNECTION_REQUIRED');
       const credential = providerApiCredential(input.provider, tokens);
       const endpoint = { github: 'https://api.github.com/user', gitlab: 'https://gitlab.com/api/v4/user',
         bitbucket: 'https://api.bitbucket.org/2.0/user' }[input.provider];
@@ -93,7 +98,7 @@ export class GitTokenService {
       const providerAccountId = input.provider === 'bitbucket' ? stringField(account.uuid, 100) : numberId(account.id);
       const displayName = stringField(input.provider === 'github' ? account.login
         : input.provider === 'gitlab' ? account.username : account.display_name, 200);
-      if (previous !== undefined && previous.connection.providerAccountId !== providerAccountId) throw new GitError('GIT_CONNECTION_REQUIRED');
+      if (previous !== undefined && previous.connection.providerAccountId !== providerAccountId && !input.changeTarget) throw new GitError('GIT_CONNECTION_REQUIRED');
       const reportedExpiration = response.headers['github-authentication-token-expiration'];
       if (typeof reportedExpiration === 'string' && Number.isFinite(Date.parse(reportedExpiration))) {
         const timestamp = Date.parse(reportedExpiration);
@@ -105,7 +110,7 @@ export class GitTokenService {
       const grantedPermissions = typeof scopes === 'string' ? scopes.split(',').map((scope) => scope.trim()).filter(Boolean) : [];
       return await this.connections.save({ ownerUserId: owner, provider: input.provider,
         providerHost: normalizeRepository('account/repository', input.provider).host, providerAccountId, displayName,
-        grantedPermissions, tokens }, previous === undefined ? undefined : { id: replaceId!, tokenVersion: previous.tokenVersion });
+        grantedPermissions, tokens }, previous === undefined ? undefined : { id: replaceId!, tokenVersion: previous.tokenVersion, changeTarget: input.changeTarget === true });
     } catch (error) {
       if (error instanceof GitError) throw error;
       throw new GitError('GIT_REAUTH_REQUIRED');

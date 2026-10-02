@@ -33,6 +33,7 @@ export interface ApiUser {
 }
 
 export interface AuthStatusResponse {
+  localMode?: boolean;
   setupRequired: boolean;
   authenticated: boolean;
   user?: ApiUser;

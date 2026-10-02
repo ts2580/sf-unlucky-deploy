@@ -9,7 +9,8 @@ import type { GitObjectReader } from '../src/git/git-object-store.js';
 import { GitRepositoryAccess } from '../src/git/git-repository-access.js';
 import type { ApiCredential } from '../src/git/git-credential-provider.js';
 import type { GitProvider, GitRepositoryInfo } from '../src/git/git-provider.js';
-import { normalizeRepository, type GitProviderId, type GitRepositoryAddress } from '../src/git/git-repository.js';
+import { connectionRepositoryPath, normalizeRepository, type GitProviderId, type GitRepositoryAddress } from '../src/git/git-repository.js';
+import { GitRegistrationService } from '../src/git/git-registration-service.js';
 import { GitConnectionRepository } from '../src/storage/git-connection-repository.js';
 import { GitImportRepository } from '../src/storage/git-import-repository.js';
 import { openSqliteStore, type SqliteStore } from '../src/storage/sqlite-store.js';
@@ -32,6 +33,7 @@ afterEach(async () => {
 });
 
 interface FixtureOptions {
+  addressInput?: string;
   provider?: GitProviderId;
   accessEnabled?: boolean;
   enabled?: boolean;
@@ -91,7 +93,7 @@ async function fixture(options: FixtureOptions = {}): Promise<Fixture> {
   const other = await users.create({ email: 'private-other@example.com', displayName: 'Private other', role: 'ADMIN' });
   const vault = new TokenVault(new Map([[1, Buffer.alloc(32, 7)]]), 1);
   const connections = new GitConnectionRepository(store.database, vault);
-  const address = normalizeRepository(providerId === 'gitlab' ? 'group/project' : 'owner/project', providerId);
+  const address = normalizeRepository(options.addressInput ?? (providerId === 'gitlab' ? 'group/project' : 'owner/project'), providerId);
   const connection = await connections.save({
     ownerUserId: owner.id, provider: providerId, providerHost: address.host, providerAccountId: 'provider-account',
     displayName: 'Private provider account', grantedPermissions: [],
@@ -121,7 +123,7 @@ async function fixture(options: FixtureOptions = {}): Promise<Fixture> {
     enabled: options.enabled ?? true, concurrency: options.concurrency ?? 2,
   });
   services.push(imported); projectStores.push(projects); roots.push(projectRoot);
-  const request = { provider: providerId, repositoryPath: address.repositoryPath, ref: { kind: 'branch' as const, name: 'main' }, expectedCommitSha: sha, connectionId: connection.id };
+  const request = { provider: providerId, repositoryPath: connectionRepositoryPath(address), ref: { kind: 'branch' as const, name: 'main' }, expectedCommitSha: sha, connectionId: connection.id };
   return { store, owner, other, connections, connection, connectionService, access, history, service: imported, provider, providerCalls, remote, fetch, address, request };
 }
 
@@ -131,6 +133,49 @@ async function waitForStatus(f: Fixture, id: string, status: string) {
 }
 
 describe('private Git repository access and PAT import', { timeout: 60_000 }, () => {
+  it.each([
+    ['github', 'https://git.example.test:8443/enterprise/team/project.git'],
+    ['gitlab', 'https://gitlab.example.test:9443/gitlab/team/sub/project.git'],
+    ['gitlab', 'https://gitlab.hmc.co.kr/group/project.git'],
+    ['bitbucket', 'https://bitbucket.example.test:7990/bitbucket/scm/TEAM/project.git'],
+  ] as const)('%s 셀프호스트 주소를 refs·가져오기·재조회·등록 재생성·비교 준비까지 보존한다', async (provider, url) => {
+    const f = await fixture({ provider, addressInput: url, repositoryPath: url });
+    const inspected = await f.service.inspect(f.request, undefined, f.owner.id);
+    expect(inspected.cloneUrl).toBe(url);
+    expect((await f.service.refs(f.request, 'branch', undefined, f.owner.id)).refs[0]?.name).toBe('main');
+    const imported = await f.service.create(f.owner.id, f.request);
+    const ready = await waitForStatus(f, imported.id, 'READY');
+    expect(ready.repositoryPath).toBe(url);
+    expect(ready.provenance?.repositoryPath).toBe(url);
+    expect((await new GitImportRepository(f.store.database).get(imported.id, f.owner.id)).repositoryPath).toBe(url);
+    await f.service.remove(imported.id, f.owner.id);
+    const warm = vi.spyOn(f.service, 'warm').mockImplementation(async (_owner, input) => {
+      expect(input.repositoryPath).toBe(url);
+      await f.service.inspect(input, undefined, f.owner.id);
+      return { commitSha: sha, syncedAt: new Date().toISOString() };
+    });
+    const registered = new GitRegistrationService(f.store.database, f.service);
+    const saved = await registered.register(f.owner.id, f.request);
+    expect(saved.request.repositoryPath).toBe(url);
+    await registered.close();
+    const restarted = new GitRegistrationService(f.store.database, f.service);
+    try {
+      expect((await restarted.get(saved.id, f.owner.id)).request.repositoryPath).toBe(url);
+      await restarted.sync(saved.id, f.owner.id);
+      const prepared = await restarted.prepare(saved.id, f.owner.id, 'ApexClass');
+      expect(prepared.status).toBe('READY');
+      expect(prepared.repositoryPath).toBe(url);
+      expect(f.remote.lsRemote.mock.calls.every(([input]) => input.repository.cloneUrl === url)).toBe(true);
+      expect(f.fetch.mock.calls.every(([input]) => input.repository.cloneUrl === url)).toBe(true);
+      expect(f.providerCalls).toEqual({ inspect: [], refs: [], commits: [] });
+      for (const wrongUrl of [url.replace(new URL(url).host, 'other.example.test'),
+        url.replace(new URL(url).host, `${f.address.host}:10443`), url.replace('project.git', 'other.git')]) {
+        await expect(f.access.validate(f.owner.id, f.connection.id, normalizeRepository(wrongUrl, provider))).rejects.toMatchObject({ code: 'GIT_CONNECTION_REQUIRED' });
+      }
+      const { connectionId: _connection, ...publicRequest } = f.request;
+      await expect(f.service.inspect(publicRequest, undefined, f.owner.id)).rejects.toMatchObject({ code: 'GIT_CONNECTION_REQUIRED' });
+    } finally { warm.mockRestore(); await restarted.close(); }
+  });
   it('소유자와 provider를 확인하고 GitLab PAT의 API/Git credential을 분리한다', async () => {
     const f = await fixture();
     const authorization = await f.access.authorize(f.owner.id, f.connection.id, f.address, f.provider);

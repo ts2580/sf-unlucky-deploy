@@ -6,16 +6,16 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  package:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
 
     steps:
       - name: 소스와 태그 체크아웃
@@ -46,30 +46,111 @@ jobs:
           npx playwright install --with-deps chromium
           npm run verify
 
-      - name: 릴리즈 패키지와 공급망 산출물 생성
+      - name: 단일 릴리즈 tarball 및 SBOM 생성
         run: |
           mkdir -p release
-          npx --yes npm@11.7.0 pack --pack-destination release
-          npx --yes npm@11.7.0 sbom \
+          npx --yes npm@11.20.0 pack --ignore-scripts --pack-destination release
+          npx --yes npm@11.20.0 sbom \
             --omit=dev \
             --package-lock-only \
             --sbom-format cyclonedx \
             --sbom-type application > release/sbom.cdx.json
           cd release
-          sha256sum ./*.tgz ./sbom.cdx.json > SHA256SUMS
+          sha256sum trstyq-sf-unlucky-deploy-*.tgz sbom.cdx.json > SHA256SUMS
+          cd ..
+          node scripts/release-manifest.mjs create \
+            "${GITHUB_REF_NAME}" "${GITHUB_SHA}" "${GITHUB_RUN_ID}" release
 
-      - name: 설치 스모크 검증
+      - name: Linux Node 24 설치 smoke
         run: node scripts/package-smoke.mjs ./release/*.tgz
 
-      - name: GitHub Release 발행
+      - name: 릴리즈 입력 업로드
+        uses: actions/upload-artifact@v6
+        with:
+          name: npm-release-input
+          path: release/
+          if-no-files-found: error
+          retention-days: 30
+
+  install-matrix:
+    name: install-${{ matrix.name }}
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-node22.19
+            os: ubuntu-latest
+            node: 22.19
+          - name: linux-node24
+            os: ubuntu-latest
+            node: 24
+          - name: windows-node24
+            os: windows-latest
+            node: 24
+          - name: macos-arm64-node24
+            os: macos-14
+            node: 24
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+
+    steps:
+      - name: 릴리즈 태그 소스 체크아웃
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Node.js 설정
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+
+      - name: 동일한 릴리즈 tarball 내려받기
+        uses: actions/download-artifact@v7
+        with:
+          name: npm-release-input
+          path: release
+
+      - name: 패키지 설치와 CLI·UI·SQLite·재시작 smoke
+        shell: bash
+        run: node scripts/package-smoke.mjs ./release/trstyq-sf-unlucky-deploy-*.tgz
+
+  publish-github-release:
+    needs: [package, install-matrix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+
+    steps:
+      - name: 소스와 태그 체크아웃
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: 릴리즈 파일 내려받기
+        uses: actions/download-artifact@v7
+        with:
+          name: npm-release-input
+          path: release
+
+      - name: 태그·커밋·manifest·checksum 재검증
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" = tag
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          node scripts/release-manifest.mjs verify \
+            "${RELEASE_TAG}" "${GITHUB_SHA}" "${GITHUB_RUN_ID}" release
+
+      - name: GitHub Release 생성
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "${RELEASE_TAG}" \
-            ./release/*.tgz \
-            ./release/sbom.cdx.json \
-            ./release/SHA256SUMS \
-            --verify-tag \
-            --title "sf-unlucky-deploy ${RELEASE_TAG}" \
-            --notes-file "docs/releases/${RELEASE_TAG}.md"
+          args=("${RELEASE_TAG}" release/*.tgz release/sbom.cdx.json release/SHA256SUMS release/release-manifest.json \
+            --verify-tag --target "${GITHUB_SHA}" --title "sf-unlucky-deploy ${RELEASE_TAG}" --notes-file "docs/releases/${RELEASE_TAG}.md")
+          if [[ "${RELEASE_TAG}" == *-* ]]; then args+=(--prerelease); fi
+          gh release create "${args[@]}"

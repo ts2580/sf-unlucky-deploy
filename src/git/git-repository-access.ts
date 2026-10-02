@@ -3,7 +3,7 @@ import type { GitConnectionService } from './git-connection-service.js';
 import { credentialProviderFor, providerApiCredential, type ApiCredential, type GitCredentialProvider } from './git-credential-provider.js';
 import { GitError } from './git-errors.js';
 import type { GitProvider, GitRepositoryInfo } from './git-provider.js';
-import { normalizeRepository, type GitRepositoryAddress } from './git-repository.js';
+import { connectionRepositoryPath, normalizeRepository, type GitRepositoryAddress } from './git-repository.js';
 import { GitRemoteProvider } from './git-remote-provider.js';
 import { GitClient } from './git-client.js';
 
@@ -28,9 +28,11 @@ export class GitRepositoryAccess {
     }
     if (state.connection.repositoryPath !== undefined) {
       const expected = normalizeRepository(state.connection.repositoryPath, state.connection.provider);
-      if (expected.host !== address.host || expected.repositoryPath !== address.repositoryPath) {
+      if (expected.cloneUrl !== address.cloneUrl) {
         throw new GitError('GIT_CONNECTION_REQUIRED');
       }
+    } else if (connectionRepositoryPath(address) !== address.repositoryPath) {
+      throw new GitError('GIT_CONNECTION_REQUIRED');
     }
     return state;
   }
