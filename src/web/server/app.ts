@@ -1,3 +1,5 @@
+import { registerDeploymentDraftRoutes } from './deployment-draft-routes.js';
+import { registerDeploymentPresetRoutes } from './deployment-preset-routes.js';
 import { registerGitProjectRoutes } from './git-project-routes.js';
 import { access } from 'node:fs/promises';
 import path from 'node:path';
@@ -178,6 +180,8 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
   await registerGitProjectRoutes(app);
   await registerComparisonRoutes(app);
   await registerDeploymentRoutes(app);
+  await registerDeploymentPresetRoutes(app);
+  await registerDeploymentDraftRoutes(app);
   await registerWorkflowEventRoutes(app);
 
   if (await hasBuiltUi(assetsDirectory)) {

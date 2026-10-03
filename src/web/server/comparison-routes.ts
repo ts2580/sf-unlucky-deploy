@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { Type } from '@sinclair/typebox';
 import { WorkspaceResponseSchema } from '../../api/workspace-contracts.js';
+import { orgIdentityFingerprint } from '../../deploy/org-identity.js';
 import { SfudError } from '../../core/errors.js';
 
 import type { ComparisonJob } from '../../compare/comparison-job-repository.js';
@@ -54,6 +55,12 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
         app.sfudRuntime.workspace.listOrgs(),
         Promise.resolve(app.sfudRuntime.workspace.listProjects()),
       ]);
+      const fingerprints = new Map(orgs.filter((org) => org.connected && org.username !== undefined && org.orgId !== undefined).map((org) => [org.id, orgIdentityFingerprint({
+        alias: org.alias, username: org.username!, orgId: org.orgId!,
+        ...(org.connectionId === undefined ? {} : { connectionId: org.connectionId }),
+        ...(org.connectionGeneration === undefined ? {} : { connectionGeneration: org.connectionGeneration }),
+        ...(org.instanceUrlHash === undefined ? {} : { instanceUrlHash: org.instanceUrlHash }),
+      })]));
       return reply.send({
         orgs: orgs.map((org) => ({
           id: org.id,
@@ -61,8 +68,10 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
           label: org.label,
           connected: org.connected,
           ...(org.edition === undefined ? {} : { edition: org.edition }),
+          environment: org.environment ?? 'unknown',
           ...(org.username === undefined ? {} : { username: org.username }),
           ...(org.orgId === undefined ? {} : { maskedOrgId: maskOrgId(org.orgId) }),
+          ...(fingerprints.has(org.id) ? { orgIdentityFingerprint: fingerprints.get(org.id)! } : {}),
         })),
         projects: [...projects, ...app.sfudRuntime.gitImports.listProjects(session.user.id)],
         sources: [
@@ -73,9 +82,11 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
             kind: 'org' as const,
             location: 'org' as const,
             label: org.alias,
+            environment: org.environment ?? 'unknown',
             detail: [org.label, org.edition].filter(Boolean).join(' · '),
             ...(org.username === undefined ? {} : { username: org.username }),
             ...(org.orgId === undefined ? {} : { maskedOrgId: maskOrgId(org.orgId) }),
+            ...(fingerprints.has(org.id) ? { orgIdentityFingerprint: fingerprints.get(org.id)! } : {}),
           })),
           ...projects.map((project) => ({
             id: `project:${project.id}`,

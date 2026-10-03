@@ -6,6 +6,25 @@ import { createWebServer } from '../src/web/server/app.js';
 describe('Salesforce 인증 목록 세션 보존', () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it('명시적 Salesforce sandbox boolean만 신뢰하고 별칭·edition으로 환경을 추측하지 않는다', async () => {
+    const runJson = vi.fn(async () => ({ result: { nonScratchOrgs: [
+      { alias: 'production-name', username: 'a@example.com', orgId: '00D000000000001', connectedStatus: 'Connected', isSandbox: true },
+      { alias: 'sandbox-name', username: 'b@example.com', orgId: '00D000000000002', connectedStatus: 'Connected', IsSandbox: false },
+      { alias: 'unknown', username: 'c@example.com', orgId: '00D000000000003', connectedStatus: 'Connected', orgEdition: 'Sandbox', isSandbox: 'true' },
+    ] } }));
+    const app = await createWebServer({ host: '127.0.0.1', port: 0, localMode: true, assetsDirectory: '/missing', databasePath: ':memory:', sfClient: { runJson } });
+    try {
+      const session = await app.inject({ url: '/api/v1/auth/status', headers: { host: '127.0.0.1' } });
+      const cookie = (session.headers['set-cookie'] as string[]).map((item) => item.split(';')[0]).join('; ');
+      const result = await app.inject({ url: '/api/v1/workspace', headers: { host: '127.0.0.1', cookie } });
+      expect(result.statusCode).toBe(200);
+      const sources = result.json().sources;
+      expect(sources.find((source: { id: string }) => source.id === 'org:production-name').environment).toBe('sandbox');
+      expect(sources.find((source: { id: string }) => source.id === 'org:sandbox-name').environment).toBe('production');
+      expect(sources.find((source: { id: string }) => source.id === 'org:unknown').environment).toBe('unknown');
+      expect(runJson).toHaveBeenCalledTimes(1);
+    } finally { await app.close(); }
+  });
   it('동시 앱 진입·탭 이동·새 브라우저 세션은 CLI 한 번만 조회하고 명시한 새로고침만 다시 조회한다', async () => {
     const runJson = vi.fn(async () => ({ status: 0, result: { nonScratchOrgs: [
       { alias: 'cached-org', username: 'cached@example.com', orgId: '00D000000000001', connectedStatus: 'Connected' },

@@ -1,3 +1,4 @@
+import { deploymentFailureCode } from './deployment-error.js';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { assertGitMetadataScope } from '../sources/git-metadata-scope.js';
@@ -13,7 +14,7 @@ import type { AllowedProject, WorkspaceService } from '../web/server/workspace-s
 import { DeploymentCoordinator, ReconciliationRequiredError } from './deployment-coordinator.js';
 import { DeploymentJobRepository, type DeploymentJob } from './deployment-job-repository.js';
 import { assertDeploymentOrgIdentities } from './org-identity-verifier.js';
-import type { OrgIdentitySnapshot } from './org-identity.js';
+import { orgIdentityFingerprint, type OrgIdentitySnapshot } from './org-identity.js';
 import {
   normalizeSelectedComponents,
   type SelectedMetadataComponent,
@@ -42,6 +43,8 @@ export interface CreateDryRunInput {
   components?: SelectedMetadataComponent[];
   sourceId: string;
   targetOrgId: string;
+  expectedTargetIdentityFingerprint?: string;
+  expectedSourceIdentityFingerprint?: string;
   testLevel: RequestedTestLevel;
   tests: string[];
   testClassSuffix: string;
@@ -475,10 +478,14 @@ export class DryRunService {
     const targetAlias = targetSource.slice('org:'.length);
     const [sourceOrgIdentity, targetOrgIdentity] = await Promise.all([
       source.startsWith('org:')
-        ? this.workspace.getOrgIdentity(source.slice('org:'.length))
+        ? this.workspace.getOrgIdentity(source.slice('org:'.length), input.expectedSourceIdentityFingerprint !== undefined)
         : Promise.resolve(undefined),
-      this.workspace.getOrgIdentity(targetAlias),
+      this.workspace.getOrgIdentity(targetAlias, input.expectedTargetIdentityFingerprint !== undefined),
     ]);
+    if ((input.expectedTargetIdentityFingerprint !== undefined && orgIdentityFingerprint(targetOrgIdentity) !== input.expectedTargetIdentityFingerprint)
+      || (input.expectedSourceIdentityFingerprint !== undefined && (sourceOrgIdentity === undefined || orgIdentityFingerprint(sourceOrgIdentity) !== input.expectedSourceIdentityFingerprint))) {
+      throw new SfudError('ORG_IDENTITY_CHANGED', '원래 확인한 Source 또는 Target Org identity가 변경되었습니다. 현재 대상을 다시 비교하고 확인하세요.');
+    }
     const requestChecksum = createHash('sha256').update(JSON.stringify({
       projectPath: project.realPath,
       ...(scope === 'selected' ? {} : { manifestPath }),
@@ -529,7 +536,7 @@ export class DryRunService {
     } catch (error) {
       const message = error instanceof Error ? redactSensitiveText(error.message) : '선택 manifest 준비에 실패했습니다.';
       await this.jobs.transition(job.id, 'FAILED', {
-        errorCode: 'MANIFEST_PREPARATION_FAILED', errorMessage: message,
+        errorCode: deploymentFailureCode(error, 'MANIFEST_PREPARATION_FAILED'), errorMessage: message,
       }).catch(() => undefined);
       throw error;
     }
@@ -606,6 +613,8 @@ function requestIdentityHash(input: CreateDryRunInput | CreateDirectDeploymentIn
     components,
     sourceId: input.sourceId,
     targetOrgId: input.targetOrgId,
+    ...(input.expectedTargetIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: input.expectedTargetIdentityFingerprint }),
+    ...(input.expectedSourceIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: input.expectedSourceIdentityFingerprint }),
     testLevel: input.testLevel,
     tests: [...input.tests].sort(),
     testClassSuffix: input.testClassSuffix,
@@ -618,6 +627,9 @@ function requestIdentityHash(input: CreateDryRunInput | CreateDirectDeploymentIn
 }
 
 function assertInput(input: CreateDryRunInput): void {
+  for (const fingerprint of [input.expectedTargetIdentityFingerprint, input.expectedSourceIdentityFingerprint]) {
+    if (fingerprint !== undefined && !/^[a-f0-9]{64}$/u.test(fingerprint)) throw new SfudError('INVALID_ARGUMENT', '기대 Org identity fingerprint 형식이 올바르지 않습니다.');
+  }
   if (!TEST_LEVELS.includes(input.testLevel)) {
     throw new SfudError('INVALID_ARGUMENT', '지원하지 않는 Apex 테스트 수준입니다.');
   }

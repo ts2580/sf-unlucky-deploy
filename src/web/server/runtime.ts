@@ -1,3 +1,5 @@
+import { DeploymentDraftRepository } from '../../storage/deployment-draft-repository.js';
+import { DeploymentPresetRepository } from '../../storage/deployment-preset-repository.js';
 import { GitCache } from '../../git/git-cache.js';
 import path from 'node:path';
 import { GitRegistrationService } from '../../git/git-registration-service.js';
@@ -63,6 +65,8 @@ export interface WebRuntime {
   gitTokenStorageStatus: 'ready' | 'not_configured' | 'invalid_key';
   users: UserRepository;
   settings: UserSettingsRepository;
+  presets: DeploymentPresetRepository;
+  drafts: DeploymentDraftRepository;
   deploymentJobs: DeploymentJobRepository;
   deploymentQueue: SingleJobQueue;
   deploymentCoordinator: DeploymentCoordinator;
@@ -259,6 +263,8 @@ export async function createWebRuntime(
       gitTokenStorageStatus,
       users: new UserRepository(store.database),
       settings: new UserSettingsRepository(store.database),
+      presets: new DeploymentPresetRepository(store.database),
+      drafts: new DeploymentDraftRepository(store.database),
       deploymentJobs,
       deploymentQueue,
       deploymentCoordinator,

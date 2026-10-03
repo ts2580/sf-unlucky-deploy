@@ -4,13 +4,43 @@ import path from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { GitError } from '../src/git/git-errors.js';
+import { deploymentErrorGuidance } from '../ui/src/deployment/error-guidance.js';
 import { SfudError } from '../src/core/errors.js';
-import type { SfClient, SfRunOptions } from '../src/salesforce/sf-client.js';
+import { SfCommandFailedError, type SfClient, type SfRunOptions } from '../src/salesforce/sf-client.js';
 import { openSqliteStore } from '../src/storage/sqlite-store.js';
 import { createWebServer } from '../src/web/server/app.js';
 import { writeFixtureFiles } from './support/files.js';
 
 describe('dry-run API', () => {
+  it.each([
+    { error: new SfCommandFailedError('인증 만료', 'invalid_grant'), code: 'SALESFORCE_AUTH_REQUIRED' },
+    { error: new GitError('DX_PROJECT_NOT_FOUND'), code: 'DX_PROJECT_NOT_FOUND' },
+  ])('실행 오류 구조코드 $code를 작업 API와 해결 안내까지 보존한다', async ({ error, code }) => {
+    const client = new DryRunSfClient();
+    const original = client.runJson.bind(client);
+    vi.spyOn(client, 'runJson').mockImplementation(async (args, options) => {
+      if (args.includes('convert')) throw error;
+      return original(args, options);
+    });
+    const fixture = await createFixture(client);
+    try {
+      const auth = await bootstrap(fixture.server);
+      const headers = { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken };
+      const workspace = (await fixture.server.inject({ url: '/api/v1/workspace', headers })).json();
+      const response = await fixture.server.inject({ method: 'POST', url: '/api/v1/deployments/dry-run',
+        headers: { ...headers, 'idempotency-key': `guidance-${code}` }, payload: {
+          projectId: workspace.projects[0].id, manifest: 'manifest/package.xml',
+          sourceId: workspace.sources.find((source: { kind: string }) => source.kind === 'local').id,
+          targetOrgId: 'org:target', testLevel: 'RunLocalTests', tests: [],
+        } });
+      expect(response.statusCode, response.body).toBe(202);
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+      const result = await fixture.server.inject({ url: `/api/v1/deployment-jobs/${response.json().job.id}`, headers });
+      expect(result.json().job).toMatchObject({ status: 'FAILED', errorCode: code });
+      expect(deploymentErrorGuidance(result.json().job.errorCode, result.json().job.status).settings).toBe(true);
+    } finally { await fixture.close(); }
+  });
   it.each(['direct', 'approved'])('별칭 없는 username org에도 %s 배포한다', async (mode) => {
     const client = new DryRunSfClient();
     client.alias = undefined;
@@ -1509,3 +1539,56 @@ function flagValue(args: readonly string[], flag: string): string {
 function deploymentStartCalls<T extends { args: readonly string[] }>(calls: readonly T[]): T[] {
   return calls.filter((call) => call.args[0] === 'project' && call.args[1] === 'deploy' && call.args[2] === 'start');
 }
+
+describe('미확정 요청의 Org identity 바인딩 API', () => {
+  it.each(['direct', 'dry-run'])('job 없는 원래 %s 요청의 target alias 변경을 SF 제출 전에 거부한다', async (operation) => {
+    const client = new DryRunSfClient();
+    const fixture = await createFixture(client);
+    try {
+      const auth = await bootstrap(fixture.server);
+      const headers = { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken };
+      const workspace = (await fixture.server.inject({ url: '/api/v1/workspace', headers })).json<{
+        sources: Array<{ id: string; kind: string; orgIdentityFingerprint?: string }>;
+        orgs: Array<{ id: string; orgIdentityFingerprint?: string }>;
+      }>();
+      const target = workspace.sources.find((source) => source.id === 'org:target')!;
+      expect(target.orgIdentityFingerprint).toMatch(/^[a-f0-9]{64}$/u);
+      expect(workspace.orgs[0]!.orgIdentityFingerprint).toBe(target.orgIdentityFingerprint);
+      expect(JSON.stringify(workspace)).not.toContain(client.orgId);
+      const payload = { scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+        sourceId: workspace.sources.find((source) => source.kind === 'local')!.id,
+        targetOrgId: 'org:target', expectedTargetIdentityFingerprint: target.orgIdentityFingerprint,
+        testLevel: 'RunLocalTests', tests: [],
+        ...(operation === 'direct' ? { targetConfirmation: 'target', confirmation: '실제 배포' } : {}) };
+      // The browser had persisted this body, but its first POST never reached the server.
+      client.orgId = '00D000000000099';
+      const response = await fixture.server.inject({ method: 'POST', url: `/api/v1/deployments/${operation}`,
+        headers: { ...headers, 'idempotency-key': `unconfirmed-original-${operation}` }, payload });
+      expect(response.statusCode, response.body).toBe(400);
+      expect(response.json().error.code).toBe('ORG_IDENTITY_CHANGED');
+      expect(await fixture.server.sfudRuntime.store.database.get('SELECT COUNT(*) count FROM deployment_jobs')).toEqual({ count: 0 });
+      expect(deploymentStartCalls(client.calls)).toHaveLength(0);
+    } finally { await fixture.close(); }
+  });
+  it('동일 identity direct 요청을 수락하고 admitted 요청은 alias 변경 후 원래 job으로 돌아온다', async () => {
+    const client = new DryRunSfClient();
+    const fixture = await createFixture(client);
+    try {
+      const auth = await bootstrap(fixture.server);
+      const headers = { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'fingerprint-admitted-original' };
+      const workspace = (await fixture.server.inject({ url: '/api/v1/workspace', headers })).json<{ sources: Array<{ id: string; kind: string; orgIdentityFingerprint?: string }> }>();
+      const payload = { scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+        sourceId: workspace.sources.find((source) => source.kind === 'local')!.id,
+        targetOrgId: 'org:target', expectedTargetIdentityFingerprint: workspace.sources.find((source) => source.id === 'org:target')!.orgIdentityFingerprint,
+        testLevel: 'RunLocalTests', tests: [], targetConfirmation: 'target', confirmation: '실제 배포' };
+      const first = await fixture.server.inject({ method: 'POST', url: '/api/v1/deployments/direct', headers, payload });
+      expect(first.statusCode, first.body).toBe(202);
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+      const before = deploymentStartCalls(client.calls).length;
+      client.orgId = '00D000000000099';
+      const retry = await fixture.server.inject({ method: 'POST', url: '/api/v1/deployments/direct', headers, payload });
+      expect(retry.statusCode, retry.body).toBe(200); expect(retry.json().job.id).toBe(first.json().job.id);
+      expect(deploymentStartCalls(client.calls)).toHaveLength(before);
+    } finally { await fixture.close(); }
+  });
+});
