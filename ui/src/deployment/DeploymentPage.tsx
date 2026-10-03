@@ -3,6 +3,7 @@ import type { WorkspaceSource, WorkspaceResponse } from '../../../src/api/worksp
 import type { GitConnection } from '../../../src/api/git-contracts';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { GitBranchSource } from './GitBranchSource';
+import { createIdempotencyKey } from './idempotency-key';
 
 import { useWorkflowUpdates } from './useWorkflowUpdates';
 
@@ -456,7 +457,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
         waitMinutes: 60,
         strict: false,
       };
-      const idempotencyKey = dryRunIdempotencyKeyRef.current ?? crypto.randomUUID();
+      const idempotencyKey = dryRunIdempotencyKeyRef.current ?? createIdempotencyKey();
       dryRunIdempotencyKeyRef.current = idempotencyKey;
       const data = await requestDryRun(body, idempotencyKey, controller.signal);
       if (
@@ -492,7 +493,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
         && dryRunJob.payloadChecksum !== undefined;
       const directIdempotencyKey = approvedDryRun
         ? undefined
-        : directDeploymentIdempotencyKeyRef.current ?? crypto.randomUUID();
+        : directDeploymentIdempotencyKeyRef.current ?? createIdempotencyKey();
       if (directIdempotencyKey !== undefined) {
         directDeploymentIdempotencyKeyRef.current = directIdempotencyKey;
       }
