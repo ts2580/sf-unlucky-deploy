@@ -33,6 +33,21 @@ sf org login web --alias prod
 
 팀 서버에서 여러 사용자가 접속할 경우에는 [웹 UI와 서버 운영](./docs/web-ui.md)의 `LOCAL=false` 설정을 따른다.
 
+### 원격 리눅스에서 혼자 사용하기
+
+`LOCAL=true`는 개인용 설정이다. 원격 서버에서도 서버 OS 계정의 Salesforce CLI 인증을 그대로 사용할 수 있다.
+`sfud config path`에 표시되는 설정 폴더의 `secrets.env`에 `SFUD_ACCESS_PASSWORD`를 12~128자로 설정한다.
+비밀번호는 `config.json`이나 명령줄 인자에 넣지 않는다.
+
+```bash
+LOCAL=true sfud ui --host 0.0.0.0 --allow-remote --no-open
+```
+
+PC 브라우저에서 `http://서버주소:27546`을 열고 접속 비밀번호만 입력한다. 앱 계정 생성이나 사용자 관리는 필요 없다.
+비밀번호 없이 원격 주소로 시작하면 오류로 중단한다. 같은 PC에서 사용하는 기존 개인용은 로그인 없이 그대로 동작한다.
+인터넷에 공개할 때는 [HTTPS 프록시 설정](./docs/web-ui.md)을 사용한다.
+Salesforce **새 연결**의 브라우저 OAuth 콜백은 별도 SSH 포트 전달이 필요하다. 이미 서버 CLI에 로그인한 Org는 바로 사용한다.
+
 ## Git과 로컬 프로젝트 비교하기
 
 ### 1. Git 저장소 연결
