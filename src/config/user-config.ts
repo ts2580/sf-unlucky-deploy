@@ -1,5 +1,6 @@
 import { constants as fsConstants } from 'node:fs';
-import { open, lstat, mkdir, realpath, unlink, rmdir } from 'node:fs/promises';
+import { open, lstat, mkdir, realpath, unlink, rmdir, rename, link } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { parseEnv } from 'node:util';
@@ -84,6 +85,157 @@ export interface HomeConfigPaths {
   directory: string;
   configFile: string;
   secretsFile: string;
+}
+
+export interface HomeConfigurationSnapshot {
+  paths: HomeConfigPaths;
+  configuration: Record<string, string>;
+  secrets: Record<string, string>;
+  environment: NodeJS.ProcessEnv;
+  originals: { config?: Buffer; secrets?: Buffer };
+  identities: { directory?: { dev: number; ino: number }; config?: { dev: number; ino: number }; secrets?: { dev: number; ino: number } };
+}
+
+/** Does not create files, change permissions, or mutate the supplied environment. */
+export async function readHomeConfigurationSnapshot(environment: NodeJS.ProcessEnv = process.env): Promise<HomeConfigurationSnapshot> {
+  const paths = getHomeConfigPaths(environment);
+  const snapshot: HomeConfigurationSnapshot = { paths, configuration: {}, secrets: {}, environment: { ...environment }, originals: {}, identities: {} };
+  try { await lstat(paths.directory); }
+  catch (error) { if (isNotFound(error)) return snapshot; throw configurationError('홈 설정 디렉터리를 확인하지 못했습니다.'); }
+  const identity = await assertSecureDirectory(paths.directory);
+  snapshot.identities.directory = identity;
+  try { snapshot.identities.config = await lstat(paths.configFile); } catch (error) { if (!isNotFound(error)) throw error; }
+  const config = await readSecureFile(paths.configFile, MAX_CONFIG_BYTES, true);
+  if (config !== undefined) {
+    try { snapshot.configuration = validateConfig(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(config))); }
+    catch (error) { if (error instanceof SfudError) throw error; throw configurationError('홈 설정 JSON 형식이 올바르지 않습니다.'); }
+    snapshot.originals.config = config;
+    if (snapshot.identities.config === undefined) throw configurationError('설정 파일이 읽는 중 생성되었습니다.');
+    await verifySamePath(paths.configFile, snapshot.identities.config);
+  }
+  try { snapshot.identities.secrets = await lstat(paths.secretsFile); } catch (error) { if (!isNotFound(error)) throw error; }
+  const secrets = await readSecureFile(paths.secretsFile, MAX_SECRETS_BYTES, true);
+  if (secrets !== undefined) {
+    try { snapshot.secrets = parseSecrets(new TextDecoder('utf-8', { fatal: true }).decode(secrets)); }
+    catch (error) { if (error instanceof SfudError) throw error; throw configurationError('비밀 설정 파일 형식이 올바르지 않습니다.'); }
+    snapshot.originals.secrets = secrets;
+    if (snapshot.identities.secrets === undefined) throw configurationError('비밀 설정 파일이 읽는 중 생성되었습니다.');
+    await verifySamePath(paths.secretsFile, snapshot.identities.secrets);
+  }
+  await verifyDirectoryIdentity(paths.directory, identity);
+  for (const [key, value] of Object.entries(snapshot.configuration)) {
+    if (snapshot.environment[key] === undefined) snapshot.environment[key] = resolveFilePath(key, value, paths.directory);
+  }
+  for (const [key, value] of Object.entries(snapshot.secrets)) {
+    if (snapshot.environment[key] === undefined) snapshot.environment[key] = value;
+  }
+  return snapshot;
+}
+
+/** Keep existing dotenv lines byte-for-byte; append changed keys only after round-trip validation. */
+function serializeSecrets(snapshot: HomeConfigurationSnapshot, secrets: Record<string, string>): string {
+  if (Object.keys(snapshot.secrets).some((key) => secrets[key] === undefined)) throw configurationError('기존 비밀 설정 삭제는 지원하지 않습니다.');
+  let contents = snapshot.originals.secrets?.toString('utf8') ?? SECRETS_TEMPLATE;
+  if (!contents.endsWith('\n')) contents += '\n';
+  for (const [key, value] of Object.entries(secrets)) {
+    if (snapshot.secrets[key] === value) continue;
+    const quote = ["'", '"', '`'].find((candidate) => !value.includes(candidate));
+    const encoded = quote === undefined ? value : `${quote}${value}${quote}`;
+    if (parseEnv(`${key}=${encoded}`)[key] !== value) throw configurationError('비밀 설정을 secrets.env에 손실 없이 저장할 수 없습니다. 따옴표와 # 조합을 변경하세요.');
+    contents += `${key}=${encoded}\n`;
+  }
+  const parsed = parseSecrets(contents);
+  if (Object.entries(secrets).some(([key, value]) => parsed[key] !== value)) throw configurationError('비밀 설정을 손실 없이 저장할 수 없습니다.');
+  return contents;
+}
+
+/** Two staged files, own-identity rollback, and a lock shared by setup writers. No truncate. */
+export async function saveHomeConfiguration(snapshot: HomeConfigurationSnapshot, configuration: Record<string, string>, secrets: Record<string, string>): Promise<void> {
+  validateConfig({ version: 1, env: configuration });
+  const secretContents = serializeSecrets(snapshot, secrets);
+  const configContents = `${JSON.stringify({ version: 1, env: configuration }, null, 2)}\n`;
+  if (Buffer.byteLength(configContents) > MAX_CONFIG_BYTES || Buffer.byteLength(secretContents) > MAX_SECRETS_BYTES) throw configurationError('설정 파일 크기가 허용 한도를 넘었습니다.');
+  const { paths } = snapshot;
+  let createdDirectory = false;
+  if (snapshot.identities.directory === undefined) {
+    try { await mkdir(paths.directory, { mode: 0o700 }); createdDirectory = true; await verifyWindowsAcl(paths.directory, 'set'); }
+    catch { throw configurationError('홈 설정 디렉터리를 생성하지 못했거나 다른 작업에서 생성했습니다. 다시 확인하세요.'); }
+  } else await verifyDirectoryIdentity(paths.directory, snapshot.identities.directory);
+  const identity = await assertSecureDirectory(paths.directory);
+  const lockPath = path.join(paths.directory, '.setup.lock');
+  let lock;
+  try { lock = await open(lockPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollowFlag(), 0o600); }
+  catch { throw configurationError('다른 설정 저장이 진행 중입니다. 기존 설정을 변경하지 않았습니다.'); }
+  const lockIdentity = await lock.stat();
+  const staged: { path: string; identity: { dev: number; ino: number } }[] = [];
+  const writes: { target: string; identity: { dev: number; ino: number }; backup?: { path: string; identity: { dev: number; ino: number } } }[] = [];
+  const recoveryBackups = new Set<string>();
+  const stage = async (contents: Buffer) => {
+    const temporary = path.join(paths.directory, `.setup-${randomUUID()}.tmp`);
+    const handle = await open(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollowFlag(), 0o600);
+    const entry = { path: temporary, identity: await handle.stat() };
+    staged.push(entry);
+    try {
+      await handle.writeFile(contents); await handle.sync();
+      await verifyWindowsAcl(temporary, 'set');
+      await verifySamePath(temporary, entry.identity);
+      await readSecureFile(temporary, Math.max(MAX_CONFIG_BYTES, MAX_SECRETS_BYTES));
+    } finally { await handle.close(); }
+    return entry;
+  };
+  const assertOriginal = async (target: string, original: Buffer | undefined, expected: { dev: number; ino: number } | undefined) => {
+    await verifyDirectoryIdentity(paths.directory, identity);
+    const current = await readSecureFile(target, target === paths.configFile ? MAX_CONFIG_BYTES : MAX_SECRETS_BYTES, true);
+    if ((original === undefined) !== (current === undefined) || (original !== undefined && current !== undefined && !current.equals(original))) throw configurationError('설정이 다른 작업에서 변경되었습니다. 다시 확인하세요.');
+    if (expected !== undefined) await verifySamePath(target, expected);
+  };
+  try {
+    await verifyWindowsAcl(lockPath, 'set');
+    const entries = [
+      { target: paths.secretsFile, contents: Buffer.from(secretContents), original: snapshot.originals.secrets, expected: snapshot.identities.secrets },
+      { target: paths.configFile, contents: Buffer.from(configContents), original: snapshot.originals.config, expected: snapshot.identities.config },
+    ];
+    const prepared = [];
+    for (const entry of entries) {
+      await assertOriginal(entry.target, entry.original, entry.expected);
+      const next = await stage(entry.contents);
+      const backup = entry.original === undefined ? undefined : await stage(entry.original);
+      prepared.push({ ...entry, next, backup });
+    }
+    for (const entry of prepared) {
+      await assertOriginal(entry.target, entry.original, entry.expected);
+      await verifySamePath(entry.next.path, entry.next.identity);
+      if (entry.expected === undefined) await link(entry.next.path, entry.target); // O_EXCL semantics: never overwrite a newly created file.
+      else await rename(entry.next.path, entry.target);
+      // Record immediately after rename, before any fallible post-write validation.
+      writes.push({ target: entry.target, identity: entry.next.identity, ...(entry.backup === undefined ? {} : { backup: entry.backup }) });
+      if (entry.expected === undefined) await unlink(entry.next.path);
+      await verifySamePath(entry.target, entry.next.identity);
+      await readSecureFile(entry.target, entry.target === paths.configFile ? MAX_CONFIG_BYTES : MAX_SECRETS_BYTES);
+    }
+    await verifyDirectoryIdentity(paths.directory, identity);
+  } catch (error) {
+    let recoveryFailed = false;
+    for (const entry of writes.reverse()) {
+      try {
+        await verifyDirectoryIdentity(paths.directory, identity);
+        if (entry.backup === undefined) {
+          const current = await lstat(entry.target);
+          if (current.isSymbolicLink() || !current.isFile() || current.dev !== entry.identity.dev || current.ino !== entry.identity.ino) throw configurationError('복구 중 파일이 교체되었습니다.');
+          await unlink(entry.target);
+        }
+        else { await verifySamePath(entry.target, entry.identity); await verifySamePath(entry.backup.path, entry.backup.identity); await rename(entry.backup.path, entry.target); }
+      } catch { recoveryFailed = true; if (entry.backup !== undefined) recoveryBackups.add(entry.backup.path); }
+    }
+    if (recoveryFailed) throw configurationError('설정 저장과 복구가 실패했습니다. 홈 설정 디렉터리에 사용자 전용 .setup-*.tmp 원본 백업을 보존했습니다. 기존 키를 유지한 채 파일을 직접 확인하세요.');
+    if (error instanceof SfudError) throw error;
+    throw configurationError('설정을 안전하게 저장하지 못했습니다. 이전 설정을 복구했습니다.');
+  } finally {
+    await lock.close();
+    for (const entry of staged) { if (recoveryBackups.has(entry.path)) continue; try { await verifySamePath(entry.path, entry.identity); await unlink(entry.path); } catch { /* renamed or replaced: do not delete unknown files */ } }
+    try { await verifySamePath(lockPath, lockIdentity); await unlink(lockPath); } catch { /* never remove another writer's lock */ }
+    if (createdDirectory) { try { await verifyDirectoryIdentity(paths.directory, identity); await rmdir(paths.directory); } catch { /* successful or nonempty */ } }
+  }
 }
 
 export function getHomeConfigPaths(environment: NodeJS.ProcessEnv = process.env): HomeConfigPaths {
@@ -264,6 +416,10 @@ async function createSecretsTemplateIfMissing(
 
 export function shouldLoadHomeConfiguration(commandName: string): boolean {
   return ['ui', 'compare', 'deploy'].includes(commandName);
+}
+
+export async function inspectSecureConfigurationFile(filePath: string, maxBytes: number): Promise<void> {
+  await readSecureFile(filePath, maxBytes);
 }
 
 async function assertSecureDirectory(directory: string): Promise<{ dev: number; ino: number }> {

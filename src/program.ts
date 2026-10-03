@@ -14,6 +14,8 @@ import {
 } from './web/server/start.js';
 import { gitHostPolicyFromAddresses, gitHostPolicyFromEnvironment } from './git/git-network.js';
 import { getHomeConfigPaths, initializeHomeConfiguration } from './config/user-config.js';
+import { runSetup } from './config/setup.js';
+import { formatDoctorReport, runDoctor } from './config/doctor.js';
 
 export const CLI_VERSION = '0.4.0-rc.3';
 
@@ -36,6 +38,18 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
     .showHelpAfterError();
 
   const config = program.command('config').description('사용자 홈 설정을 관리합니다.');
+  program.command('setup')
+    .description('서버 터미널에서 개인용 설정을 안내하고 안전하게 저장합니다.')
+    .action(async () => { process.exitCode = await runSetup(); });
+  program.command('doctor')
+    .description('설정·도구·데이터 접근을 읽기 전용으로 점검합니다.')
+    .option('--json', '비밀값 없는 JSON 점검 결과 출력')
+    .option('--check-url', '계산한 URL에 서버에서 HTTP 읽기 점검 수행')
+    .action(async (options: { json?: boolean; checkUrl?: boolean }) => {
+      const report = await runDoctor({ ...(options.checkUrl === true ? { checkUrl: true } : {}) });
+      process.stdout.write(options.json === true ? `${JSON.stringify(report)}\n` : formatDoctorReport(report));
+      process.exitCode = report.exitCode;
+    });
   config.command('path')
     .description('사용자 설정 파일 경로를 표시합니다.')
     .action(() => {
