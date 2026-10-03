@@ -120,7 +120,7 @@ export function App() {
   useEffect(() => {
     const handleUnauthorized = () => {
       setDashboardWorkspace(null); setRecentComparisons([]); setRecentDeployments([]);
-      setAuth({ setupRequired: false, authenticated: false });
+      setAuth((current) => ({ ...current, user: undefined, setupRequired: false, authenticated: false }));
     };
     window.addEventListener('sfud:unauthorized', handleUnauthorized);
     return () => window.removeEventListener('sfud:unauthorized', handleUnauthorized);
@@ -150,9 +150,9 @@ export function App() {
   }
 
   if (!auth.authenticated || auth.user === undefined) {
-    return <AuthScreen setupRequired={auth.setupRequired} onAuthenticated={(user) => {
+    return <AuthScreen setupRequired={auth.setupRequired} personalAccess={auth.localMode === true && auth.passwordRequired === true} onAuthenticated={(user) => {
       setDashboardWorkspace(null); setRecentComparisons([]); setRecentDeployments([]);
-      setAuth({ setupRequired: false, authenticated: true, user });
+      setAuth({ ...auth, setupRequired: false, authenticated: true, user });
     }} />;
   }
 
@@ -170,7 +170,7 @@ export function App() {
   const logout = async () => {
     await logoutSession();
     setDashboardWorkspace(null); setRecentComparisons([]); setRecentDeployments([]);
-    setAuth({ setupRequired: false, authenticated: false });
+    setAuth({ ...auth, user: undefined, setupRequired: false, authenticated: false });
   };
 
   return (
@@ -224,10 +224,10 @@ export function App() {
             />
             <StatusPill label={dashboardWorkspace === null ? 'Salesforce CLI 확인 중' : 'Salesforce CLI 연결됨'} state={dashboardWorkspace === null ? 'pending' : 'online'} />
             <div className="org-count"><Icon name="cloud" /><strong>{connectedOrgCount}</strong><span>ORG</span></div>
-            <div className={`account-menu${auth.localMode ? ' account-menu-local' : ''}`} title={auth.user.email}>
+            <div className={`account-menu${auth.localMode && !auth.passwordRequired ? ' account-menu-local' : ''}`} title={auth.user.email}>
               <span><Icon name="user" /></span>
               <div><strong>{auth.user.displayName}</strong><small>{auth.user.role}</small></div>
-              {!auth.localMode && <button type="button" onClick={() => void logout()} aria-label="로그아웃"><Icon name="logout" /></button>}
+              {(!auth.localMode || auth.passwordRequired) && <button type="button" onClick={() => void logout()} aria-label="로그아웃"><Icon name="logout" /></button>}
             </div>
           </div>
         </header>

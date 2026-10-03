@@ -13,18 +13,19 @@ const emptySfClient: SfClient = {
 };
 
 describe('local 실행 모드', () => {
-  it('시작 시 원격 주소와 공개 설정을 무시하고 127.0.0.1에만 바인딩한다', async () => {
+  it('비밀번호를 설정하면 원격 주소를 유지하고 자동 로그인을 하지 않는다', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'sfud-local-bind-'));
     try {
       const server = await startWebUi({ host: '0.0.0.0', port: 0, localMode: true,
+        accessPassword: 'personal-test-password',
         allowRemote: true, trustedProxies: ['127.0.0.1'], publicOrigin: 'https://example.com',
         open: false, dataDirectory });
       try {
-        expect(server.server.address()).toMatchObject({ address: '127.0.0.1' });
+        expect(server.server.address()).toMatchObject({ address: '0.0.0.0' });
         expect((await server.inject({ url: '/api/v1/auth/status',
-          headers: { host: '127.0.0.1' } })).json()).toMatchObject({ authenticated: true, localMode: true });
+          headers: { host: '127.0.0.1' } })).json()).toMatchObject({ authenticated: false, localMode: true, passwordRequired: true });
         expect((await server.inject({ url: '/api/v1/auth/status',
-          headers: { host: 'example.com' } })).statusCode).toBe(403);
+          headers: { host: 'example.com' } })).statusCode).toBe(200);
       } finally { await server.close(); }
     } finally { await rm(dataDirectory, { recursive: true, force: true }); }
   });
@@ -56,5 +57,9 @@ describe('local 실행 모드', () => {
       assetsDirectory: '/missing', databasePath: ':memory:' })).rejects.toThrow(/루프백/u);
     await expect(createWebServer({ host: '127.0.0.1', port: 27_546, localMode: true,
       trustedProxies: ['127.0.0.1'], assetsDirectory: '/missing', databasePath: ':memory:' })).rejects.toThrow(/프록시/u);
+    await expect(startWebUi({ host: '0.0.0.0', port: 0, localMode: true,
+      allowRemote: true, open: false })).rejects.toThrow(/SFUD_ACCESS_PASSWORD/u);
+    await expect(startWebUi({ host: '0.0.0.0', port: 0, localMode: true,
+      accessPassword: 'personal-test-password', allowRemote: false, open: false })).rejects.toThrow(/--allow-remote/u);
   });
 });

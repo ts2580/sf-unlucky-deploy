@@ -36,6 +36,7 @@ export interface WebServerOptions {
   host: string;
   port: number;
   localMode?: boolean;
+  accessPassword?: string;
   assetsDirectory?: string;
   dataDirectory?: string;
   databasePath?: string;
@@ -55,11 +56,14 @@ export interface WebServerOptions {
 export async function createWebServer(options: WebServerOptions): Promise<FastifyInstance> {
   const trustedProxies = options.trustedProxies ?? [];
   const publicOrigin = normalizePublicOrigin(options.publicOrigin);
-  if (options.localMode === true && (
-    !['127.0.0.1', '::1'].includes(options.host)
+  if (options.accessPassword !== undefined && (
+    options.localMode !== true || options.accessPassword.trim().length < 12 || options.accessPassword.length > 128
+  )) throw new Error('SFUD_ACCESS_PASSWORD는 LOCAL=true에서 12자 이상 128자 이하로 설정하세요.');
+  if (options.localMode === true && options.accessPassword === undefined && (
+    !['127.0.0.1', '::1', 'localhost'].includes(options.host)
     || trustedProxies.length > 0
     || publicOrigin !== undefined
-  )) throw new Error('LOCAL=true는 루프백 주소에서만 프록시와 공개 Origin 없이 사용할 수 있습니다.');
+  )) throw new Error('비밀번호 없는 개인용은 루프백 주소에서만 사용할 수 있습니다. 원격 주소·프록시·공개 Origin에는 SFUD_ACCESS_PASSWORD가 필요합니다.');
   const app = Fastify({
     logger: options.logger === true ? {
       redact: ['req.headers.authorization', 'req.headers.cookie', 'res.headers.set-cookie'],
@@ -93,6 +97,7 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     },
     {
       ...(options.localMode === undefined ? {} : { localMode: options.localMode }),
+      ...(options.accessPassword === undefined ? {} : { accessPassword: options.accessPassword }),
       ...(options.quickDeployEnabled === undefined ? {} : { quickDeployEnabled: options.quickDeployEnabled }),
       ...(options.gitHostPolicy === undefined ? {} : { gitHostPolicy: options.gitHostPolicy }),
     },
@@ -103,7 +108,7 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
   });
   app.addHook('onRequest', (_request, _reply, done) => beginSalesforceRequestContext(done));
   app.addHook('onRequest', async (request, reply) => {
-    if (runtime.localMode) {
+    if (runtime.localMode && !runtime.localPasswordRequired) {
       const host = request.headers.host;
       if (host === undefined || !/^(?:127\.0\.0\.1|\[::1\]|localhost)(?::\d+)?$/iu.test(host)) {
         return reply.code(403).send({ error: { code: 'HOST_DENIED', message: '로컬 주소로 접속하세요.' } });

@@ -139,6 +139,7 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
         port: port ?? parsePort(process.env.SFUD_UI_PORT ?? String(DEFAULT_UI_PORT)),
         allowRemote: options.allowRemote === true,
         localMode: localValue === 'true',
+        ...(process.env.SFUD_ACCESS_PASSWORD === undefined ? {} : { accessPassword: process.env.SFUD_ACCESS_PASSWORD }),
         open: options.open !== false,
         logger: false,
         ...(dataDirectory === undefined ? {} : { dataDirectory }),

@@ -14,6 +14,8 @@ const SECRETS_TEMPLATE = [
   '# Optional secrets. Uncomment only the settings you use and supply real values.',
   '# SFUD_TOKEN_SECRET encrypts saved Git and Salesforce connections.',
   '# SFUD_TOKEN_SECRET=',
+  '# SFUD_ACCESS_PASSWORD protects remote personal access (LOCAL=true, 12-128 characters).',
+  '# SFUD_ACCESS_PASSWORD=',
   '# SFUD_SF_OAUTH_CLIENT_ID=',
   '# SFUD_SF_OAUTH_CLIENT_SECRET=',
   '',
@@ -23,6 +25,7 @@ const CONFIG_KEYS = new Set([
   'SFUD_TRUSTED_PROXIES', 'SFUD_GIT_ALLOWED_IPS', 'SFUD_GIT_TOKEN_KEY_FILE',
 ]);
 const SECRET_KEYS = new Set([
+  'SFUD_ACCESS_PASSWORD',
   'SFUD_TOKEN_SECRET', 'SFUD_SF_TOKEN_SECRET', 'SFUD_GIT_TOKEN_SECRET', 'SFUD_SF_OAUTH_CLIENT_ID',
   'SFUD_SF_OAUTH_CLIENT_SECRET',
 ]);

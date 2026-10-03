@@ -44,6 +44,7 @@ import { GitAllowedIpService } from '../../git/git-allowed-ip-service.js';
 
 export interface WebRuntime {
   localMode: boolean;
+  localPasswordRequired: boolean;
   sfConnections: SalesforceConnectionRepository;
   sfTokenStorageStatus: 'ready' | 'not_configured' | 'invalid_key';
   sfClient: SfClient;
@@ -80,6 +81,7 @@ export interface WebRuntime {
 
 export interface WebRuntimeOptions {
   localMode?: boolean;
+  accessPassword?: string;
   quickDeployEnabled?: boolean;
   gitHostPolicy?: GitHostPolicy;
 }
@@ -180,7 +182,10 @@ export async function createWebRuntime(
         ? bootstrapToken ?? process.env.SFUD_BOOTSTRAP_TOKEN ?? randomBytes(18).toString('base64url')
         : undefined,
     );
-    if (localMode) await auth.ensureLocalOperator();
+    if (localMode) {
+      await auth.ensureLocalOperator();
+      await auth.configureLocalAccess(runtimeOptions.accessPassword);
+    }
     const workspace = await WorkspaceService.create(activeSfClient, cwd, projectPaths, workspaceOptions,
       !localMode && sfClient === undefined ? sfConnections : undefined);
     const gitConnections = new GitConnectionRepository(store.database, vault);
@@ -235,6 +240,7 @@ export async function createWebRuntime(
     let shutdownRequest: Promise<void> | undefined;
     const runtime: WebRuntime = {
       localMode,
+      localPasswordRequired: localMode && runtimeOptions.accessPassword !== undefined,
       sfConnections,
       sfTokenStorageStatus,
       sfClient: activeSfClient,
