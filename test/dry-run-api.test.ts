@@ -19,8 +19,19 @@ describe('dry-run API', () => {
   ])('실행 오류 구조코드 $code를 작업 API와 해결 안내까지 보존한다', async ({ error, code }) => {
     const client = new DryRunSfClient();
     const original = client.runJson.bind(client);
+    let releaseRetrieval!: () => void;
+    let conversionFailed!: () => void;
+    const retrievalGate = new Promise<void>((resolve) => { releaseRetrieval = resolve; });
+    const conversionFailure = new Promise<void>((resolve) => { conversionFailed = resolve; });
+    let retrievalFinished = false;
     vi.spyOn(client, 'runJson').mockImplementation(async (args, options) => {
-      if (args.includes('convert')) throw error;
+      if (args.includes('convert')) { conversionFailed(); throw error; }
+      if (args.includes('retrieve')) {
+        await retrievalGate;
+        const result = await original(args, options);
+        retrievalFinished = true;
+        return result;
+      }
       return original(args, options);
     });
     const fixture = await createFixture(client);
@@ -35,11 +46,22 @@ describe('dry-run API', () => {
           targetOrgId: 'org:target', testLevel: 'RunLocalTests', tests: [],
         } });
       expect(response.statusCode, response.body).toBe(202);
-      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+      await conversionFailure;
+      // A failed conversion must not detach the still-writing sibling retrieval.
+      const idle = fixture.server.sfudRuntime.deploymentQueue.onIdle();
+      const endedBeforeRetrieval = await Promise.race([
+        idle.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
+      ]);
+      expect(endedBeforeRetrieval).toBe(false);
+      expect(retrievalFinished).toBe(false);
+      releaseRetrieval();
+      await idle;
+      expect(retrievalFinished).toBe(true);
       const result = await fixture.server.inject({ url: `/api/v1/deployment-jobs/${response.json().job.id}`, headers });
       expect(result.json().job).toMatchObject({ status: 'FAILED', errorCode: code });
       expect(deploymentErrorGuidance(result.json().job.errorCode, result.json().job.status).settings).toBe(true);
-    } finally { await fixture.close(); }
+    } finally { releaseRetrieval(); await fixture.close(); }
   });
   it.each(['direct', 'approved'])('별칭 없는 username org에도 %s 배포한다', async (mode) => {
     const client = new DryRunSfClient();
