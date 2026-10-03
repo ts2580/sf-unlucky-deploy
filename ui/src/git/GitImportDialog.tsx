@@ -1,9 +1,9 @@
 import { apiRequest } from '../api-client';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { GitConnection, GitProviderId, GitProvidersResponse } from '../../../src/api/git-contracts';
 import type { GitRepositoryResponse, GitRefsResponse, GitImport } from '../../../src/api/git-project-contracts';
 import { GitRepositoryPicker } from './GitRepositoryPicker';
-import { createImport, errorMessage, inspect, providerNames, refs } from './api';
+import { createImport, errorMessage, inspect, providerNames, projectRoots, refs } from './api';
 import { ConnectionDialog } from '../components/ConnectionDialog';
 
 interface Draft { provider: GitProviderId; connectionId: string; repositoryPath: string; kind: 'branch' | 'tag' | 'commit'; name: string }
@@ -28,6 +28,7 @@ export function GitImportDialog({ userId, canEdit, providers, connections, conne
   const [draft, setDraft] = useState(() => readDraft(userId));
   const [repository, setRepository] = useState<GitRepositoryResponse['repository']>();
   const [refPage, setRefPage] = useState<GitRefsResponse>({ refs: [] });
+  const [roots, setRoots] = useState<{ key: string; paths: string[]; selected: string }>();
   const [busy, setBusy] = useState(false);
   const [loadingRefs, setLoadingRefs] = useState(false);
   const [error, setError] = useState('');
@@ -38,6 +39,11 @@ export function GitImportDialog({ userId, canEdit, providers, connections, conne
   const disabled = !canEdit || busy || !provider?.publicImport;
   const selectedRef = refPage.refs.find((ref) => ref.name === draft.name && ref.kind === draft.kind);
   const sha = draft.kind === 'commit' ? draft.name : selectedRef?.commitSha;
+
+  const currentRootsKey = useRef('');
+  const rootsKey = JSON.stringify([draft.provider, draft.connectionId, repository?.cloneUrl, draft.kind, draft.name, sha]);
+  currentRootsKey.current = rootsKey;
+  useEffect(() => { setRoots(undefined); }, [rootsKey]);
 
   useEffect(() => {
     // Keep only user input needed after authorization; credentials never enter a draft.
@@ -92,7 +98,7 @@ export function GitImportDialog({ userId, canEdit, providers, connections, conne
     if (disabled || unavailable || repository === undefined || sha === undefined || !/^[0-9a-f]{40}$/u.test(sha)) return;
     setBusy(true); setError(''); setMessage('');
     try {
-      await createImport({ ...repositoryRequest(repository.cloneUrl), ref: { kind: draft.kind, name: draft.name }, expectedCommitSha: sha, projectRoot: '.' });
+      await createImport({ ...repositoryRequest(repository.cloneUrl), ref: { kind: draft.kind, name: draft.name }, expectedCommitSha: sha });
       setMessage('가져오기를 시작했습니다. 아래에서 진행 상태를 확인하세요.');
       try { sessionStorage.removeItem(`sfud:git-draft:${userId}`); } catch { /* Optional storage. */ }
       onImported('import');
@@ -104,10 +110,20 @@ export function GitImportDialog({ userId, canEdit, providers, connections, conne
     if (disabled || unavailable || repository === undefined || sha === undefined || draft.kind !== 'branch') return;
     setBusy(true); setError(''); setMessage('');
     try {
-      await apiRequest('/api/v1/git/registrations', { method: 'POST', csrf: true, body: {
-        ...repositoryRequest(repository.cloneUrl), ref: { kind: 'branch', name: draft.name },
-        expectedCommitSha: sha, projectRoot: '.',
-      } });
+      const body = { ...repositoryRequest(repository.cloneUrl), ref: { kind: 'branch' as const, name: draft.name }, expectedCommitSha: sha };
+      let projectRoot = roots?.key === rootsKey ? roots.selected : '';
+      if (!projectRoot) {
+        const result = await projectRoots(body);
+        if (currentRootsKey.current !== rootsKey) return;
+        if (result.commitSha !== sha) throw new Error('선택한 브랜치가 변경되었습니다. 저장소를 다시 확인하세요.');
+        if (result.projectRoots.length !== 1) {
+          setRoots({ key: rootsKey, paths: result.projectRoots, selected: '' });
+          setMessage('등록할 Salesforce DX 프로젝트를 선택하세요.');
+          return;
+        }
+        projectRoot = result.projectRoots[0]!;
+      }
+      await apiRequest('/api/v1/git/registrations', { method: 'POST', csrf: true, body: { ...body, projectRoot } });
       setMessage('배포 브랜치를 등록했습니다. 비교 시작 시 자동으로 동기화합니다.');
       try { sessionStorage.removeItem(`sfud:git-draft:${userId}`); } catch { /* Optional storage. */ }
       onImported('registration');
@@ -149,7 +165,7 @@ export function GitImportDialog({ userId, canEdit, providers, connections, conne
     </div>
     {loadingRefs && <p role="status" aria-live="polite">{draft.kind === 'tag' ? '태그 불러오는 중…' : '브랜치 불러오는 중…'}</p>}
     {repository && <div className="git-reference">
-      <p><strong title={repository.cloneUrl}>{connection?.alias ?? repository.repositoryPath}</strong> · {connection?.repositoryPath ? 'Git 접근 확인' : repository.private ? '비공개' : '공개'}</p>
+      <p><strong>{connection?.alias ? `${connection.alias} · ${repository.repositoryPath}` : repository.repositoryPath}</strong> · {repository.host} · {connection?.repositoryPath ? 'Git 접근 확인' : repository.private ? '비공개' : '공개'}</p>
       {draft.kind === 'commit' ? <label>전체 커밋 SHA<input value={draft.name} maxLength={40} disabled={disabled} autoComplete="off" spellCheck={false}
         onChange={(event) => setDraft((old) => ({ ...old, name: event.target.value.toLowerCase() }))} /></label>
         : <><label>{draft.kind === 'branch' ? '브랜치 선택' : '태그 선택'}<select value={draft.name} disabled={disabled || !refPage.refs.length}
@@ -161,8 +177,11 @@ export function GitImportDialog({ userId, canEdit, providers, connections, conne
           setBusy(true); void loadRefs(repository, refPage.nextCursor).catch((cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
         }}>ref 더 보기</button>}</>}
       {draft.kind === 'commit' && sha && <p className="git-sha">가져올 커밋 <code>{sha}</code></p>}
+      {roots?.key === rootsKey && <label>등록할 프로젝트<select value={roots.selected} disabled={disabled} onChange={(event) => setRoots({ ...roots, selected: event.target.value })}>
+        <option value="">프로젝트를 선택하세요</option>{roots.paths.map((root) => <option key={root} value={root}>{root === '.' ? '. (저장소 루트)' : root}</option>)}
+      </select></label>}
       <div className="git-actions">
-        {draft.kind === 'branch' ? <button type="button" className="button button-primary" disabled={disabled || unavailable || !sha}
+        {draft.kind === 'branch' ? <button type="button" className="button button-primary" disabled={disabled || unavailable || !sha || (roots?.key === rootsKey && !roots.selected)}
           onClick={() => void registerBranch()}>{busy ? '브랜치 준비 중……' : '배포 브랜치 등록'}</button>
           : <button type="button" className="button button-primary" disabled={disabled || unavailable || !sha || !/^[0-9a-f]{40}$/u.test(sha)}
             onClick={() => void importRepository()}>{draft.kind === 'tag' ? '이 태그 가져오기' : '이 커밋 가져오기'}</button>}
