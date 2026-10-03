@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 
 import type { DeploymentJobResponse } from '../../../src/api/deployment-contracts';
 import type { ComparisonJobResponse } from '../comparison/api';
+import { ErrorGuidance } from './ErrorGuidance';
+import { sanitizedErrorDetails } from './error-guidance';
 import { Icon } from '../components/Icon';
 import { formatDuration } from '../duration';
 
@@ -193,8 +195,10 @@ export function DryRunResultPanel({
   canManuallyReconcile,
   manuallyReconciling,
   onManualReconcile,
+  onSettings,
 }: {
   job: DryRunJobResponse;
+  onSettings?: (path?: '/auth' | '/settings') => void;
   canReconcile: boolean;
   reconciling: boolean;
   onReconcile: (job: DryRunJobResponse) => Promise<void>;
@@ -212,7 +216,7 @@ export function DryRunResultPanel({
     return <>{executionEvidence}<section className="comparison-progress" aria-live="polite"><span><Icon name="refresh" /></span><div><strong>{job.status === 'QUEUED' ? 'dry-run 대기 중' : `Salesforce check-only 실행 중${job.progress === undefined ? '' : ` · ${job.progress.status}`}`}</strong><p>{job.progress === undefined ? `${job.source.label} → ${job.target.label} · snapshot, 차이, 테스트를 검증합니다.` : progressSummary(job.progress)}</p></div></section><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></>;
   }
   if (job.status === 'FAILED' || job.status === 'RECONCILE_REQUIRED') {
-    return <>{executionEvidence}<section className="compare-error" role="alert"><strong>{job.status === 'FAILED' ? `${job.kind === 'DEPLOY' ? '실제 배포' : 'dry-run'}이 실패했습니다.` : 'Salesforce 상태 재확인이 필요합니다.'}</strong><p>{job.errorMessage ?? '상세 오류가 기록되지 않았습니다.'}</p>{job.persistenceWarning !== undefined && <p>로컬 저장 경고: {job.persistenceWarning}</p>}{job.status === 'RECONCILE_REQUIRED' && <button className={`button button-secondary reconcile-button${reconciling ? ' button-busy' : ''}`} type="button" disabled={!canReconcile || reconciling} onClick={() => void onReconcile(job)}><Icon name={reconciling ? 'refresh' : 'shield'} />{reconciling ? 'Salesforce 상태 확인 중……' : 'Salesforce 상태 다시 확인'}</button>}{job.status === 'RECONCILE_REQUIRED' && canManuallyReconcile && job.salesforceDeploymentId === undefined && <ManualReconcileForm job={job} busy={manuallyReconciling} onSubmit={onManualReconcile} />}<SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></section></>;
+    return <>{executionEvidence}<section className="compare-error" role="alert"><strong>{job.status === 'FAILED' ? `${job.kind === 'DEPLOY' ? '실제 배포' : 'dry-run'}이 실패했습니다.` : 'Salesforce 상태 재확인이 필요합니다.'}</strong><p>{sanitizedErrorDetails(job.errorMessage ?? '상세 오류가 기록되지 않았습니다.')}</p>{job.persistenceWarning !== undefined && <p>로컬 저장 경고: {job.persistenceWarning}</p>}{job.status === 'RECONCILE_REQUIRED' && <button className={`button button-secondary reconcile-button${reconciling ? ' button-busy' : ''}`} type="button" disabled={!canReconcile || reconciling} onClick={() => void onReconcile(job)}><Icon name={reconciling ? 'refresh' : 'shield'} />{reconciling ? 'Salesforce 상태 확인 중……' : 'Salesforce 상태 다시 확인'}</button>}{job.status === 'RECONCILE_REQUIRED' && canManuallyReconcile && job.salesforceDeploymentId === undefined && <ManualReconcileForm job={job} busy={manuallyReconciling} onSubmit={onManualReconcile} />}<ErrorGuidance job={job} onSettings={onSettings} /><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></section></>;
   }
   if (job.kind === 'DEPLOY' && job.status === 'SUCCEEDED') {
     return <>{executionEvidence}<section className="dry-run-result" aria-label="Salesforce 실제 배포 성공"><div className="comparison-result-head"><div><p className="eyebrow">DEPLOYMENT COMPLETE</p><h2>Salesforce 실제 배포 성공</h2><small>{job.salesforceDeploymentId ?? 'deployment ID 없음'}</small></div><span className="result-success"><Icon name="check" />배포 성공</span></div>{job.persistenceWarning !== undefined && <div className="warning-note" role="alert"><Icon name="shield" /><p><strong>Salesforce 배포는 성공했지만 로컬 저장을 확인해야 합니다.</strong>{job.persistenceWarning}</p></div>}<div className="approval-preview"><Icon name="shield" /><div><strong>선택한 payload 배포를 완료했습니다.</strong><p>{executionDescription(job)}</p><p>{deploymentTestResult(job)}</p></div></div><SalesforceDiagnosticsPanel diagnostics={job.progress?.diagnostics} /></section></>;

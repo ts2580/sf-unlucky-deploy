@@ -1,5 +1,13 @@
 import { expect, test, type Page } from '@playwright/test';
 
+async function confirmActualDeployment(page: Page) {
+  const dialog = page.getByRole('dialog', { name: '실제 배포 내용 확인' });
+  const confirm = dialog.getByRole('button', { name: '확인한 내용으로 실제 배포', exact: true });
+  await expect(confirm).toBeDisabled();
+  await dialog.getByRole('checkbox', { name: '위 소스·대상·반영 범위를 확인했습니다.' }).check();
+  await confirm.click();
+}
+
 const email = 'e2e-admin@example.com';
 const password = 'e2e correct horse battery staple';
 const operatorEmail = 'e2e-operator@example.com';
@@ -696,8 +704,12 @@ for (const width of [1440, 390]) {
     page.on('pageerror', (error) => errors.push(error.message));
     page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
     const registered = { id: 'git-registered:limit-fixture', kind: 'local', location: 'git', label: 'owner/repo · main', detail: '등록 브랜치' };
-    const fixed = { ...registered, id: 'git:fixed-limit-source' };
-    const target = { id: 'org:target', kind: 'org', location: 'org', label: 'target', detail: 'Sandbox' };
+    const fixed = { ...registered, id: 'git:fixed-limit-source', provenance: {
+      provider: 'github', host: 'github.com', repositoryId: 'fixture', repositoryPath: `team/${'billing-project-'.repeat(8)}`,
+      refType: 'branch', refName: 'main', commitSha: 'a'.repeat(40), projectRoot: `packages/${'nested-directory-'.repeat(8)}`,
+      importedAt: '2026-10-04T00:00:00.000Z', importedContentChecksum: 'b'.repeat(64), sourceOwnerUserId: 'fixture-owner', importId: 'fixed-limit-source',
+    } };
+    const target = { id: 'org:target', kind: 'org', location: 'org', label: 'target', detail: 'Sandbox', username: 'target@example.com', maskedOrgId: '00D…001', environment: 'production' };
     const limit = { maximumFiles: 2000, fileCount: 2001, exceeded: true };
     const job = { id: 'limit-comparison', mode: 'source', status: 'SUCCEEDED', scope: 'all', metadataType: 'ApexClass',
       manifest: 'ApexClass', left: target, right: fixed, comparisonLimit: limit,
@@ -738,6 +750,23 @@ for (const width of [1440, 390]) {
     await page.getByRole('combobox', { name: '테스트 수준' }).selectOption('NoTestRun');
     await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeEnabled();
     await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
+    const confirmation = page.getByRole('dialog', { name: '실제 배포 내용 확인' });
+    await expect(confirmation).toContainText(`github.com/${fixed.provenance.repositoryPath}`);
+    await expect(confirmation).toContainText(fixed.provenance.projectRoot);
+    await expect(confirmation).toContainText('a'.repeat(40));
+    await expect(confirmation).toContainText('운영 Org');
+    await expect(confirmation).toContainText('target@example.com');
+    await confirmation.getByRole('checkbox').check();
+    expect(directBody).toBeUndefined();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await confirmation.screenshot({ path: test.info().outputPath('deployment-confirmation.png') });
+    await confirmation.getByRole('button', { name: '취소', exact: true }).click();
+    await page.getByRole('combobox', { name: '테스트 수준' }).selectOption('RunLocalTests');
+    await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
+    await expect(confirmation.getByRole('checkbox')).not.toBeChecked();
+    await expect(confirmation.getByRole('button', { name: '확인한 내용으로 실제 배포' })).toBeDisabled();
+    await expect(confirmation).toContainText('RunLocalTests');
+    await confirmActualDeployment(page);
     await expect.poll(() => directBody).toMatchObject({ sourceId: fixed.id, targetOrgId: target.id,
       components: [{ type: 'ApexClass', fullName: 'Hello' }] });
     await expect(page.getByRole('heading', { name: 'Salesforce 실제 배포 성공' })).toBeVisible();
@@ -961,6 +990,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByRole('region', { name: 'Target 바로 배포' })).toContainText('선택한 테스트 통과 · 커버리지 75% 이상 필요.');
   await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeEnabled();
   await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
+  await confirmActualDeployment(page);
   await expect(page.getByRole('button', { name: '배포 요청 중……' })).toBeVisible({ timeout: 300 });
   await expect(page.getByLabel('실제 배포 현황')).toContainText('요청 제출 중');
   await expect(page.getByText('Salesforce 실제 배포 중')).toBeVisible();
@@ -995,6 +1025,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(result.getByText('RunSpecifiedTests', { exact: true })).toBeVisible();
   await expect(result.getByText(/Hello_Test/u)).toBeVisible();
   await page.getByRole('button', { name: '배포 대상 실제 배포' }).click();
+  await confirmActualDeployment(page);
   await expect(page.getByRole('button', { name: '배포 요청 중……' })).toBeVisible({ timeout: 300 });
   await expect(page.getByLabel('실제 배포 현황')).toContainText('요청 제출 중');
   await expect(page.getByLabel('실제 배포 현황')).toContainText(/대기열|진행 중/u);
@@ -1036,6 +1067,9 @@ for (const width of [1440, 320]) {
     page.on('pageerror', (error) => errors.push(error.message));
     page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
     await mockResponsiveWorkspace(page);
+    await page.route('**/api/v1/deployment-drafts', (route) => route.request().method() === 'GET'
+      ? route.fulfill({ json: { drafts: [] } })
+      : route.fulfill({ json: { id: 'pagination-draft', tabId: route.request().postDataJSON().tabId, expiresAt: '2099-01-01T00:00:00Z', updatedAt: '2026-10-04T00:00:00Z' } }));
     const components = Array.from({ length: 201 }, (_, index) => {
       const fullName = `Paged${String(index + 1).padStart(3, '0')}`;
       return { key: `ApexClass:${fullName}`, type: 'ApexClass', fullName, status: 'ADDED', files: [] };
@@ -1327,4 +1361,53 @@ function directDeploymentFixture(status: 'QUEUED' | 'DEPLOYING' | 'SUCCEEDED' | 
       errorMessage: 'Salesforce CLI 연결이 종료되어 원격 상태를 확인하지 못했습니다.',
     } : {}),
   };
+}
+
+for (const [errorCode, destination, fact] of [
+  ['SALESFORCE_AUTH_REQUIRED', '/auth', '선택한 연결의 인증 또는 접근 확인에 실패했습니다.'],
+  ['DX_PROJECT_NOT_FOUND', '/settings', '선택한 저장소 또는 DX 프로젝트를 현재 상태에서 사용할 수 없습니다.'],
+  ['ORG_IDENTITY_CHANGED', '/auth', '선택한 Org 또는 연결의 identity가 변경되어 작업을 중단했습니다.'],
+] as const) {
+  test(`구조 오류 ${errorCode}의 확정 안내와 설정 이동을 표시한다`, async ({ page }) => {
+    await page.context().addCookies([{ name: 'sfud_csrf', value: 'fixture-csrf', url: 'http://127.0.0.1:27546' }]);
+    await page.route('**/api/v1/auth/status', (route) => route.fulfill({ json: { setupRequired: false, authenticated: true,
+      user: { id: 'guidance-user', email: 'guidance@example.com', displayName: 'guidance', role: 'ADMIN' } } }));
+    // The authentication status is mocked, so every protected shell read also belongs to this fixture.
+    const reads: Record<string, unknown> = {
+      '/api/v1/diagnostics': { status: 'ok', service: 'sfud-ui', version: '0.4.0', host: '127.0.0.1', port: 27546,
+        storage: { engine: 'sqlite', status: 'ok' }, queue: { queuedCount: 0 }, comparisonQueue: { queuedCount: 0 }, recoveredJobCount: 0, recoveredComparisonCount: 0 },
+      '/api/v1/git/connections': { connections: [], tokenStorage: 'ready' },
+      '/api/v1/git/providers': { environmentAvailable: false, tokenStorage: 'ready', providers: ['github', 'gitlab', 'bitbucket'].map((id) => ({ id, configured: false, publicImport: true, privateImport: false })) },
+      '/api/v1/git/registrations': { registrations: [] }, '/api/v1/git/imports': { imports: [] },
+      '/api/v1/deployment-jobs': { jobs: [] }, '/api/v1/settings': { settings: { testClassSuffix: '_Test' } },
+      '/api/v1/salesforce/connections': { localMode: false, storageStatus: 'ready', connections: [] },
+      '/api/v1/admin/git-allowed-ips': { allowedIps: [] },
+    };
+    for (const [path, body] of Object.entries(reads)) await page.route(`**${path}`, (route) => route.fulfill({ json: body }));
+    await page.route('**/api/v1/workflow/events', (route) => route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': connected\n\n' }));
+    await page.route('**/api/v1/deployment-submissions/dry-run/*', (route) => route.fulfill({ json: { state: 'UNCONFIRMED' } }));
+    await page.route('**/api/v1/deployment-presets', (route) => route.fulfill({ json: { presets: [] } }));
+    await page.route('**/api/v1/deployment-drafts', (route) => {
+      if (route.request().method() === 'GET') return route.fulfill({ json: { drafts: [] } });
+      if (errorCode === 'DX_PROJECT_NOT_FOUND') return route.fulfill({ status: 400, json: { error: { code: errorCode, message: 'fixture 초안 경로 오류' } } });
+      return route.fulfill({ json: { id: 'guidance-draft', tabId: route.request().postDataJSON().tabId, expiresAt: '2099-01-01T00:00:00Z', updatedAt: '2026-10-04T00:00:00Z' } });
+    });
+    await mockResponsiveWorkspace(page);
+    await page.route('**/api/v1/metadata-types**', (route) => route.fulfill({ json: { metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }] } }));
+    await page.route('**/api/v1/apex-test-classes**', (route) => route.fulfill({ json: { testClasses: [] } }));
+    await page.route('**/api/v1/comparisons**', (route) => route.fulfill({ status: route.request().method() === 'POST' ? 202 : 200,
+      json: route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/v1/comparisons' ? { jobs: [] } : { job: { ...deploymentComparisonFixture('SUCCEEDED'), right: { id: 'org:source', kind: 'org', label: 'source' } } } }));
+    await page.route('**/api/v1/deployments/dry-run', (route) => route.fulfill({ status: 400, json: { error: { code: errorCode, message: 'fixture 구조 오류' } } }));
+    await page.goto('http://127.0.0.1:27546/deploy');
+    await page.getByRole('button', { name: '메타데이터 비교', exact: true }).click();
+    await page.getByLabel('NewClass 배포 대상으로 선택').check();
+    await page.getByRole('button', { name: '배포 대상 Dry-run', exact: true }).click();
+    const guidance = page.getByRole('region', { name: '오류 해결 안내' });
+    await expect(guidance).toContainText(fact);
+    await expect(guidance.getByRole('button', { name: /연결·프로젝트 설정 확인/u })).toBeVisible();
+    await guidance.getByRole('button', { name: /연결·프로젝트 설정 확인/u }).click();
+    await expect.poll(() => new URL(page.url()).pathname).toBe(destination);
+    const returnPath = new URL(page.url()).searchParams.get('return')!;
+    expect(returnPath).toContain(errorCode === 'DX_PROJECT_NOT_FOUND' ? '/deploy?restoreTab=' : '/deploy?draft=guidance-draft');
+  });
 }

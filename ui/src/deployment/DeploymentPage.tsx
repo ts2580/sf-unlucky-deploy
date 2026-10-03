@@ -1,3 +1,13 @@
+import { NewJobSelection } from './NewJobSelection';
+import { saveClientDraft } from './client-draft';
+import { SaveDeploymentDraftSchema, DeploymentDraftSchema, type SaveDeploymentDraft, type DeploymentDraft } from '../../../src/api/deployment-draft-contracts';
+import { DeploymentConfirmation } from './DeploymentConfirmation';
+import { ErrorGuidance } from './ErrorGuidance';
+import { DeploymentDrafts } from './DeploymentDrafts';
+import { PendingSubmissions } from './PendingSubmissions';
+import { persistPending, completePending, listPending, settleRejectedPending } from './pending-submissions';
+import { DeploymentPresets } from './DeploymentPresets';
+import type { DeploymentSelection, ResolvedDeploymentPreset } from '../../../src/api/deployment-preset-contracts';
 import { gitMetadataTypes } from '../../../src/api/git-metadata-types';
 import type { WorkspaceSource, WorkspaceResponse } from '../../../src/api/workspace-contracts';
 import type { GitConnection } from '../../../src/api/git-contracts';
@@ -114,6 +124,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const [tests, setTests] = useState('');
   const [showIdentical, setShowIdentical] = useState(false);
   const [compareCurrentType, setCompareCurrentType] = useState(true);
+  const presetMetadataTypeRef = useRef<{ key: string; value: string } | undefined>(undefined);
+  const presetPackageIdsRef = useRef<{ key: string; value: string[] } | undefined>(undefined);
   const [packageSelection, setPackageSelection] = useState<{ sourceIds: string; ids: string[] }>({ sourceIds: '', ids: [] });
   const [comparisonSubmitting, setComparisonSubmitting] = useState(false);
   const [dryRunSubmitting, setDryRunSubmitting] = useState(false);
@@ -125,6 +137,9 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const [deploymentJob, setDeploymentJob] = useState<DryRunJobResponse | null>(null);
   const [deploymentCart, setDeploymentCart] = useState<DeploymentCartItem[]>([]);
   const [error, setError] = useState('');
+  const [errorCode, setErrorCode] = useState<string>();
+  const [confirmationOpen, setConfirmationOpen] = useState(false);
+  const [selectionTouched, setSelectionTouched] = useState(false);
   const [apexTestClasses, setApexTestClasses] = useState<ApexTestClassCandidate[]>([]);
   const [apexTestClassQuery, setApexTestClassQuery] = useState('');
   const [apexTestClassesLoading, setApexTestClassesLoading] = useState(false);
@@ -152,7 +167,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const excludedPackageIds = packageSelection.sourceIds === packageOrgIds ? packageSelection.ids : [];
   const packageSelectionKey = excludedPackageIds.join(',');
   useEffect(() => {
-    setPackageSelection({ sourceIds: packageOrgIds, ids: [] });
+    setPackageSelection({ sourceIds: packageOrgIds, ids: presetPackageIdsRef.current?.key === packageOrgIds ? presetPackageIdsRef.current.value : [] });
+    presetPackageIdsRef.current = undefined;
   }, [packageOrgIds]);
   const workflowSelectionKey = [
     sourceSelectionId, targetSelectionId,
@@ -248,7 +264,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     })
       .then((data) => {
         setMetadataTypes(data.metadataTypes);
-        setScopeQuery(defaultMetadataType(data.metadataTypes));
+        setScopeQuery(presetMetadataTypeRef.current?.key === metadataTypeSourceIds ? presetMetadataTypeRef.current.value : defaultMetadataType(data.metadataTypes));
+        presetMetadataTypeRef.current = undefined;
         setMetadataTypesStatus('ready');
       })
       .catch((caught: unknown) => {
@@ -333,6 +350,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   }, [hasApexDeployment, deploymentSourceId, testInputFocused, comparisonOnly]);
 
   const source = preparedGitSource?.id === sourceId ? preparedGitSource : workspace?.sources.find((entry) => entry.id === sourceId);
+  const executionSource = sourceId.startsWith('git-registered:') && comparisonJob?.status === 'SUCCEEDED' && comparisonJobSelectionKeyRef.current === workflowSelectionKey ? comparisonJob.right : source;
   const comparing = comparisonSubmitting
     || (comparisonJob !== null && ['QUEUED', 'RUNNING'].includes(comparisonJob.status));
   const dryRunning = dryRunSubmitting
@@ -365,6 +383,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const metadataTypesInvalid = metadataTypesStatus === 'error'
     || (metadataTypesStatus === 'ready' && !scopeValid);
   const canDeploy = ['DEPLOYER', 'ADMIN'].includes(user.role);
+  const approvedDryRunAvailable = dryRunJob?.status === 'APPROVAL_PENDING' && dryRunJob.prepared && dryRunJob.payloadChecksum !== undefined && !dryRunJob.artifactsExpired && dryRunJobSelectionKeyRef.current === dryRunSelectionKey;
   const targetAlias = targetOrgId.startsWith('org:') ? targetOrgId.slice('org:'.length) : '';
   const changeTestLevel = (nextLevel: string) => {
     setTestLevel(nextLevel);
@@ -437,7 +456,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
 
   const startDryRun = async () => {
     if (!deploymentSourceId || !deploymentTargetValid || deploymentCart.length === 0 || !testSelectionValid) return;
-    setError('');
+    try { if (listPending(user.id).some((item) => item.jobId === undefined && item.key !== dryRunIdempotencyKeyRef.current)) { setError('확인되지 않은 제출이 있습니다. 대기 요청에서 원래 요청 결과를 먼저 조회하세요.'); return; } } catch { setError('대기 요청 저장소를 읽지 못해 새 제출을 중단했습니다.'); return; }
+    setError(''); setErrorCode(undefined);
     setDryRunJob(null);
     setDeploymentJob(null);
     const selectionKey = dryRunSelectionKey;
@@ -446,11 +466,15 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     dryRunRequestControllerRef.current = controller;
     dryRunJobSelectionKeyRef.current = selectionKey;
     setDryRunSubmitting(true);
+    let submittedKey: string | null = null;
+    let allowClearFreshRequest = false;
     try {
       const body: CreateDryRunRequest = {
         scope: 'selected',
         components: deploymentCart.map(({ type, fullName }) => ({ type, fullName })),
         sourceId: deploymentSourceId,
+        ...(source?.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.orgIdentityFingerprint }),
+        ...(target?.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.orgIdentityFingerprint }),
         targetOrgId,
         testLevel: testLevel as CreateDryRunRequest['testLevel'],
         tests: testNames,
@@ -458,8 +482,11 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
         strict: false,
       };
       const idempotencyKey = dryRunIdempotencyKeyRef.current ?? createIdempotencyKey();
-      dryRunIdempotencyKeyRef.current = idempotencyKey;
+      dryRunIdempotencyKeyRef.current = idempotencyKey; submittedKey = idempotencyKey;
+      allowClearFreshRequest = !listPending(user.id).some((item) => item.key === idempotencyKey);
+      persistPending(user.id, 'dry-run', idempotencyKey, body, executionSource, target);
       const data = await requestDryRun(body, idempotencyKey, controller.signal);
+      completePending(user.id, idempotencyKey, data.job.id);
       if (
         controller.signal.aborted
         || dryRunSelectionKeyRef.current !== selectionKey
@@ -468,6 +495,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       setDryRunJob(data.job);
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === 'AbortError') return;
+      await settleRejectedPending(user.id, submittedKey, caught, allowClearFreshRequest);
+      setErrorCode(typeof caught === 'object' && caught !== null && 'code' in caught && typeof caught.code === 'string' ? caught.code : undefined);
       setError(caught instanceof ApiClientTimeoutError
         ? `${caught.message} dry-run을 다시 실행하면 같은 작업을 안전하게 찾습니다.`
         : caught instanceof Error ? caught.message : 'dry-run을 시작하지 못했습니다.');
@@ -481,22 +510,33 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
 
   const executeDeployment = async () => {
     if (!deploymentSourceId || !deploymentTargetValid || !canDeploy || deploymentCart.length === 0 || !testSelectionValid) return;
-    setError('');
+    try { if (listPending(user.id).some((item) => item.jobId === undefined && item.key !== directDeploymentIdempotencyKeyRef.current)) { setError('확인되지 않은 제출이 있습니다. 대기 요청에서 원래 요청 결과를 먼저 조회하세요.'); return; } } catch { setError('대기 요청 저장소를 읽지 못해 새 제출을 중단했습니다.'); return; }
+    setError(''); setErrorCode(undefined); setConfirmationOpen(false);
     setDeploymentJob(null);
     const selectionKey = dryRunSelectionKey;
     const controller = new AbortController();
     deploymentRequestControllerRef.current?.abort();
     deploymentRequestControllerRef.current = controller;
     setDeploymentSubmitting(true);
+    let submittedKey: string | null = null;
+    let allowClearFreshRequest = false;
     try {
-      const approvedDryRun = dryRunJob?.status === 'APPROVAL_PENDING'
-        && dryRunJob.payloadChecksum !== undefined;
+      const approvedDryRun = approvedDryRunAvailable && dryRunJob !== null;
       const directIdempotencyKey = approvedDryRun
         ? undefined
         : directDeploymentIdempotencyKeyRef.current ?? createIdempotencyKey();
       if (directIdempotencyKey !== undefined) {
-        directDeploymentIdempotencyKeyRef.current = directIdempotencyKey;
+        directDeploymentIdempotencyKeyRef.current = directIdempotencyKey; submittedKey = directIdempotencyKey;
       }
+      const directBody: CreateDirectDeploymentRequest = {
+        scope: 'selected', components: deploymentCart.map(({ type, fullName }) => ({ type, fullName })),
+        sourceId: deploymentSourceId, targetOrgId,
+        ...(source?.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.orgIdentityFingerprint }),
+        ...(target?.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.orgIdentityFingerprint }),
+        testLevel: testLevel as CreateDirectDeploymentRequest['testLevel'],
+        tests: testNames, waitMinutes: 60, strict: false, targetConfirmation: targetAlias, confirmation: '실제 배포',
+      };
+      if (directIdempotencyKey !== undefined) { allowClearFreshRequest = !listPending(user.id).some((item) => item.key === directIdempotencyKey); persistPending(user.id, 'direct', directIdempotencyKey, directBody, executionSource, target); }
       const data = approvedDryRun
         ? await executeApprovedDeployment({
             dryRunJobId: dryRunJob.id,
@@ -504,23 +544,15 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
             targetAlias,
             confirmation: '실제 배포',
           }, controller.signal)
-        : await startDirectDeployment({
-            scope: 'selected',
-            components: deploymentCart.map(({ type, fullName }) => ({ type, fullName })),
-            sourceId: deploymentSourceId,
-            targetOrgId,
-            testLevel: testLevel as CreateDirectDeploymentRequest['testLevel'],
-            tests: testNames,
-            waitMinutes: 60,
-            strict: false,
-            targetConfirmation: targetAlias,
-            confirmation: '실제 배포',
-          }, directIdempotencyKey!, controller.signal);
+        : await startDirectDeployment(directBody, directIdempotencyKey!, controller.signal);
+      if (directIdempotencyKey !== undefined) completePending(user.id, directIdempotencyKey, data.job.id);
       if (!controller.signal.aborted && dryRunSelectionKeyRef.current === selectionKey) {
         setDeploymentJob(data.job);
       }
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === 'AbortError') return;
+      await settleRejectedPending(user.id, submittedKey, caught, allowClearFreshRequest);
+      setErrorCode(typeof caught === 'object' && caught !== null && 'code' in caught && typeof caught.code === 'string' ? caught.code : undefined);
       setError(caught instanceof ApiClientTimeoutError
         ? `${caught.message} 실제 배포를 다시 실행하면 이미 생성된 작업을 안전하게 찾습니다.`
         : caught instanceof Error ? caught.message : '실제 배포를 시작하지 못했습니다.');
@@ -564,7 +596,47 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     }
   };
 
+  const openSettings = async (path: '/auth' | '/settings' = '/settings') => {
+    let tabId = createIdempotencyKey();
+    const selection: DeploymentSelection = { sourceId, targetId: targetOrgId,
+      ...(source?.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.orgIdentityFingerprint }),
+      ...(target?.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.orgIdentityFingerprint }),
+      ...(scopeQuery ? { metadataType: scopeQuery } : {}), compareCurrentType, showIdentical, excludedPackageIds,
+      testLevel: testLevel as DeploymentSelection['testLevel'], tests: testNames };
+    try { tabId = sessionStorage.getItem(`sfud:draft-tab:${user.id}`) ?? tabId; sessionStorage.setItem(`sfud:draft-tab:${user.id}`, tabId); saveClientDraft(user.id, tabId, selection); } catch { /* Saving must not prevent navigation to repair the connection. */ }
+    let returnPath = `/deploy?restoreTab=${encodeURIComponent(tabId)}`;
+    try {
+      const draft = await apiRequest<DeploymentDraft, SaveDeploymentDraft>('/api/v1/deployment-drafts', { method: 'PUT', csrf: true, timeoutMs: 3000,
+        body: { tabId, selection }, requestSchema: SaveDeploymentDraftSchema, responseSchema: DeploymentDraftSchema });
+      returnPath = `/deploy?draft=${encodeURIComponent(draft.id)}`;
+    } catch { /* Identity/path failure stays visible during explicit fallback revalidation after return. */ }
+    window.location.assign(`${path}?return=${encodeURIComponent(returnPath)}`);
+  };
+  const applyPreset = (value: ResolvedDeploymentPreset) => {
+    const selection = value.selection;
+    setSelectionTouched(true);
+    if (selection === undefined) return;
+    comparisonRequestControllerRef.current?.abort(); dryRunRequestControllerRef.current?.abort(); deploymentRequestControllerRef.current?.abort();
+    comparisonJobSelectionKeyRef.current = null; dryRunJobSelectionKeyRef.current = null;
+    const nextMetadataKey = selection.compareCurrentType ? `${selection.sourceId},${selection.targetId}` : selection.sourceId;
+    presetMetadataTypeRef.current = nextMetadataKey !== metadataTypeSourceIds && selection.metadataType !== undefined ? { key: nextMetadataKey, value: selection.metadataType } : undefined;
+    const nextPackageKey = [...new Set([selection.sourceId, ...(selection.compareCurrentType ? [selection.targetId] : [])].filter((item) => item.startsWith('org:')))].sort().join(',');
+    presetPackageIdsRef.current = nextPackageKey !== packageOrgIds ? { key: nextPackageKey, value: selection.excludedPackageIds } : undefined;
+    setSourceSelectionId(selection.sourceId); setSourceId(selection.sourceId);
+    setTargetSelectionId(selection.targetId); setTargetOrgId(selection.targetId);
+    setPreparedGitSource(value.source); setPreparedGitTarget(value.target);
+    setTestLevel(selection.testLevel); setTests(selection.tests.join(', '));
+    setCompareCurrentType(selection.compareCurrentType); setShowIdentical(selection.showIdentical);
+    setScopeQuery(selection.metadataType ?? '');
+    setDeploymentCart([]); setComparisonJob(null); setDryRunJob(null); setDeploymentJob(null);
+    const ids = [...new Set([selection.sourceId, ...(selection.compareCurrentType ? [selection.targetId] : [])].filter((item) => item.startsWith('org:')))].sort().join(',');
+    setPackageSelection({ sourceIds: ids, ids: selection.excludedPackageIds });
+  };
   const deploySources: WorkspaceSource[] = [
+    ...[preparedGitSource, preparedGitTarget].filter((item, index, sources): item is WorkspaceSource => item !== undefined
+      && (item.id === sourceSelectionId || item.id === targetSelectionId)
+      && !(workspace?.sources ?? []).some((source) => source.id === item.id)
+      && sources.findIndex((source) => source?.id === item.id) === index),
     ...(workspace?.sources ?? []).filter((source, index, sources) => {
       const provenance = source.provenance;
       if (source.location !== 'git' || provenance === undefined) return true;
@@ -606,6 +678,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     }
   }, [workspace, gitConnections, targetSelectionId]);
   const selectDeploymentTarget = (value: string) => {
+    presetMetadataTypeRef.current = undefined; presetPackageIdsRef.current = undefined;
     setTargetSelectionId(value);
     setTargetOrgId(value.startsWith(gitConnectionSourcePrefix) ? '' : value);
     setPreparedGitTarget(undefined);
@@ -614,6 +687,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     }
   };
   const selectDeploymentSource = (value: string) => {
+    presetMetadataTypeRef.current = undefined; presetPackageIdsRef.current = undefined;
     setSourceSelectionId(value);
     setSourceId(value.startsWith(gitConnectionSourcePrefix) ? '' : value);
     setPreparedGitSource(undefined);
@@ -621,6 +695,14 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
 
   return (
     <div className="page-stack deployment-page">
+      {source !== undefined && target !== undefined && <DeploymentConfirmation open={confirmationOpen}
+        source={approvedDryRunAvailable && dryRunJob !== null ? dryRunJob.source : executionSource ?? source}
+        target={approvedDryRunAvailable && dryRunJob !== null ? dryRunJob.target : target}
+        components={approvedDryRunAvailable && dryRunJob !== null ? dryRunJob.components ?? [] : deploymentCart.map(({ type, fullName }) => ({ type, fullName }))} testLevel={approvedDryRunAvailable && dryRunJob !== null ? dryRunJob.testPlan?.level ?? testLevel : testLevel} tests={approvedDryRunAvailable && dryRunJob !== null ? dryRunJob.testPlan?.tests ?? testNames : testNames}
+        mode={approvedDryRunAvailable && dryRunJob !== null ? 'validated' : 'direct'}
+        {...(dryRunJob === null ? {} : { validation: { status: dryRunJob.status, ...(dryRunJob.payloadChecksum === undefined ? {} : { checksum: dryRunJob.payloadChecksum }), ...(dryRunJob.updatedAt === undefined ? {} : { validatedAt: dryRunJob.updatedAt }) } })}
+        busy={deploymentSubmitting} onCancel={() => setConfirmationOpen(false)} onConfirm={() => void executeDeployment()} />}
+
       <WorkflowStatusPanel
         liveStatus={liveStatus}
         comparisonJob={comparisonJob}
@@ -633,7 +715,22 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
         <div className="stepper" aria-label="배포 단계"><span className="step-active"><i>1</i>검색</span><b /><span className={deploymentCart.length > 0 ? 'step-active' : ''}><i>2</i>배포 대상</span><b /><span className={dryRunJob !== null ? 'step-active' : ''}><i>3</i>Dry-run</span><b /><span className={deploymentJob !== null ? 'step-active' : ''}><i>4</i>배포</span></div>
       </header>
 
-      <div className="deploy-layout">
+      {new URLSearchParams(window.location.search).get('fromJob') && <NewJobSelection jobId={new URLSearchParams(window.location.search).get('fromJob')!}
+        enabled={workspace !== null && ['ready', 'error'].includes(metadataTypesStatus) && canRun && !comparing && !dryRunning && !deploying} selectionFingerprint={JSON.stringify([workflowSelectionKey, testLevel, tests])} onApply={applyPreset} />}
+      <PendingSubmissions owner={user.id} canDeploy={canDeploy} canRetry={canRun && !dryRunning && !deploying} onFound={(job) => {
+        window.location.assign(`/deploy?job=${encodeURIComponent(job.id)}`);
+      }} />
+      <DeploymentDrafts owner={user.id} autoSave={selectionTouched} enabled={workspace !== null && ['ready', 'error'].includes(metadataTypesStatus) && canRun && !comparing && !dryRunning && !deploying} selection={{ sourceId, targetId: targetOrgId,
+        ...(source?.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.orgIdentityFingerprint }),
+        ...(target?.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.orgIdentityFingerprint }),
+        ...(scopeQuery ? { metadataType: scopeQuery } : {}), compareCurrentType, showIdentical,
+        excludedPackageIds, testLevel: testLevel as DeploymentSelection['testLevel'], tests: testNames }} onApply={applyPreset} />
+      <DeploymentPresets canApply={!comparing && !dryRunning && !deploying} canSave={canRun && !comparing && !dryRunning && !deploying} selection={{ sourceId, targetId: targetOrgId,
+        ...(source?.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.orgIdentityFingerprint }),
+        ...(target?.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.orgIdentityFingerprint }),
+        ...(scopeQuery ? { metadataType: scopeQuery } : {}), compareCurrentType, showIdentical,
+        excludedPackageIds, testLevel: testLevel as DeploymentSelection['testLevel'], tests: testNames }} onApply={applyPreset} />
+      <div className="deploy-layout" onChangeCapture={() => setSelectionTouched(true)}>
         <div className="page-stack deploy-workspace">
           <section className="workflow-panel deploy-source-panel" aria-labelledby="deploy-source-heading">
             <div className="panel-heading"><span className="step-number">01</span><div><h2 id="deploy-source-heading">소스와 타겟</h2></div><span className="panel-state">{workspace === null ? '조회 중' : 'DEPLOY VIEW'}</span></div>
@@ -754,13 +851,13 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
             {!testSelectionValid && <p className="apex-test-validation" role="alert">RunSpecifiedTests는 테스트 클래스를 하나 이상 선택하거나 입력해야 합니다.</p>}
           </section>}
 
-          {error && <section className="compare-error" role="alert"><strong>비교 및 배포 작업을 실행하지 못했습니다.</strong><p>{error}</p></section>}
-          {dryRunJob !== null && <DryRunResultPanel job={dryRunJob} canReconcile={canDeploy} reconciling={reconcilingJobId === dryRunJob.id} onReconcile={reconcileDeployment} canManuallyReconcile={user.role === 'ADMIN'} manuallyReconciling={manualReconcilingJobId === dryRunJob.id} onManualReconcile={manuallyReconcileDeployment} />}
-          {deploymentJob !== null && <DryRunResultPanel job={deploymentJob} canReconcile={canDeploy} reconciling={reconcilingJobId === deploymentJob.id} onReconcile={reconcileDeployment} canManuallyReconcile={user.role === 'ADMIN'} manuallyReconciling={manualReconcilingJobId === deploymentJob.id} onManualReconcile={manuallyReconcileDeployment} />}
+          {error && <section className="compare-error" role="alert"><strong>비교 및 배포 작업을 실행하지 못했습니다.</strong><p>{error}</p><ErrorGuidance errorCode={errorCode} errorMessage={error} onSettings={(path) => void openSettings(path)} /></section>}
+          {dryRunJob !== null && <DryRunResultPanel job={dryRunJob} canReconcile={canDeploy} reconciling={reconcilingJobId === dryRunJob.id} onReconcile={reconcileDeployment} canManuallyReconcile={user.role === 'ADMIN'} manuallyReconciling={manualReconcilingJobId === dryRunJob.id} onManualReconcile={manuallyReconcileDeployment} onSettings={(path) => void openSettings(path)} />}
+          {deploymentJob !== null && <DryRunResultPanel job={deploymentJob} canReconcile={canDeploy} reconciling={reconcilingJobId === deploymentJob.id} onReconcile={reconcileDeployment} canManuallyReconcile={user.role === 'ADMIN'} manuallyReconciling={manualReconcilingJobId === deploymentJob.id} onManualReconcile={manuallyReconcileDeployment} onSettings={(path) => void openSettings(path)} />}
         </div>
 
         <aside className="deploy-summary" aria-label="배포 대상">
-          <p className="eyebrow">{comparisonOnly ? 'COMPARISON' : 'DEPLOYMENT TARGETS'}</p><h2>{comparisonOnly ? 'Git 타겟 · 비교 전용' : deploying ? '실제 배포 중' : deploymentJob?.status === 'SUCCEEDED' ? '배포 성공' : dryRunning ? 'Dry-run 실행 중' : dryRunJob?.status === 'APPROVAL_PENDING' ? 'Target 배포 준비' : comparing ? '메타데이터 검색 중' : deploymentCart.length > 0 ? `${deploymentCart.length}개 선택됨` : '선택된 배포 대상이 없습니다'}</h2>
+          <p className="eyebrow">{comparisonOnly ? 'COMPARISON' : 'DEPLOYMENT TARGETS'}</p><h2>{comparisonOnly ? 'Git 타겟 · 비교 전용' : deploying ? '실제 배포 중' : deploymentJob?.status === 'SUCCEEDED' ? '배포 성공' : dryRunning ? 'Dry-run 실행 중' : approvedDryRunAvailable && dryRunJob !== null ? 'Target 배포 준비' : comparing ? '메타데이터 검색 중' : deploymentCart.length > 0 ? `${deploymentCart.length}개 선택됨` : '선택된 배포 대상이 없습니다'}</h2>
           <dl><div><dt>Desired source</dt><dd>{sourceSummary(source)}</dd></div><div><dt>Target</dt><dd>{sourceSummary(target)}</dd></div><div><dt>현재 검색</dt><dd>{selectedMetadataType?.name ?? 'type 선택 필요'}</dd></div><div><dt>{comparisonOnly ? '작업 모드' : '직접 배포 테스트'}</dt><dd>{comparisonOnly ? '비교 전용' : directTestSummary(testLevel, testNames.length)}</dd></div></dl>
           <section className="deployment-cart" aria-label="선택한 배포 목록">
             <div className="deployment-cart-head"><strong>배포 대상</strong><span>{deploymentCart.length}개</span></div>
@@ -783,7 +880,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
               : directDeploymentDescription(testLevel, testNames.length)}</p>
             {!comparisonOnly && <p>선택한 Salesforce org에 실제 반영됩니다. 브라우저를 닫아도 배포는 계속됩니다.</p>}
             {!canDeploy && <p className="approval-denied">DEPLOYER 또는 ADMIN 역할만 실제 배포할 수 있습니다.</p>}
-            <button className={`button button-danger${deploying ? ' button-busy' : ''}`} type="button" onClick={() => void executeDeployment()} disabled={!deploymentTargetValid || !canDeploy || deploymentCart.length === 0 || !testSelectionValid || dryRunning || deploying}><Icon name={deploying ? 'refresh' : 'deploy'} />{deploymentSubmitting ? '배포 요청 중……' : deploying ? '배포 중……' : '배포 대상 실제 배포'}</button>
+            <button className={`button button-danger${deploying ? ' button-busy' : ''}`} type="button" onClick={() => setConfirmationOpen(true)} disabled={!deploymentTargetValid || !canDeploy || deploymentCart.length === 0 || !testSelectionValid || dryRunning || deploying}><Icon name={deploying ? 'refresh' : 'deploy'} />{deploymentSubmitting ? '배포 요청 중……' : deploying ? '배포 중……' : '배포 대상 실제 배포'}</button>
           </section>
         </aside>
       </div>
