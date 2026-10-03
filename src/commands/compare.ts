@@ -11,6 +11,7 @@ import { ProcessSfClient, type SfClient } from '../salesforce/sf-client.js';
 import { parseSourceSpec } from '../sources/source-spec.js';
 import { createSnapshot } from '../sources/snapshot.js';
 import { createRunContext, writeRunMetadata } from './run-context.js';
+import { settledSnapshots } from './settled-snapshots.js';
 import { salesforceWaitCommandTimeoutMs } from '../core/deadline.js';
 import { resolvePackageExclusion, validateExcludedPackageIds } from '../metadata/package-exclusion.js';
 
@@ -87,7 +88,7 @@ export async function runCompareCommand(
     const snapshotCommandTimeoutMs = salesforceWaitCommandTimeoutMs(snapshotWaitMinutes);
     await writeRunMetadata(context, 'compare', leftSource, rightSource.displayName, manifestPath, dependencies.sourceSnapshot);
 
-    const [leftSnapshot, rightSnapshot] = await Promise.all([
+    const [leftSnapshot, rightSnapshot] = await settledSnapshots([
       createSnapshot({
         source: options.sourceOnly === true ? rightSource : leftSource,
         ...(dependencies.sourceSnapshot?.left?.provenance === undefined ? {} : { provenance: dependencies.sourceSnapshot.left.provenance }),

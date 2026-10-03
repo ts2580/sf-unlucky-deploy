@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GitConnectionService } from '../src/git/git-connection-service.js';
 import type { GitFetchOptions } from '../src/git/git-client.js';
+import { GitCache } from '../src/git/git-cache.js';
 import { GitImportService } from '../src/git/git-import-service.js';
 import type { GitObjectReader } from '../src/git/git-object-store.js';
 import { GitRepositoryAccess } from '../src/git/git-repository-access.js';
@@ -21,18 +22,21 @@ import { ManagedProjectService } from '../src/web/server/managed-project-service
 const stores: SqliteStore[] = [];
 const roots: string[] = [];
 const services: GitImportService[] = [];
+const caches: GitCache[] = [];
 const projectStores: ManagedProjectService[] = [];
 const sha = '1'.repeat(40);
 const changedSha = '2'.repeat(40);
 
 afterEach(async () => {
   for (const service of services.splice(0)) await service.close().catch(() => undefined);
+  for (const cache of caches.splice(0)) await cache.close();
   for (const projects of projectStores.splice(0)) await projects.close().catch(() => undefined);
   for (const store of stores.splice(0)) await store.close();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 interface FixtureOptions {
+  cache?: boolean;
   addressInput?: string;
   provider?: GitProviderId;
   accessEnabled?: boolean;
@@ -118,8 +122,10 @@ async function fixture(options: FixtureOptions = {}): Promise<Fixture> {
   await mkdir(projectRoot, { recursive: true });
   const projects = new ManagedProjectService(projectRoot, 10 * 1024 * 1024, 50 * 1024 * 1024);
   const fetch = vi.fn(options.fetch ?? (async (input: GitFetchOptions) => { input.onDiskUsage(100); return objects(); }));
+  const cache = options.cache ? await GitCache.create(':memory:') : undefined;
+  if (cache) caches.push(cache);
   imported = new GitImportService(history, projects, {
-    providers: { github: provider, gitlab: provider, bitbucket: provider }, client: { fetch }, access,
+    ...(cache === undefined ? {} : { cache }), providers: { github: provider, gitlab: provider, bitbucket: provider }, client: { fetch }, access,
     enabled: options.enabled ?? true, concurrency: options.concurrency ?? 2,
   });
   services.push(imported); projectStores.push(projects); roots.push(projectRoot);
@@ -133,13 +139,19 @@ async function waitForStatus(f: Fixture, id: string, status: string) {
 }
 
 describe('private Git repository access and PAT import', { timeout: 60_000 }, () => {
+  it('프로젝트 후보 조회도 다른 사용자의 연결을 거부한다', async () => {
+    const f = await fixture({ cache: true });
+    await expect(f.service.projectRoots(f.other.id, f.request)).rejects.toMatchObject({ code: 'GIT_CONNECTION_REQUIRED' });
+    expect(f.fetch).not.toHaveBeenCalled();
+    expect((await f.service.projectRoots(f.owner.id, f.request)).projectRoots).toEqual(['.']);
+  });
   it.each([
     ['github', 'https://git.example.test:8443/enterprise/team/project.git'],
     ['gitlab', 'https://gitlab.example.test:9443/gitlab/team/sub/project.git'],
     ['gitlab', 'https://gitlab.hmc.co.kr/group/project.git'],
     ['bitbucket', 'https://bitbucket.example.test:7990/bitbucket/scm/TEAM/project.git'],
   ] as const)('%s 셀프호스트 주소를 refs·가져오기·재조회·등록 재생성·비교 준비까지 보존한다', async (provider, url) => {
-    const f = await fixture({ provider, addressInput: url, repositoryPath: url });
+    const f = await fixture({ cache: true, provider, addressInput: url, repositoryPath: url });
     const inspected = await f.service.inspect(f.request, undefined, f.owner.id);
     expect(inspected.cloneUrl).toBe(url);
     expect((await f.service.refs(f.request, 'branch', undefined, f.owner.id)).refs[0]?.name).toBe('main');

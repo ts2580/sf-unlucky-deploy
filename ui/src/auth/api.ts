@@ -2,7 +2,7 @@ import type { ApiUser, AuthSessionResponse, AuthStatusResponse } from '../../../
 import { apiRequest } from '../api-client';
 
 export interface AuthRequest {
-  email: FormDataEntryValue | null;
+  email?: FormDataEntryValue | null;
   password: FormDataEntryValue | null;
   bootstrapToken?: FormDataEntryValue | null;
   displayName?: FormDataEntryValue | null;

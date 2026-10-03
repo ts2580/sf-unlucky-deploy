@@ -870,6 +870,30 @@ const MIGRATIONS: Migration[] = [
     name: 'salesforce_connection_generations',
     sql: `ALTER TABLE salesforce_connections ADD COLUMN generation INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1);`,
   },
+  {
+    version: 47,
+    name: 'user_deployment_presets',
+    sql: `CREATE TABLE deployment_presets (
+      id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL, schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+      settings_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    ) STRICT;
+    CREATE INDEX idx_deployment_presets_owner ON deployment_presets(owner_user_id, updated_at);`,
+  },
+
+  {
+    version: 48,
+    name: 'user_deployment_selection_drafts',
+    sql: `CREATE TABLE deployment_drafts (
+      id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      tab_id TEXT NOT NULL, settings_json TEXT NOT NULL, expires_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision INTEGER NOT NULL,
+      UNIQUE(owner_user_id, tab_id)
+    ) STRICT;
+    CREATE INDEX idx_deployment_drafts_owner_expires ON deployment_drafts(owner_user_id, expires_at);
+    CREATE TABLE deployment_draft_revision (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL) STRICT;
+    INSERT INTO deployment_draft_revision(id, revision) VALUES(1, 0);`,
+  },
+
 ];
 
 export async function applyMigrations(

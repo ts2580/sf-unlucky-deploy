@@ -1,3 +1,10 @@
+import { resolveJobSelection } from './deployment-selection-resolver.js';
+import { ResolvedDeploymentPresetSchema } from '../../api/deployment-preset-contracts.js';
+import { orgIdentityFingerprint } from '../../deploy/org-identity.js';
+import { deploymentFailureCode } from '../../deploy/deployment-error.js';
+import { maskOrgId } from './workspace-service.js';
+import { Type } from '@sinclair/typebox';
+import { DeploymentSubmissionLookupSchema } from '../../api/deployment-contracts.js';
 import type { FastifyInstance } from 'fastify';
 
 import {
@@ -18,6 +25,28 @@ import { redactSensitiveText } from '../../salesforce/sf-client.js';
 import { requireAuthenticatedSession } from './auth-routes.js';
 
 export async function registerDeploymentRoutes(app: FastifyInstance): Promise<void> {
+  for (const prepare of [false, true]) {
+    app.route<{ Params: { id: string } }>({ method: prepare ? 'POST' : 'GET', url: `/api/v1/deployment-jobs/:id/${prepare ? 'prepare-new-selection' : 'new-selection'}`,
+      schema: { params: Type.Object({ id: Type.String({ minLength: 1, maxLength: 200 }) }), response: { 200: ResolvedDeploymentPresetSchema } },
+      handler: async (request, reply) => {
+        const session = await requireAuthenticatedSession(app, request, reply, prepare ? { csrf: true, roles: ['OPERATOR', 'DEPLOYER', 'ADMIN'] } : {});
+        if (session === undefined) return;
+        try { return await resolveJobSelection(app.sfudRuntime, session.user.id, request.params.id, prepare); }
+        catch { return reply.code(409).send({ error: { code: 'JOB_SELECTION_REVALIDATION_REQUIRED', message: '원래 작업 설정을 재검증하지 못했습니다. 삭제·만료된 연결 또는 변경된 Org identity를 확인하세요.' } }); }
+      },
+    });
+  }
+  app.get<{ Params: { operation: 'dry-run' | 'direct'; key: string } }>('/api/v1/deployment-submissions/:operation/:key', {
+    schema: { params: Type.Object({ operation: Type.Union([Type.Literal('dry-run'), Type.Literal('direct')]), key: Type.String({ minLength: 1, maxLength: 200, pattern: '^[A-Za-z0-9._:-]+$' }) }, { additionalProperties: false }), response: { 200: DeploymentSubmissionLookupSchema } },
+  }, async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply);
+    if (session === undefined) return;
+    const found = request.params.operation === 'dry-run'
+      ? await app.sfudRuntime.deploymentJobs.findIdempotentDryRun(session.user.id, request.params.key)
+      : await app.sfudRuntime.deploymentJobs.findIdempotentDirectDeployment(session.user.id, request.params.key);
+    if (found === undefined || !await app.sfudRuntime.jobAccess.canAccess('deployment', found.job.id, session.user.id)) return { state: 'UNCONFIRMED' };
+    return { state: 'FOUND', job: publicJob(app, found.job, false) };
+  });
   app.post<{ Body: CreateDryRunRequest }>('/api/v1/deployments/dry-run', {
     attachValidation: true,
     schema: {
@@ -49,6 +78,8 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
         ...(request.body?.components === undefined ? {} : {
           components: selectedComponents(request.body.components),
         }),
+        ...(request.body?.expectedSourceIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: request.body.expectedSourceIdentityFingerprint }),
+        ...(request.body?.expectedTargetIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: request.body.expectedTargetIdentityFingerprint }),
         sourceId: requiredString(request.body?.sourceId, '배포 소스'),
         targetOrgId: requiredString(request.body?.targetOrgId, '대상 org'),
         testLevel: request.body?.testLevel ?? 'auto',
@@ -67,7 +98,7 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
       return reply.code(conflict ? 409 : userLimited ? 429 : capacityExceeded ? 503 : 400).send({ error: {
         code: conflict ? 'IDEMPOTENCY_CONFLICT'
           : userLimited ? 'REQUEST_USER_LIMIT'
-            : capacityExceeded ? 'REQUEST_CAPACITY_EXCEEDED' : 'INVALID_DRY_RUN_REQUEST',
+            : capacityExceeded ? 'REQUEST_CAPACITY_EXCEEDED' : deploymentFailureCode(error, 'INVALID_DRY_RUN_REQUEST'),
         message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
       } });
     }
@@ -143,6 +174,8 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
         ...(request.body?.components === undefined ? {} : {
           components: selectedComponents(request.body.components),
         }),
+        ...(request.body?.expectedSourceIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: request.body.expectedSourceIdentityFingerprint }),
+        ...(request.body?.expectedTargetIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: request.body.expectedTargetIdentityFingerprint }),
         sourceId: requiredString(request.body?.sourceId, '배포 소스'),
         targetOrgId: requiredString(request.body?.targetOrgId, '대상 org'),
         testLevel: request.body?.testLevel ?? 'auto',
@@ -163,7 +196,7 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
       return reply.code(conflict ? 409 : userLimited ? 429 : capacityExceeded ? 503 : 400).send({ error: {
         code: conflict ? 'IDEMPOTENCY_CONFLICT'
           : userLimited ? 'REQUEST_USER_LIMIT'
-            : capacityExceeded ? 'REQUEST_CAPACITY_EXCEEDED' : 'DIRECT_DEPLOYMENT_DENIED',
+            : capacityExceeded ? 'REQUEST_CAPACITY_EXCEEDED' : deploymentFailureCode(error, 'DIRECT_DEPLOYMENT_DENIED'),
         message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
       } });
     }
@@ -275,8 +308,12 @@ export async function registerDeploymentRoutes(app: FastifyInstance): Promise<vo
 }
 
 function publicJob(app: FastifyInstance, job: DeploymentJob, includeArtifacts: boolean) {
-  const source = job.sourceSnapshot?.source ?? app.sfudRuntime.workspace.publicSource(job.source);
-  const target = app.sfudRuntime.workspace.publicSource(`org:${job.targetAlias}`);
+  const originalSource = job.sourceSnapshot?.source ?? app.sfudRuntime.workspace.publicSource(job.source);
+  const source = job.sourceOrgIdentity === undefined ? originalSource : { ...originalSource,
+    username: job.sourceOrgIdentity.username, maskedOrgId: maskOrgId(job.sourceOrgIdentity.orgId), orgIdentityFingerprint: orgIdentityFingerprint(job.sourceOrgIdentity), environment: 'unknown' as const };
+  const target = { ...app.sfudRuntime.workspace.publicSource(`org:${job.targetAlias}`),
+    ...(job.targetOrgIdentity === undefined ? {} : { username: job.targetOrgIdentity.username, maskedOrgId: maskOrgId(job.targetOrgIdentity.orgId), orgIdentityFingerprint: orgIdentityFingerprint(job.targetOrgIdentity) }),
+    environment: 'unknown' as const };
   const comparison = includeArtifacts && job.comparisonResult !== undefined ? {
     ...job.comparisonResult,
     left: { ...job.comparisonResult.left, displayName: target.label },

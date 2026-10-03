@@ -46,7 +46,7 @@ describe('SQLite 저장소', () => {
     expect(await store.database.get('PRAGMA journal_mode')).toEqual({ journal_mode: 'wal' });
     expect(await store.database.get('PRAGMA busy_timeout')).toEqual({ timeout: 5_000 });
     expect(await store.database.get('SELECT COUNT(*) count FROM schema_migrations'))
-      .toEqual({ count: 46 });
+      .toEqual({ count: 48 });
     expect(await store.database.get<{ dflt_value: string }>(
       "SELECT dflt_value FROM pragma_table_info('salesforce_connections') WHERE name = 'generation'"))
       .toEqual({ dflt_value: '1' });

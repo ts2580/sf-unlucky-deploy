@@ -29,6 +29,8 @@ const DryRunFields = {
   components: Type.Optional(Type.Array(SelectedDeploymentComponentSchema)),
   sourceId: Type.Optional(Type.String({ minLength: 1 })),
   targetOrgId: Type.Optional(Type.String({ minLength: 1 })),
+  expectedTargetIdentityFingerprint: Type.Optional(Type.String({ pattern: '^[a-f0-9]{64}$' })),
+  expectedSourceIdentityFingerprint: Type.Optional(Type.String({ pattern: '^[a-f0-9]{64}$' })),
   testLevel: Type.Optional(RequestedTestLevelSchema),
   tests: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
   waitMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 120 })),
@@ -195,3 +197,9 @@ export type BindDeploymentAttemptRequest = Static<typeof BindDeploymentAttemptRe
 export type DeploymentJobResponse = Static<typeof DeploymentJobSchema>;
 export type DeploymentJobEnvelope = Static<typeof DeploymentJobResponseSchema>;
 export type DeploymentJobListResponse = Static<typeof DeploymentJobListResponseSchema>;
+
+/** Read-only lookup; absence does not prove the original request was never accepted. */
+export const DeploymentSubmissionLookupSchema = Type.Object({
+  state: Type.Union([Type.Literal('FOUND'), Type.Literal('UNCONFIRMED')]),
+  job: Type.Optional(DeploymentJobSchema),
+}, { additionalProperties: false });

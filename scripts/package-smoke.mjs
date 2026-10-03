@@ -54,6 +54,14 @@ try {
 
   const configDirectory = path.join(temporaryDirectory, 'home-config');
   const env = { ...selectedNodeEnvironment(), SFUD_CONFIG_DIR: configDirectory };
+  const setupHelp = await run(executable, ['setup'], temporaryDirectory, env, [2]);
+  if (!setupHelp.includes('대화형')) throw new Error('비대화형 setup 실행 안내가 없습니다.');
+  const doctor = JSON.parse(await run(executable, ['doctor', '--json'], temporaryDirectory, env, [0, 1]));
+  if (doctor.version !== 1 || !Array.isArray(doctor.checks) || doctor.connection?.reachability === 'reachable_from_server') {
+    throw new Error('설치된 doctor JSON 또는 읽기 전용 점검 계약이 일치하지 않습니다.');
+  }
+  try { await access(configDirectory); throw new Error('setup/doctor가 없는 홈 설정을 생성했습니다.'); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
   const configPath = (await run(executable, ['config', 'path'], temporaryDirectory, env)).trim();
   if (configPath !== path.join(configDirectory, 'config.json')) throw new Error('설치된 CLI의 홈 설정 경로가 일치하지 않습니다.');
   await run(executable, ['config', 'init'], temporaryDirectory, env);
@@ -191,7 +199,7 @@ async function sqlite(packageRoot, filename, operation, sql) {
   return JSON.parse(await run(process.execPath, [script, packageRoot, filename, operation, sql], root));
 }
 
-async function run(command, args, cwd, env = selectedNodeEnvironment()) {
+async function run(command, args, cwd, env = selectedNodeEnvironment(), allowedExitCodes = [0]) {
   return await new Promise((resolve, reject) => {
     const shell = process.platform === 'win32' && (command === 'npm' || command === 'npx' || command.endsWith('.cmd'));
     const child = spawn(command, args, { cwd, env, shell, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -201,7 +209,7 @@ async function run(command, args, cwd, env = selectedNodeEnvironment()) {
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.once('error', reject);
-    child.once('close', (code) => code === 0 ? resolve(stdout) : reject(new Error(`${command} ${args.join(' ')} 실패 (${code ?? 'signal'})\n${stderr}`)));
+    child.once('close', (code) => allowedExitCodes.includes(code) ? resolve(stdout) : reject(new Error(`${command} ${args.join(' ')} 실패 (${code ?? 'signal'})\n${stderr}`)));
   });
 }
 

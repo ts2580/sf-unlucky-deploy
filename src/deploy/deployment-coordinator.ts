@@ -1,3 +1,5 @@
+import { deploymentFailureCode } from './deployment-error.js';
+import { redactSensitiveText } from '../salesforce/sf-client.js';
 import { SfudError } from '../core/errors.js';
 import {
   DeploymentJobRepository,
@@ -84,7 +86,7 @@ export class DeploymentCoordinator {
   }
 
   private async recordFailure(jobId: string, error: unknown): Promise<void> {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = redactSensitiveText(error instanceof Error ? error.message : String(error));
     if (error instanceof ReconciliationRequiredError) {
       await this.jobs.transition(jobId, 'RECONCILE_REQUIRED', {
         errorCode: 'EXTERNAL_STATE_UNKNOWN',
@@ -97,9 +99,7 @@ export class DeploymentCoordinator {
       return;
     }
     await this.jobs.transition(jobId, 'FAILED', {
-      errorCode: error instanceof SfudError && error.code === 'ORG_IDENTITY_CHANGED'
-        ? error.code
-        : 'JOB_EXECUTION_FAILED',
+      errorCode: deploymentFailureCode(error, 'JOB_EXECUTION_FAILED'),
       errorMessage: message,
       ...(error instanceof SfudError && error.code === 'DEPLOY_FAILED'
         ? { remoteStatus: 'FAILED' as const }

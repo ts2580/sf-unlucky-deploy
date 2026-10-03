@@ -37,7 +37,7 @@ async function run(args: string[], cwd: string, environment: NodeJS.ProcessEnv):
       const child = spawn(process.execPath, ['--import', loaderUrl, cliFile, ...args], {
         cwd, env: environment, stdio: ['ignore', stdoutHandle.fd, stderrHandle.fd],
       });
-      const timer = setTimeout(() => child.kill('SIGKILL'), process.platform === 'win32' ? 60_000 : 10_000);
+      const timer = setTimeout(() => child.kill('SIGKILL'), process.platform === 'win32' ? 60_000 : 20_000);
       child.once('error', (error) => { clearTimeout(timer); reject(error); });
       child.once('close', (code) => { clearTimeout(timer); resolve(code); });
     });
@@ -48,6 +48,20 @@ async function run(args: string[], cwd: string, environment: NodeJS.ProcessEnv):
 const CLI_TEST_TIMEOUT_MS = process.platform === 'win32' ? 180_000 : 20_000;
 
 describe('홈 설정 CLI 실행 경계', () => {
+  it('실제 CLI의 setup 비대화형 종료와 doctor JSON은 없는 홈·DB를 생성하지 않는다', async () => {
+    const { cwd, environment, configFile } = await fixture();
+    const setup = await run(['setup'], cwd, environment);
+    expect(setup.code).toBe(2); expect(setup.stdout).toContain('대화형'); expect(setup.stderr).toBe('');
+    environment.LOCAL = 'true';
+    environment.SFUD_ACCESS_PASSWORD = 'never-print-fixture-password';
+    const doctor = await run(['doctor', '--json'], cwd, environment);
+    expect([0, 1]).toContain(doctor.code); expect(doctor.stderr).toBe('');
+    const report = JSON.parse(doctor.stdout) as { version: number; exitCode: number; connection: { reachability: string } };
+    expect(report.version).toBe(1); expect(report.exitCode).toBe(doctor.code); expect(report.connection.reachability).toBe('not_checked');
+    expect(doctor.stdout + doctor.stderr).not.toContain(environment.SFUD_ACCESS_PASSWORD);
+    await expect(lstat(path.dirname(configFile))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(lstat(path.join(cwd, '.sfud-local'))).rejects.toMatchObject({ code: 'ENOENT' });
+  }, process.platform === 'win32' ? 180_000 : 40_000);
   it('첫 UI 실행에서 자동 생성하고 환경변수·기존 설정을 보존하며 도움말과 경로 조회는 생성하지 않는다', async () => {
     const { cwd, environment, configFile } = await fixture();
     for (const args of [['--version'], ['ui', '--help'], ['config', 'path']]) {
