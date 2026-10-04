@@ -43,9 +43,18 @@ export class WorkflowEventHub {
 }
 
 export async function registerWorkflowEventRoutes(app: FastifyInstance): Promise<void> {
+  const streams = new Set<() => Promise<void>>();
+  let closing = false;
+  app.addHook('preClose', async () => {
+    closing = true;
+    await Promise.all([...streams].map((close) => close()));
+  });
+
   app.get('/api/v1/workflow/events', async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
+    // Authentication may have been in flight when preClose started.
+    if (closing) { await reply.code(503).send(); return; }
 
     reply.hijack();
     reply.raw.writeHead(200, {
@@ -65,7 +74,12 @@ export async function registerWorkflowEventRoutes(app: FastifyInstance): Promise
       closed = true;
       clearInterval(heartbeat);
       unsubscribe();
+      streams.delete(closeStream);
       reply.raw.end();
+    };
+    const closeStream = async () => {
+      finish();
+      await pending;
     };
     const unsubscribe = app.sfudRuntime.workflowEvents.subscribe((event) => {
       if (closed || reply.raw.destroyed) return;
@@ -87,6 +101,7 @@ export async function registerWorkflowEventRoutes(app: FastifyInstance): Promise
       }).catch(finish);
     }, 15_000);
     heartbeat.unref();
-    request.raw.once('close', finish);
+    streams.add(closeStream);
+    reply.raw.once('close', finish);
   });
 }

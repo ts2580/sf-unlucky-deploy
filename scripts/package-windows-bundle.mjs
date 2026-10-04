@@ -9,7 +9,7 @@ import { WINDOWS_BUNDLE as policy, assertWindowsBundleArchive, assertWindowsX64B
 if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('Windows x64 러너에서 패키징해야 합니다.');
 const [sourceArgument, destinationArgument] = process.argv.slice(2);
 if (!sourceArgument || !destinationArgument || !process.env.SFUD_SMOKE_NPM_CLI) {
-  throw new Error('사용법: SFUD_SMOKE_NPM_CLI=<npm-cli.js> node scripts/package-windows-bundle.mjs <RC3-tarball> <output>');
+  throw new Error(`사용법: SFUD_SMOKE_NPM_CLI=<npm-cli.js> node scripts/package-windows-bundle.mjs <${policy.baseVersion}-tarball> <output>`);
 }
 const source = path.resolve(sourceArgument);
 const destination = path.resolve(destinationArgument);
@@ -18,12 +18,12 @@ const stage = path.join(temporary, 'package');
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const npm = (args, cwd) => run(process.execPath, [process.env.SFUD_SMOKE_NPM_CLI, ...args], cwd);
 try {
-  if (digest(await readFile(source)) !== policy.sourceSha256) throw new Error('RC3 원본 tarball SHA-256 불일치');
+  if (digest(await readFile(source)) !== policy.sourceSha256) throw new Error(`${policy.baseVersion} 원본 tarball SHA-256 불일치`);
   await mkdir(destination, { recursive: true });
   await run('tar', ['-xf', path.basename(source), '-C', temporary], path.dirname(source));
   const packageJson = JSON.parse(await readFile(path.join(stage, 'package.json'), 'utf8'));
-  if (packageJson.name !== policy.name || packageJson.version !== policy.baseVersion) throw new Error('RC3 원본 패키지 식별 오류');
-  // 고정된 RC3 shrinkwrap으로 실행 의존성만 설치한다. native 설치 스크립트는 실행하지 않는다.
+  if (packageJson.name !== policy.name || packageJson.version !== policy.baseVersion) throw new Error(`${policy.baseVersion} 원본 패키지 식별 오류`);
+  // 검증된 원본 shrinkwrap으로 실행 의존성만 설치한다. native 설치 스크립트는 실행하지 않는다.
   await npm(['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], stage);
   const response = await globalThis.fetch(policy.sqliteUrl, { signal: globalThis.AbortSignal.timeout(60_000) });
   if (!response.ok) throw new Error(`SQLite binary 다운로드 실패: ${response.status}`);
@@ -74,7 +74,7 @@ try {
     builderCommit: process.env.GITHUB_SHA ?? null, buildRunId: process.env.GITHUB_RUN_ID ?? null,
     platform: 'win32', arch: 'x64', sqlite: { version: policy.sqliteVersion, archiveUrl: policy.sqliteUrl,
       archiveSha256: policy.sqliteSha256, binarySha256: digest(binary) }, dependencies };
-  const instructions = `# RC3 Windows x64 SQLite 포함 패키지\n\n원본 RC3 실행 코드와 UI를 그대로 사용합니다. 패키지 버전은 ${policy.version}, sfud --version 출력은 ${policy.baseVersion}입니다.\n\nNode.js 22.19.0 이상(x64), Git, Salesforce CLI v2는 별도 설치합니다. Windows ARM64용 패키지가 아닙니다.\n\n## npm 설치\n\n\`npm install -g --ignore-scripts @trstyq/sf-unlucky-deploy@win32-x64\`\n\n## 파일 전달 후 오프라인 설치\n\n\`npm install -g --offline --ignore-scripts ./trstyq-sf-unlucky-deploy-${policy.version}.tgz\`\n\n\`sfud --version\`\n\n\`sfud ui\`\n\nSQLite native binding과 실행 의존성을 포함하므로 설치 중 GitHub 다운로드나 C++ 빌드가 필요하지 않습니다. 일반 RC3와 같은 패키지 이름·sfud 명령을 사용하므로 기존 전역 설치를 대체합니다. 기존 사용자 설정과 데이터는 패키지 밖에 보존됩니다.\n`;
+  const instructions = `# ${policy.baseVersion} Windows x64 SQLite 포함 패키지\n\n원본 ${policy.baseVersion} 실행 코드와 UI를 그대로 사용합니다. 패키지 버전은 ${policy.version}, sfud --version 출력은 ${policy.baseVersion}입니다.\n\nNode.js 22.19.0 이상(x64), Git, Salesforce CLI v2는 별도 설치합니다. Windows ARM64용 패키지가 아닙니다.\n\n## npm 설치\n\n\`npm install -g --ignore-scripts @trstyq/sf-unlucky-deploy@win32-x64\`\n\n## 파일 전달 후 오프라인 설치\n\n\`npm install -g --offline --ignore-scripts ./trstyq-sf-unlucky-deploy-${policy.version}.tgz\`\n\n\`sfud --version\`\n\n\`sfud ui\`\n\nSQLite native binding과 실행 의존성을 포함하므로 설치 중 GitHub 다운로드나 C++ 빌드가 필요하지 않습니다. 일반 ${policy.baseVersion}와 같은 패키지 이름·sfud 명령을 사용하므로 기존 전역 설치를 대체합니다. 기존 사용자 설정과 데이터는 패키지 밖에 보존됩니다.\n`;
   await writeFile(path.join(stage, 'windows-bundle-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   await writeFile(path.join(stage, 'WINDOWS-README.md'), instructions);
   const packed = JSON.parse(await npm(['pack', '--ignore-scripts', '--json', '--pack-destination', destination], stage));
@@ -83,12 +83,13 @@ try {
   assertWindowsBundleArchive(entries);
   const sbom = await npm(['sbom', '--omit=dev', '--sbom-format=cyclonedx', '--sbom-type=application'], stage);
   JSON.parse(sbom);
-  const files = { 'windows-x64-rc3-manifest.json': JSON.stringify(manifest, null, 2) + '\n',
-    'windows-x64-rc3-sbom.cdx.json': sbom, 'windows-x64-rc3-README.md': instructions };
+  const assetPrefix = `windows-x64-${policy.baseVersion}`;
+  const files = { [`${assetPrefix}-manifest.json`]: JSON.stringify(manifest, null, 2) + '\n',
+    [`${assetPrefix}-sbom.cdx.json`]: sbom, [`${assetPrefix}-README.md`]: instructions };
   for (const [name, contents] of Object.entries(files)) await writeFile(path.join(destination, name), contents);
   const checksums = [];
   for (const name of [tarball, ...Object.keys(files)]) checksums.push(`${digest(await readFile(path.join(destination, name)))}  ${name}`);
-  await writeFile(path.join(destination, 'windows-x64-rc3-SHA256SUMS'), checksums.join('\n') + '\n');
+  await writeFile(path.join(destination, `${assetPrefix}-SHA256SUMS`), checksums.join('\n') + '\n');
   console.log(`Windows bundle created: ${tarball} (${dependencies.length} bundled packages)`);
 } finally {
   await rm(temporary, { recursive: true, force: true, maxRetries: 3 });

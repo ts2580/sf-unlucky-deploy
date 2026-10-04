@@ -15,10 +15,18 @@ sf-unlucky-deploy는 Git·로컬 프로젝트·Salesforce Org의 메타데이터
 Node.js **22.19.0 이상**, npm, Salesforce CLI v2(`sf`), Git이 필요하다.
 
 ```bash
-npm install --global --allow-scripts=sqlite3 @trstyq/sf-unlucky-deploy@next
+npm install --global --allow-scripts=sqlite3 @trstyq/sf-unlucky-deploy@latest
 sfud config init
 sfud ui --project "/path/to/salesforce-project"
 ```
+
+Windows x64에서는 SQLite 바이너리를 포함한 번들을 설치할 수 있다.
+
+```powershell
+npm install --global --ignore-scripts @trstyq/sf-unlucky-deploy@win32-x64
+```
+
+정식 일반판은 `latest`, 시험판 일반판은 `next`, Windows 번들은 `win32-x64` 채널을 사용한다. 같은 설치 명령을 다시 실행하면 해당 채널의 버전으로 갱신된다.
 
 `--project`에는 `sfdx-project.json`이 있는 로컬 Salesforce DX 프로젝트 경로를 넣는다. 여러 프로젝트는 옵션을 반복해서 등록하고, Git과 Org만 사용할 때는 생략한다.
 
@@ -31,7 +39,7 @@ sf org login web --alias dev
 sf org login web --alias prod
 ```
 
-팀 서버에서 여러 사용자가 접속할 경우에는 [웹 UI와 서버 운영](./docs/web-ui.md)의 `LOCAL=false` 설정을 따른다.
+팀 서버에서 여러 사용자가 접속할 경우에는 [웹 UI와 서버 운영](https://github.com/ts2580/sf-unlucky-deploy/blob/main/docs/web-ui.md)의 `LOCAL=false` 설정을 따른다.
 
 ### 원격 리눅스에서 혼자 사용하기
 
@@ -45,7 +53,7 @@ LOCAL=true sfud ui --host 0.0.0.0 --allow-remote --no-open
 
 PC 브라우저에서 `http://서버주소:27546`을 열고 접속 비밀번호만 입력한다. 앱 계정 생성이나 사용자 관리는 필요 없다.
 비밀번호 없이 원격 주소로 시작하면 오류로 중단한다. 같은 PC에서 사용하는 기존 개인용은 로그인 없이 그대로 동작한다.
-인터넷에 공개할 때는 [HTTPS 프록시 설정](./docs/web-ui.md)을 사용한다.
+인터넷에 공개할 때는 [HTTPS 프록시 설정](https://github.com/ts2580/sf-unlucky-deploy/blob/main/docs/web-ui.md)을 사용한다.
 Salesforce **새 연결**의 브라우저 OAuth 콜백은 별도 SSH 포트 전달이 필요하다. 이미 서버 CLI에 로그인한 Org는 바로 사용한다.
 
 ## Git과 로컬 프로젝트 비교하기
@@ -58,7 +66,7 @@ Git 토큰을 저장하려면 먼저 `sfud config path`에 표시되는 설정 �
 node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 ```
 
-**인증 관리 → Git**에서 **저장소 하나 연결**을 선택하고 제공자, 저장소 Git URL, 읽기 권한이 있는 PAT/API Token을 입력한다. GitHub·GitLab·Bitbucket을 지원한다. 제공자별 토큰 설정과 공개 저장소 가져오기는 [Git 연결 안내](./docs/git-integration.md)를 참고한다.
+**인증 관리 → Git**에서 **저장소 하나 연결**을 선택하고 제공자, 저장소 Git URL, 읽기 권한이 있는 PAT/API Token을 입력한다. GitHub·GitLab·Bitbucket을 지원한다. 제공자별 토큰 설정과 공개 저장소 가져오기는 [Git 연결 안내](https://github.com/ts2580/sf-unlucky-deploy/blob/main/docs/git-integration.md)를 참고한다.
 
 ### 2. 비교 대상과 범위 선택
 
@@ -115,8 +123,8 @@ CLI 비교는 `left → right` 기준으로 `ADDED`(오른쪽에만 존재), `RE
 
 ## 상세 문서
 
-- [설치와 설정](./docs/configuration.md): 홈 설정, 비밀값, 실행 모드, 패키지 설치
-- [Git 연결과 가져오기](./docs/git-integration.md): 토큰, 등록 브랜치, 동기화, 문제 해결
-- [CLI 비교와 배포](./docs/cli-usage.md): 비교 범위, 리포트, Apex 테스트, manifest
-- [웹 UI와 서버 운영](./docs/web-ui.md): 사용자·권한, Salesforce 인증, 데이터 보관
-- [개발과 릴리스](./CONTRIBUTING.md): 소스 실행, 테스트, CI, 배포 절차
+- [설치와 설정](https://github.com/ts2580/sf-unlucky-deploy/blob/main/docs/configuration.md): 홈 설정, 비밀값, 실행 모드, 패키지 설치
+- [Git 연결과 가져오기](https://github.com/ts2580/sf-unlucky-deploy/blob/main/docs/git-integration.md): 토큰, 등록 브랜치, 동기화, 문제 해결
+- [CLI 비교와 배포](https://github.com/ts2580/sf-unlucky-deploy/blob/main/docs/cli-usage.md): 비교 범위, 리포트, Apex 테스트, manifest
+- [웹 UI와 서버 운영](https://github.com/ts2580/sf-unlucky-deploy/blob/main/docs/web-ui.md): 사용자·권한, Salesforce 인증, 데이터 보관
+- [개발과 릴리스](https://github.com/ts2580/sf-unlucky-deploy/blob/main/CONTRIBUTING.md): 소스 실행, 테스트, CI, 배포 절차

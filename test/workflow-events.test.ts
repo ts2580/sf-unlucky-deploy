@@ -12,6 +12,45 @@ afterEach(async () => {
 });
 
 describe('작업 현황 SSE', () => {
+  it('브라우저가 상태 스트림을 열어 둔 상태에서도 서버 종료를 완료한다', async () => {
+    const server = await createWebServer({
+      host: '127.0.0.1', port: 0,
+      assetsDirectory: '/missing', databasePath: ':memory:',
+      bootstrapToken: 'workflow-shutdown-bootstrap-token',
+    });
+    servers.push(server);
+    const bootstrap = await server.inject({
+      method: 'POST', url: '/api/v1/auth/bootstrap',
+      payload: {
+        bootstrapToken: 'workflow-shutdown-bootstrap-token', email: 'shutdown@example.com',
+        displayName: '종료 검사', password: 'workflow shutdown password',
+      },
+    });
+    const cookie = (bootstrap.headers['set-cookie'] as string[])
+      .map((value) => value.split(';')[0]).join('; ');
+    const address = await server.listen({ host: '127.0.0.1', port: 0 });
+    const controller = new AbortController();
+    const response = await fetch(`${address}/api/v1/workflow/events`, { headers: { cookie }, signal: controller.signal });
+    const reader = response.body!.getReader();
+    let closing: Promise<void> | undefined;
+    try {
+      expect(response.status).toBe(200);
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain('event: ready');
+      expect(server.sfudRuntime.workflowEvents.subscriberCount()).toBe(1);
+      closing = server.close();
+      await expect(Promise.race([
+        closing.then(() => 'closed'),
+        delay(2_000).then(() => 'timeout'),
+      ])).resolves.toBe('closed');
+      expect(server.sfudRuntime.workflowEvents.subscriberCount()).toBe(0);
+      expect((await reader.read()).done).toBe(true);
+    } finally {
+      controller.abort();
+      await reader.cancel().catch(() => undefined);
+      await closing;
+    }
+  });
+
   it('구독자에게 순번이 있는 작업 상태 변경을 전달한다', () => {
     const hub = new WorkflowEventHub();
     const received: unknown[] = [];
@@ -96,5 +135,6 @@ describe('작업 현황 SSE', () => {
 
     controller.abort();
     await reader.cancel().catch(() => undefined);
+    await expect.poll(() => server.sfudRuntime.workflowEvents.subscriberCount()).toBe(0);
   });
 });

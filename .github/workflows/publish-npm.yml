@@ -74,8 +74,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
+          tarball="trstyq-sf-unlucky-deploy-${INPUT_TAG#v}.tgz"
           gh release download "${INPUT_TAG}" --repo "${REPOSITORY}" --dir release \
-            --pattern 'trstyq-sf-unlucky-deploy-*.tgz' \
+            --pattern "${tarball}" \
             --pattern 'sbom.cdx.json' \
             --pattern 'SHA256SUMS' \
             --pattern 'release-manifest.json'
@@ -89,7 +90,7 @@ jobs:
           test "$(jq -r '.head_sha' <<<"${source_run}")" = "${GITHUB_SHA}"
           node scripts/release-manifest.mjs verify "${INPUT_TAG}" "${GITHUB_SHA}" "${source_run_id}" release
           npm run release:check -- "${INPUT_TAG}"
-          node scripts/package-smoke.mjs ./release/trstyq-sf-unlucky-deploy-*.tgz
+          node scripts/package-smoke.mjs "./release/${tarball}"
 
       - name: npm OIDC publish or exact-artifact retry check
         env:
@@ -97,4 +98,4 @@ jobs:
           GITHUB_SHA: ${{ github.sha }}
           RELEASE_SOURCE_SHA: ${{ github.sha }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-        run: node scripts/publish-npm.mjs ./release/trstyq-sf-unlucky-deploy-*.tgz "${RELEASE_TAG}"
+        run: node scripts/publish-npm.mjs "./release/trstyq-sf-unlucky-deploy-${RELEASE_TAG#v}.tgz" "${RELEASE_TAG}"
