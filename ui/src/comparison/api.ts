@@ -1,3 +1,4 @@
+import type { WorkspaceSource } from '../../../src/api/workspace-contracts';
 import { apiRequest } from '../api-client';
 import type { ComparisonFileDifference } from '../ComparisonFileDiff';
 
@@ -5,19 +6,22 @@ export interface ComparisonComponent {
   key: string;
   type: string;
   fullName: string;
-  status: 'ADDED' | 'REMOVED' | 'MODIFIED' | 'IDENTICAL';
+  status: 'ADDED' | 'REMOVED' | 'MODIFIED' | 'IDENTICAL' | 'SOURCE';
   files: ComparisonFileDifference[];
 }
 
 export interface ComparisonJobResponse {
+  excludedPackageIds?: string[];
+  excludePackageMetadata?: boolean;
+  comparisonLimit?: { maximumFiles: number; fileCount: number; exceeded: boolean };
   id: string;
   mode?: 'compare' | 'source';
   status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
   scope?: 'all' | 'manifest';
   metadataType?: string;
   manifest: string;
-  left: { id: string; kind: 'org' | 'local'; label: string };
-  right: { id: string; kind: 'org' | 'local'; label: string };
+  left: WorkspaceSource;
+  right: WorkspaceSource;
   errorMessage?: string;
   createdAt?: string;
   startedAt?: string;
@@ -25,6 +29,7 @@ export interface ComparisonJobResponse {
   completedAt?: string;
   summary?: ComparisonSummary;
   result?: {
+    comparisonLimit?: { maximumFiles: number; fileCount: number; exceeded: boolean };
     summary: ComparisonSummary;
     warnings: string[];
     components: ComparisonComponent[];
@@ -41,6 +46,8 @@ interface ComparisonSummary {
 }
 
 export interface CreateComparisonRequest {
+  excludedPackageIds?: string[];
+  excludePackageMetadata?: boolean;
   scope: 'all';
   metadataType: string;
   leftSourceId?: string;
@@ -57,8 +64,9 @@ export function listComparisonJobs(signal?: AbortSignal): Promise<{ jobs: Compar
 export function getComparisonJob(
   id: string,
   signal?: AbortSignal,
+  includeIdentical = false,
 ): Promise<{ job: ComparisonJobResponse }> {
-  return apiRequest(`/api/v1/comparisons/${encodeURIComponent(id)}`, { signal });
+  return apiRequest(`/api/v1/comparisons/${encodeURIComponent(id)}${includeIdentical ? '?includeIdentical=true' : ''}`, { signal });
 }
 
 export function startComparison(

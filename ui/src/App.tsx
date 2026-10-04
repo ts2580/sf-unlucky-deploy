@@ -1,4 +1,6 @@
-import { useEffect, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
+import { JobResume } from './deployment/JobResume';
+import type { WorkspaceResponse } from '../../src/api/workspace-contracts';
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 import type { DeploymentJobResponse } from '../../src/api/deployment-contracts';
 import type {
@@ -19,34 +21,18 @@ import { listDeploymentJobs } from './deployment/api';
 import { DeploymentPage } from './deployment/DeploymentPage';
 import { Icon, type IconName } from './components/Icon';
 import { PageIntro } from './components/PageIntro';
+import { GitSettings } from './git/GitSettings';
+import { GitAllowedIps } from './git/GitAllowedIps';
+import { SalesforceConnections } from './auth/SalesforceConnections';
 
 type HealthResponse = PublicHealthResponse
   & Partial<Omit<DiagnosticsResponse, keyof PublicHealthResponse>>;
 
-interface WorkspaceSource {
-  id: string;
-  kind: 'org' | 'local';
-  location?: 'org' | 'server' | 'upload';
-  label: string;
-  detail: string;
-  username?: string;
-  maskedOrgId?: string;
-  expiresAt?: string;
-}
 
-interface WorkspaceProject {
-  id: string;
-  displayName: string;
-  manifests: string[];
-}
 
-interface WorkspaceResponse {
-  sources: WorkspaceSource[];
-  projects: WorkspaceProject[];
-  uploads?: WorkspaceProject[];
-}
 
 interface UserSettings {
+  maximumComparisonFiles: number;
   testClassSuffix: string;
 }
 
@@ -58,17 +44,19 @@ interface DashboardRun {
   source: string;
   target: string;
   summary: string;
+  statusLabel: string;
   time: string;
   tone: string;
   createdAt: string;
 }
 
-type PageKey = 'home' | 'deploy' | 'runs' | 'settings' | 'admin';
+type PageKey = 'home' | 'deploy' | 'runs' | 'auth' | 'settings' | 'admin';
 
 const pageMeta: Record<PageKey, { eyebrow: string; title: string }> = {
   home: { eyebrow: 'METADATA WORKSPACE', title: '배포 대시보드' },
   deploy: { eyebrow: 'COMPARE & DEPLOY', title: '비교 및 배포' },
   runs: { eyebrow: 'RUN HISTORY', title: '실행 기록' },
+  auth: { eyebrow: 'CONNECTIONS', title: '인증 관리' },
   settings: { eyebrow: 'SERVER CONFIGURATION', title: '설정' },
   admin: { eyebrow: 'ACCESS CONTROL', title: '사용자 관리' },
 };
@@ -77,6 +65,7 @@ const navigation: Array<{ icon: IconName; label: string; page: PageKey; href: st
   { icon: 'home', label: '홈', page: 'home', href: '/' },
   { icon: 'deploy', label: '비교 및 배포', page: 'deploy', href: '/deploy' },
   { icon: 'history', label: '실행 기록', page: 'runs', href: '/runs' },
+  { icon: 'key', label: '인증 관리', page: 'auth', href: '/auth' },
 ];
 
 export function App() {
@@ -87,6 +76,8 @@ export function App() {
   const [dashboardWorkspace, setDashboardWorkspace] = useState<WorkspaceResponse | null>(null);
   const [recentComparisons, setRecentComparisons] = useState<ComparisonJobResponse[]>([]);
   const [recentDeployments, setRecentDeployments] = useState<DryRunJobResponse[]>([]);
+  const activeUser = useRef<string | undefined>(undefined);
+  activeUser.current = auth?.authenticated ? auth.user?.id : undefined;
   const currentPage = getCurrentPage();
   const currentMeta = pageMeta[currentPage];
   const remoteAccess = health?.host !== undefined
@@ -128,7 +119,10 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const handleUnauthorized = () => setAuth({ setupRequired: false, authenticated: false });
+    const handleUnauthorized = () => {
+      setDashboardWorkspace(null); setRecentComparisons([]); setRecentDeployments([]);
+      setAuth((current) => ({ ...current, user: undefined, setupRequired: false, authenticated: false }));
+    };
     window.addEventListener('sfud:unauthorized', handleUnauthorized);
     return () => window.removeEventListener('sfud:unauthorized', handleUnauthorized);
   }, []);
@@ -140,27 +134,27 @@ export function App() {
   useEffect(() => {
     if (auth?.authenticated !== true) return;
     const controller = new AbortController();
+    const requestedUser = auth.user?.id;
     void Promise.all([
       apiRequest<WorkspaceResponse>('/api/v1/workspace', { signal: controller.signal })
-        .then(setDashboardWorkspace),
+        .then((response) => { if (!controller.signal.aborted && activeUser.current === requestedUser) setDashboardWorkspace(response); }),
       listComparisonJobs(controller.signal)
-        .then((response) => setRecentComparisons(response.jobs)),
+        .then((response) => { if (!controller.signal.aborted && activeUser.current === requestedUser) setRecentComparisons(response.jobs); }),
       listDeploymentJobs(controller.signal)
-        .then((response) => setRecentDeployments(response.jobs)),
+        .then((response) => { if (!controller.signal.aborted && activeUser.current === requestedUser) setRecentDeployments(response.jobs); }),
     ]).catch(() => undefined);
     return () => controller.abort();
-  }, [auth?.authenticated]);
+  }, [auth?.authenticated, auth?.user?.id]);
 
   if (auth === null) {
     return <AuthLoading failed={authFailed} />;
   }
 
   if (!auth.authenticated || auth.user === undefined) {
-    return <AuthScreen setupRequired={auth.setupRequired} onAuthenticated={(user) => setAuth({
-      setupRequired: false,
-      authenticated: true,
-      user,
-    })} />;
+    return <AuthScreen setupRequired={auth.setupRequired} personalAccess={auth.localMode === true && auth.passwordRequired === true} onAuthenticated={(user) => {
+      setDashboardWorkspace(null); setRecentComparisons([]); setRecentDeployments([]);
+      setAuth({ ...auth, setupRequired: false, authenticated: true, user });
+    }} />;
   }
 
   const recentRuns = [
@@ -170,13 +164,14 @@ export function App() {
   const connectedOrgCount = dashboardWorkspace?.sources.filter((source) => source.kind === 'org').length ?? 0;
   const projectCount = dashboardWorkspace?.projects.length ?? 0;
   const latestRun = recentRuns[0];
-  const visibleNavigation = auth.user.role === 'ADMIN'
+  const visibleNavigation = auth.user.role === 'ADMIN' && !auth.localMode
     ? [...navigation, { icon: 'user' as const, label: '사용자 관리', page: 'admin' as const, href: '/admin' }]
     : navigation;
 
   const logout = async () => {
     await logoutSession();
-    setAuth({ setupRequired: false, authenticated: false });
+    setDashboardWorkspace(null); setRecentComparisons([]); setRecentDeployments([]);
+    setAuth({ ...auth, user: undefined, setupRequired: false, authenticated: false });
   };
 
   return (
@@ -230,20 +225,19 @@ export function App() {
             />
             <StatusPill label={dashboardWorkspace === null ? 'Salesforce CLI 확인 중' : 'Salesforce CLI 연결됨'} state={dashboardWorkspace === null ? 'pending' : 'online'} />
             <div className="org-count"><Icon name="cloud" /><strong>{connectedOrgCount}</strong><span>ORG</span></div>
-            <div className="account-menu" title={auth.user.email}>
+            <div className={`account-menu${auth.localMode && !auth.passwordRequired ? ' account-menu-local' : ''}`} title={auth.user.email}>
               <span><Icon name="user" /></span>
               <div><strong>{auth.user.displayName}</strong><small>{auth.user.role}</small></div>
-              <button type="button" onClick={() => void logout()} aria-label="로그아웃"><Icon name="logout" /></button>
+              {(!auth.localMode || auth.passwordRequired) && <button type="button" onClick={() => void logout()} aria-label="로그아웃"><Icon name="logout" /></button>}
             </div>
           </div>
         </header>
 
         <main id="main" className="content">
           {currentPage === 'home' && <>
-          <section className="hero" aria-labelledby="hero-title">
+          <section className="hero" aria-label="SAFE BY DEFAULT">
             <div className="hero-copy">
               <p className="eyebrow text-blue-700">SAFE BY DEFAULT</p>
-              <h2 id="hero-title">변경을 먼저 확인하고,<br />확신이 들 때 배포하세요.</h2>
               <div className="hero-actions">
                 <a className="button button-primary" href="/deploy">
                   <Icon name="compare" />비교 및 배포 시작<Icon name="arrow" />
@@ -325,8 +319,12 @@ export function App() {
             <button type="button" aria-label="안전 정책 자세히 보기"><Icon name="chevron" /></button>
           </section>
           </>}
-          {currentPage === 'deploy' && <DeploymentPage user={auth.user} />}
+          {currentPage === 'deploy' && (new URLSearchParams(window.location.search).get('job')
+            ? <JobResume key={`${auth.user.id}-${window.location.search}`} user={auth.user} jobId={new URLSearchParams(window.location.search).get('job')!} resource={new URLSearchParams(window.location.search).get('resource') === 'comparison' ? 'comparison' : 'deployment'} />
+            : <DeploymentPage key={auth.user.id} user={auth.user} />)}
           {currentPage === 'runs' && <RunsPage runs={recentRuns} comparisons={recentComparisons} deployments={recentDeployments} />}
+          {['auth', 'settings'].includes(currentPage) && /^\/deploy\?(?:draft|restoreTab|job)=[a-zA-Z0-9-]+$/u.test(new URLSearchParams(window.location.search).get('return') ?? '') && <a className="button button-secondary" href={new URLSearchParams(window.location.search).get('return')!}>배포 선택으로 돌아가기</a>}
+          {currentPage === 'auth' && <div className="page-stack"><PageIntro kicker="CONNECTIONS" title="Salesforce와 Git 인증을 관리합니다." /><div className="settings-grid"><SalesforceConnections /><GitSettings key={auth.user.id} user={auth.user} section="connections" /></div></div>}
           {currentPage === 'settings' && <SettingsPage user={auth.user} health={health} remoteAccess={remoteAccess} workspace={dashboardWorkspace} />}
           {currentPage === 'admin' && (auth.user.role === 'ADMIN'
             ? <AdminPage currentUser={auth.user} />
@@ -343,6 +341,7 @@ function getCurrentPage(): PageKey {
     '/compare': 'deploy',
     '/deploy': 'deploy',
     '/runs': 'runs',
+    '/auth': 'auth',
     '/settings': 'settings',
     '/admin': 'admin',
   };
@@ -350,6 +349,11 @@ function getCurrentPage(): PageKey {
 }
 
 function RunsPage({ runs, comparisons, deployments }: { runs: DashboardRun[]; comparisons: ComparisonJobResponse[]; deployments: DryRunJobResponse[] }) {
+  const [filter, setFilter] = useState<'all' | 'comparison' | 'dry-run' | 'deployment'>('all');
+  const visibleRuns = runs.filter((run) => filter === 'all'
+    || (filter === 'comparison' && run.kind === '비교')
+    || (filter === 'dry-run' && run.kind === 'DRY-RUN')
+    || (filter === 'deployment' && run.kind === '배포'));
   const succeeded = comparisons.filter((job) => job.status === 'SUCCEEDED').length
     + deployments.filter((job) => ['APPROVAL_PENDING', 'SUCCEEDED'].includes(job.status)).length;
   return (
@@ -367,9 +371,19 @@ function RunsPage({ runs, comparisons, deployments }: { runs: DashboardRun[]; co
       <section className="history-panel" aria-labelledby="history-heading">
         <div className="history-toolbar">
           <div><h2 id="history-heading">모든 실행</h2></div>
-          <div className="filter-row"><button className="filter-active" type="button">전체</button><button type="button">비교</button><button type="button">Dry-run</button><button type="button">실제 배포</button></div>
+          <div className="filter-row" aria-label="실행 종류 필터">
+            {([['all', '전체'], ['comparison', '비교'], ['dry-run', 'Dry-run'], ['deployment', '실제 배포']] as const).map(([value, label]) =>
+              <button className={filter === value ? 'filter-active' : ''} aria-pressed={filter === value} type="button" key={value} onClick={() => setFilter(value)}>{label}</button>)}
+          </div>
         </div>
-        <div className="runs-list runs-list-flat">{runs.length === 0 ? <p className="empty-runs">아직 저장된 실행이 없습니다.</p> : runs.map((run) => <RunRow key={run.id} {...run} />)}</div>
+        {visibleRuns.length === 0 ? <p className="empty-runs">{runs.length === 0 ? '아직 저장된 실행이 없습니다.' : '선택한 종류의 실행이 없습니다.'}</p>
+          : <div className="connection-table-scroll runs-table-scroll" role="region" aria-label="실행 기록 표 영역" tabIndex={0}><table className="connection-table runs-table" aria-label="실행 기록"><thead><tr><th scope="col">종류</th><th scope="col">대상</th><th scope="col">상태</th><th scope="col">시간</th><th scope="col">요약</th></tr></thead><tbody>{visibleRuns.map((run) => <tr key={run.id}>
+            <th scope="row"><span className={`tag tag-${run.tone}`}>{run.kind}</span></th>
+            <td><div className="connection-cell-content"><a href={`/deploy?resource=${run.kind === '비교' ? 'comparison' : 'deployment'}&job=${encodeURIComponent(run.id)}`}>{run.source} → {run.target}</a></div></td>
+            <td><span className={`connection-state ${run.tone === 'green' ? 'connection-state-ready' : run.tone === 'amber' ? 'connection-state-warning' : 'connection-state-pending'}`}>{run.statusLabel}</span></td>
+            <td><time dateTime={run.createdAt}>{run.time}</time></td>
+            <td>{run.summary}</td>
+          </tr>)}</tbody></table></div>}
       </section>
     </div>
   );
@@ -379,29 +393,21 @@ function SettingsPage({
   user,
   health,
   remoteAccess,
-  workspace: initialWorkspace,
+  workspace,
 }: {
   user: ApiUser;
   health: HealthResponse | null;
   remoteAccess: boolean;
   workspace: WorkspaceResponse | null;
 }) {
-  const [workspace, setWorkspace] = useState(initialWorkspace);
-  const [uploading, setUploading] = useState(false);
-  const [uploadMessage, setUploadMessage] = useState('');
   const [testClassSuffix, setTestClassSuffix] = useState('_Test');
+  const [maximumComparisonFiles, setMaximumComparisonFiles] = useState('2000');
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState('');
   const [settingsError, setSettingsError] = useState('');
-  const canUpload = ['OPERATOR', 'DEPLOYER', 'ADMIN'].includes(user.role);
   const canEditSettings = ['OPERATOR', 'DEPLOYER', 'ADMIN'].includes(user.role);
-  const orgs = workspace?.sources.filter((source) => source.kind === 'org') ?? [];
-  const uploadedSources = workspace?.sources.filter((source) => source.location === 'upload') ?? [];
-
-  useEffect(() => {
-    setWorkspace(initialWorkspace);
-  }, [initialWorkspace]);
+  const serverProjects = workspace?.projects.filter((project) => !project.id.startsWith('git:') && !project.id.startsWith('upload:')) ?? [];
 
   useEffect(() => {
     const controller = new AbortController();
@@ -409,6 +415,7 @@ function SettingsPage({
     apiRequest<{ settings: UserSettings }>('/api/v1/settings', { signal: controller.signal })
       .then((data) => {
         setTestClassSuffix(data.settings.testClassSuffix);
+        setMaximumComparisonFiles(String(data.settings.maximumComparisonFiles ?? 2000));
       })
       .catch((caught: unknown) => {
         if (caught instanceof DOMException && caught.name === 'AbortError') return;
@@ -428,10 +435,11 @@ function SettingsPage({
       const data = await apiRequest<{ settings: UserSettings }, UserSettings>('/api/v1/settings', {
         method: 'PUT',
         csrf: true,
-        body: { testClassSuffix },
+        body: { testClassSuffix, maximumComparisonFiles: Number(maximumComparisonFiles) },
       });
       setTestClassSuffix(data.settings.testClassSuffix);
-      setSettingsMessage(`테스트 클래스 접미사를 ${data.settings.testClassSuffix}(으)로 저장했습니다.`);
+      setMaximumComparisonFiles(String(data.settings.maximumComparisonFiles ?? 2000));
+      setSettingsMessage(`테스트 클래스 접미사를 ${data.settings.testClassSuffix}(으)로 저장했습니다. 최대 비교 파일 수 ${data.settings.maximumComparisonFiles.toLocaleString('ko-KR')}개를 저장했습니다.`);
     } catch (caught) {
       setSettingsError(caught instanceof Error ? caught.message : '배포 설정을 저장하지 못했습니다.');
     } finally {
@@ -439,53 +447,14 @@ function SettingsPage({
     }
   };
 
-  const uploadProject = async (event: ChangeEvent<HTMLInputElement>) => {
-    const input = event.currentTarget;
-    const selectedFiles = [...(input.files ?? [])];
-    input.value = '';
-    if (selectedFiles.length === 0) return;
-    const uploadableFiles = selectedFiles.filter((file) => isUploadableProjectFile(
-      file.webkitRelativePath || file.name,
-    ));
-    if (uploadableFiles.length === 0) {
-      setUploadMessage('업로드할 수 있는 프로젝트 파일이 없습니다. .git, node_modules와 비밀키 파일은 제외됩니다.');
-      return;
-    }
-    setUploading(true);
-    setUploadMessage('');
-    try {
-      const form = new FormData();
-      const firstPath = uploadableFiles[0]!.webkitRelativePath;
-      form.append('label', firstPath.length > 0 ? firstPath.split('/')[0]! : '업로드 프로젝트');
-      for (const file of uploadableFiles) {
-        form.append('files', file, file.webkitRelativePath || file.name);
-      }
-      const data = await apiRequest<{ source: WorkspaceSource }, FormData>('/api/v1/uploads/projects', {
-        method: 'POST',
-        csrf: true,
-        body: form,
-      });
-      setWorkspace((current) => current === null ? current : {
-        ...current,
-        sources: [...current.sources.filter((entry) => entry.id !== data.source!.id), data.source!],
-      });
-      const skipped = selectedFiles.length - uploadableFiles.length;
-      setUploadMessage(`${data.source.label} 업로드 완료${skipped > 0 ? ` · 제외된 파일 ${skipped}개` : ''}`);
-    } catch (caught) {
-      setUploadMessage(caught instanceof Error ? caught.message : '프로젝트를 업로드하지 못했습니다.');
-    } finally {
-      setUploading(false);
-    }
-  };
-
   return (
     <div className="page-stack">
       <PageIntro
         kicker="SERVER CONFIGURATION"
-        title="연결과 프로젝트 소스를 관리합니다."
+        title="서버 설정과 프로젝트 소스를 관리합니다."
       />
       <div className="settings-grid">
-        <section className="workflow-panel" aria-labelledby="server-heading">
+        <section className="workflow-panel settings-server-panel" aria-labelledby="server-heading">
           <div className="panel-heading"><span className="card-icon icon-green"><Icon name="activity" /></span><div><h2 id="server-heading">UI 서버</h2></div><StatusPill label="실행 중" state="online" /></div>
           <dl className="settings-list">
             <div><dt>주소</dt><dd>{health?.host ?? '확인 중'}</dd></div>
@@ -497,53 +466,31 @@ function SettingsPage({
             <div><dt>원격 접근</dt><dd className={remoteAccess ? 'warning-text' : ''}>{remoteAccess ? '허용됨' : '차단됨'}</dd></div>
           </dl>
         </section>
-        <section className="workflow-panel" aria-labelledby="cli-heading">
-          <div className="panel-heading"><span className="card-icon icon-blue"><Icon name="cloud" /></span><div><h2 id="cli-heading">Salesforce CLI</h2></div><StatusPill label="연결됨" state="online" /></div>
-          <div className="connection-card"><div className="avatar-stack large"><span>SF</span><i /></div><div><strong>{orgs.length}개 org 사용 가능</strong><p>{orgs.map((org) => org.label).join(' · ') || '연결 확인 중'}</p></div><button type="button" onClick={() => window.location.reload()}><Icon name="refresh" />새로고침</button></div>
-        </section>
         <section className="workflow-panel settings-wide" aria-labelledby="deployment-settings-heading">
-          <div className="panel-heading"><span className="card-icon icon-violet"><Icon name="deploy" /></span><div><h2 id="deployment-settings-heading">배포 테스트 규칙</h2></div></div>
+          <div className="panel-heading"><span className="card-icon icon-violet"><Icon name="deploy" /></span><div><h2 id="deployment-settings-heading">비교 및 배포 설정</h2></div></div>
           <form className="settings-form" onSubmit={(event) => void saveSettings(event)}>
             <label><span>테스트 클래스 접미사</span><input value={testClassSuffix} onChange={(event) => setTestClassSuffix(event.target.value)} placeholder="_Test" disabled={!canEditSettings || settingsLoading || settingsSaving} maxLength={40} aria-describedby="test-class-suffix-help" /></label>
-            <button className={`button button-primary${settingsSaving ? ' button-busy' : ''}`} type="submit" disabled={!canEditSettings || settingsLoading || settingsSaving || testClassSuffix.trim().length === 0}><Icon name={settingsSaving ? 'refresh' : 'check'} />{settingsSaving ? '저장 중……' : '접미사 저장'}</button>
+            <label><span>최대 비교 파일 수</span><input type="number" min={1} max={50000} step={1} required value={maximumComparisonFiles} onChange={(event) => setMaximumComparisonFiles(event.target.value)} disabled={!canEditSettings || settingsLoading || settingsSaving} aria-describedby="comparison-file-limit-help" /></label>
+            <button className={`button button-primary${settingsSaving ? ' button-busy' : ''}`} type="submit" disabled={!canEditSettings || settingsLoading || settingsSaving || testClassSuffix.trim().length === 0}><Icon name={settingsSaving ? 'refresh' : 'check'} />{settingsSaving ? '저장 중……' : '설정 저장'}</button>
+            <p id="comparison-file-limit-help">내 계정에 적용됩니다. 1~50,000개까지 설정할 수 있습니다. 양쪽의 같은 상대 경로는 한 번만 세고 메타데이터 보조 파일도 포함합니다. 초과하면 비교 없이 Source 목록만 표시하며, Salesforce org에 Dry-run과 배포는 계속할 수 있습니다. 저장 후 메타데이터를 다시 불러오세요.</p>
             <p id="test-class-suffix-help"><Icon name="shield" /><span>예: <code>_Test</code>를 지정하면 <code>AccountService_Test.cls</code>를 자동 선택합니다. 영문자, 숫자, 밑줄만 사용할 수 있습니다.</span></p>
           </form>
-          {settingsMessage && <p className="upload-message" role="status">{settingsMessage}</p>}
-          {settingsError && <p className="upload-message settings-error" role="alert">{settingsError}</p>}
-          {!canEditSettings && <p className="upload-message">VIEWER 역할은 배포 테스트 규칙을 변경할 수 없습니다.</p>}
+          {settingsMessage && <p className="settings-message" role="status">{settingsMessage}</p>}
+          {settingsError && <p className="settings-message settings-error" role="alert">{settingsError}</p>}
+          {!canEditSettings && <p className="settings-message">VIEWER 역할은 비교 및 배포 설정을 변경할 수 없습니다.</p>}
         </section>
         <section className="workflow-panel settings-wide" aria-labelledby="project-heading">
           <div className="panel-heading"><span className="card-icon icon-violet"><Icon name="folder" /></span><div><h2 id="project-heading">명시적으로 등록된 서버 프로젝트</h2></div></div>
           {workspace === null
             ? <p className="empty-runs">프로젝트 확인 중입니다.</p>
-            : workspace.projects.length === 0
+            : serverProjects.length === 0
               ? <p className="empty-runs">등록된 서버 프로젝트가 없습니다. 서버 시작 시 <code>--project</code>를 지정하세요.</p>
-              : workspace.projects.map((project) => <div className="project-row" key={project.id}><span className="project-logo"><Icon name="code" /></span><div><strong>{project.displayName}</strong><code>Manifest {project.manifests.length}개</code></div><span className="tag tag-green">SERVER</span><span aria-hidden="true"><Icon name="chevron" /></span></div>)}
+              : <div className="connection-table-scroll" role="region" aria-label="서버 프로젝트 표 영역" tabIndex={0}><table className="connection-table server-project-table" aria-label="명시적으로 등록된 서버 프로젝트"><thead><tr><th scope="col">프로젝트</th><th scope="col">Manifest</th><th scope="col">유형</th></tr></thead><tbody>{serverProjects.map((project) => <tr key={project.id}>
+                <th scope="row"><div className="connection-cell-content"><strong>{project.displayName}</strong></div></th><td>{project.manifests.length}개</td><td><span className="tag tag-green">SERVER</span></td>
+              </tr>)}</tbody></table></div>}
         </section>
-        <section className="workflow-panel settings-wide" aria-labelledby="upload-project-heading">
-          <div className="panel-heading">
-            <span className="card-icon icon-blue"><Icon name="plus" /></span>
-            <div><h2 id="upload-project-heading">내 단말기 프로젝트</h2></div>
-            <label className={`small-button upload-button${uploading ? ' upload-button-busy' : ''}`}>
-              <Icon name={uploading ? 'refresh' : 'plus'} />{uploading ? '업로드 중……' : 'DX 프로젝트 업로드'}
-              <input
-                type="file"
-                multiple
-                disabled={!canUpload || uploading || workspace === null}
-                onChange={(event) => void uploadProject(event)}
-                {...{ webkitdirectory: '' }}
-              />
-            </label>
-          </div>
-          <div className="upload-policy"><Icon name="shield" /><p><strong>사용자별 임시 저장</strong>마지막 사용 후 4시간 동안 유지하며, <code>.git</code>, <code>node_modules</code>, 비밀키 파일은 업로드에서 제외합니다.</p></div>
-          {uploadMessage && <p className="upload-message" role="status">{uploadMessage}</p>}
-          {!canUpload && <p className="upload-message">VIEWER 역할은 프로젝트를 업로드할 수 없습니다.</p>}
-          {workspace === null
-            ? <p className="empty-runs">업로드 프로젝트를 확인 중입니다.</p>
-            : uploadedSources.length === 0
-              ? <p className="empty-runs">업로드된 프로젝트가 없습니다.</p>
-              : <div className="uploaded-project-list">{uploadedSources.map((source) => <div className="project-row" key={source.id}><span className="project-logo project-logo-upload"><Icon name="folder" /></span><div><strong>{source.label}</strong><code>{source.detail}</code></div><span className="tag tag-blue">TEMPORARY</span><a href="/deploy" aria-label={`${source.label} 배포 화면에서 사용`}><Icon name="arrow" /></a></div>)}</div>}
-        </section>
+        <GitAllowedIps user={user} />
+        <GitSettings key={user.id} user={user} section="projects" />
       </div>
     </div>
   );
@@ -605,7 +552,10 @@ function toDashboardRun(job: ComparisonJobResponse): DashboardRun {
     kind: '비교',
     source: job.left.label,
     target: job.right.label,
-    summary: summary === undefined
+    statusLabel: comparisonStatusLabel(job.status),
+    summary: job.comparisonLimit?.exceeded === true
+      ? `비교 제한 초과 · Source ${summary?.total ?? 0}개 · 배포 목록 준비 완료`
+      : summary === undefined
       ? comparisonStatusLabel(job.status)
       : `추가 ${summary.added} · 삭제 ${summary.removed} · 변경 ${summary.modified}`,
     time: formatRunTime(job.createdAt),
@@ -621,7 +571,10 @@ function toDashboardDryRun(job: DryRunJobResponse): DashboardRun {
     kind: job.kind === 'DRY_RUN' ? 'DRY-RUN' : '배포',
     source: job.source.label,
     target: job.target.label,
-    summary: summary === undefined
+    statusLabel: deploymentStatusLabel(job.status),
+    summary: job.comparisonLimit?.exceeded === true
+      ? `${deploymentStatusLabel(job.status)} · 파일 수 제한으로 비교 생략`
+      : summary === undefined
       ? deploymentStatusLabel(job.status)
       : `NEW ${summary.added} · TARGET ONLY ${summary.removed} · 변경 ${summary.modified}`,
     time: formatRunTime(job.createdAt),
@@ -639,6 +592,7 @@ function comparisonStatusLabel(status: ComparisonJobResponse['status']): string 
 function deploymentStatusLabel(status: DryRunJobResponse['status']): string {
   return ({
     QUEUED: '대기', DRY_RUN_RUNNING: 'dry-run 실행 중', APPROVAL_PENDING: 'dry-run 성공',
+    VALIDATED_PENDING_EXECUTION: '검증 완료 · 실제 미배포',
     DEPLOYING: '배포 중', SUCCEEDED: '배포 성공', FAILED: '실패', RECONCILE_REQUIRED: '재확인 필요',
   })[status];
 }
@@ -648,13 +602,4 @@ function formatRunTime(value: string | undefined): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '시간 미상';
   return new Intl.DateTimeFormat('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date);
-}
-
-function isUploadableProjectFile(relativePath: string): boolean {
-  const segments = relativePath.split('/');
-  if (segments.some((segment) => ['.git', '.sf', '.sfdx', 'node_modules'].includes(segment))) return false;
-  const basename = segments.at(-1)?.toLowerCase() ?? '';
-  return basename !== '.env'
-    && !basename.startsWith('.env.')
-    && !['.key', '.pem', '.p12', '.pfx'].some((extension) => basename.endsWith(extension));
 }

@@ -1,3 +1,4 @@
+import type { JobSourceSnapshot } from '../sources/source-provenance.js';
 import path from 'node:path';
 
 import { SfudError } from '../core/errors.js';
@@ -10,12 +11,17 @@ import { ProcessSfClient, type SfClient } from '../salesforce/sf-client.js';
 import { parseSourceSpec } from '../sources/source-spec.js';
 import { createSnapshot } from '../sources/snapshot.js';
 import { createRunContext, writeRunMetadata } from './run-context.js';
+import { settledSnapshots } from './settled-snapshots.js';
 import { salesforceWaitCommandTimeoutMs } from '../core/deadline.js';
+import { resolvePackageExclusion, validateExcludedPackageIds } from '../metadata/package-exclusion.js';
 
 export interface CompareCommandOptions {
+  excludedPackageIds?: string[];
+  excludePackageMetadata?: boolean;
   left: string;
   right: string;
   sourceOnly?: boolean;
+  maximumComparisonFiles?: number;
   manifest?: string;
   allMetadata?: boolean;
   metadataType?: string;
@@ -30,6 +36,7 @@ export interface CompareCommandOptions {
 }
 
 export interface CommandDependencies {
+  sourceSnapshot?: JobSourceSnapshot;
   cwd?: string;
   sfClient?: SfClient;
   stdout?: (value: string) => void;
@@ -51,7 +58,15 @@ export async function runCompareCommand(
   const sfClient = dependencies.sfClient ?? new ProcessSfClient();
   const leftSource = parseSourceSpec(options.left, cwd);
   const rightSource = parseSourceSpec(options.right, cwd);
+  const excludedPackageIds = validateExcludedPackageIds(options.excludedPackageIds);
+  if (options.excludePackageMetadata === true && excludedPackageIds.length > 0) {
+    throw new SfudError('INVALID_ARGUMENT', '패키지 전체 제외와 개별 제외는 함께 선택할 수 없습니다.');
+  }
   return await withRequestWorkspace(cwd, async (commandProjectPath) => {
+    const packageExclusion = options.excludePackageMetadata === true || excludedPackageIds.length > 0
+      ? await resolvePackageExclusion(options.sourceOnly === true ? [rightSource] : [leftSource, rightSource],
+        sfClient, commandProjectPath, dependencies.signal, excludedPackageIds.length > 0 ? excludedPackageIds : undefined)
+      : undefined;
     const context = await createRunContext(cwd, options.reportDir, 'compare');
     const generatedManifest = options.allMetadata === true || options.metadataType !== undefined
       ? await generateDeployableManifest({
@@ -71,11 +86,12 @@ export async function runCompareCommand(
       throw new SfudError('INVALID_ARGUMENT', '--wait는 1 이상의 정수여야 합니다.');
     }
     const snapshotCommandTimeoutMs = salesforceWaitCommandTimeoutMs(snapshotWaitMinutes);
-    await writeRunMetadata(context, 'compare', leftSource, rightSource.displayName, manifestPath);
+    await writeRunMetadata(context, 'compare', leftSource, rightSource.displayName, manifestPath, dependencies.sourceSnapshot);
 
-    const [leftSnapshot, rightSnapshot] = await Promise.all([
+    const [leftSnapshot, rightSnapshot] = await settledSnapshots([
       createSnapshot({
         source: options.sourceOnly === true ? rightSource : leftSource,
+        ...(dependencies.sourceSnapshot?.left?.provenance === undefined ? {} : { provenance: dependencies.sourceSnapshot.left.provenance }),
         manifestPath,
         ...(options.sourceOnly === true
           ? {}
@@ -93,6 +109,7 @@ export async function runCompareCommand(
       }),
       createSnapshot({
         source: rightSource,
+        ...(dependencies.sourceSnapshot?.right?.provenance === undefined ? {} : { provenance: dependencies.sourceSnapshot.right.provenance }),
         manifestPath,
         ...(sourceManifests === undefined ? {} : {
           retrievalManifestPath: sourceManifests[options.sourceOnly === true ? 0 : 1]!.manifestPath,
@@ -108,7 +125,11 @@ export async function runCompareCommand(
       }),
     ]);
 
-    const comparison = await compareSnapshots(leftSnapshot, rightSnapshot, { strict: options.strict ?? false });
+    const comparison = await compareSnapshots(leftSnapshot, rightSnapshot, { strict: options.strict ?? false,
+      ...(packageExclusion === undefined ? {} : { packageExclusion }),
+      ...(options.maximumComparisonFiles === undefined || options.sourceOnly === true
+        ? {} : { maximumFiles: options.maximumComparisonFiles }),
+      ...(options.metadataType === undefined ? {} : { metadataType: options.metadataType }) });
     const reports = await writeComparisonReports(comparison, context.reportDirectory);
     const stdout = dependencies.stdout ?? ((value: string) => process.stdout.write(value));
 

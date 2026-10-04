@@ -51,6 +51,7 @@ async function writeSecureText(filePath: string, contents: string): Promise<void
 }
 
 function renderContentDiff(result: ComparisonResult): string {
+  if (result.comparisonLimit?.exceeded === true) return `# 비교하지 않음: 파일 수 제한 초과\n`;
   const lines: string[] = [];
   for (const component of result.components) {
     for (const file of component.files) {

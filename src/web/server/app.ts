@@ -1,8 +1,10 @@
+import { registerDeploymentDraftRoutes } from './deployment-draft-routes.js';
+import { registerDeploymentPresetRoutes } from './deployment-preset-routes.js';
+import { registerGitProjectRoutes } from './git-project-routes.js';
 import { access } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import fastifyMultipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import Fastify, { type FastifyInstance } from 'fastify';
 
@@ -17,7 +19,14 @@ import { registerDeploymentRoutes } from './deployment-routes.js';
 import { registerProjectUploadRoutes } from './project-upload-routes.js';
 import { registerWorkflowEventRoutes } from './workflow-events.js';
 import { registerSettingsRoutes } from './settings-routes.js';
-import type { SfClient } from '../../salesforce/sf-client.js';
+import { registerGitConnectionRoutes } from './git-connection-routes.js';
+import { registerJobAccessRoutes } from './job-access-routes.js';
+import { registerOrgExecutionAccessRoutes } from './org-execution-access-routes.js';
+import { registerSalesforceConnectionRoutes } from './salesforce-connection-routes.js';
+import { redactSensitiveText, type SfClient } from '../../salesforce/sf-client.js';
+import { beginSalesforceRequestContext } from '../../salesforce/user-context.js';
+import type { SalesforceOAuthDependencies } from './salesforce-oauth.js';
+import type { GitHostPolicy } from '../../git/git-network.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -28,6 +37,8 @@ declare module 'fastify' {
 export interface WebServerOptions {
   host: string;
   port: number;
+  localMode?: boolean;
+  accessPassword?: string;
   assetsDirectory?: string;
   dataDirectory?: string;
   databasePath?: string;
@@ -37,20 +48,41 @@ export interface WebServerOptions {
   sfClient?: SfClient;
   trustedProxies?: string[];
   publicOrigin?: string;
-  userUploadQuotaBytes?: number;
-  serverUploadQuotaBytes?: number;
+  userImportQuotaBytes?: number;
+  serverImportQuotaBytes?: number;
+  quickDeployEnabled?: boolean;
+  gitHostPolicy?: GitHostPolicy;
+  salesforceOAuth?: Omit<SalesforceOAuthDependencies, 'config'>;
 }
 
 export async function createWebServer(options: WebServerOptions): Promise<FastifyInstance> {
   const trustedProxies = options.trustedProxies ?? [];
   const publicOrigin = normalizePublicOrigin(options.publicOrigin);
+  if (options.accessPassword !== undefined && (
+    options.localMode !== true || options.accessPassword.trim().length < 12 || options.accessPassword.length > 128
+  )) throw new Error('SFUD_ACCESS_PASSWORD는 LOCAL=true에서 12자 이상 128자 이하로 설정하세요.');
+  if (options.localMode === true && options.accessPassword === undefined && (
+    !['127.0.0.1', '::1', 'localhost'].includes(options.host)
+    || trustedProxies.length > 0
+    || publicOrigin !== undefined
+  )) throw new Error('비밀번호 없는 개인용은 루프백 주소에서만 사용할 수 있습니다. 원격 주소·프록시·공개 Origin에는 SFUD_ACCESS_PASSWORD가 필요합니다.');
   const app = Fastify({
-    logger: options.logger ?? false,
+    logger: options.logger === true ? {
+      redact: ['req.headers.authorization', 'req.headers.cookie', 'res.headers.set-cookie'],
+      serializers: { req: (request) => ({ method: request.method,
+        url: /^\/api\/v1\/salesforce\/oauth\/callback(?:\?|$)/u.test(request.url)
+          ? request.url.split('?')[0]!
+          : /^\/api\/v1\/git\/(?:connections|auth)(?:\/|\?|$)/u.test(request.url)
+          ? request.url.split('?')[0]! : redactSensitiveText(request.url),
+      }) },
+    } : false,
     ...(trustedProxies.length === 0 ? {} : { trustProxy: trustedProxies }),
   });
   const assetsDirectory = options.assetsDirectory ?? resolveDefaultAssetsDirectory();
+  const dataDirectory = options.dataDirectory ?? process.env.SFUD_DATA_DIR
+    ?? (options.localMode === true ? path.join(process.cwd(), '.sfud-local') : undefined);
   const databasePath = options.databasePath
-    ?? resolveDatabasePath(process.cwd(), options.dataDirectory);
+    ?? resolveDatabasePath(process.cwd(), dataDirectory);
   const runtime = await createWebRuntime(
     databasePath,
     options.bootstrapToken,
@@ -58,19 +90,32 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     process.cwd(),
     options.sfClient,
     {
-      ...(options.userUploadQuotaBytes === undefined
+      ...(options.userImportQuotaBytes === undefined
         ? {}
-        : { userUploadQuotaBytes: options.userUploadQuotaBytes }),
-      ...(options.serverUploadQuotaBytes === undefined
+        : { userImportQuotaBytes: options.userImportQuotaBytes }),
+      ...(options.serverImportQuotaBytes === undefined
         ? {}
-        : { serverUploadQuotaBytes: options.serverUploadQuotaBytes }),
+        : { serverImportQuotaBytes: options.serverImportQuotaBytes }),
+    },
+    {
+      ...(options.localMode === undefined ? {} : { localMode: options.localMode }),
+      ...(options.accessPassword === undefined ? {} : { accessPassword: options.accessPassword }),
+      ...(options.quickDeployEnabled === undefined ? {} : { quickDeployEnabled: options.quickDeployEnabled }),
+      ...(options.gitHostPolicy === undefined ? {} : { gitHostPolicy: options.gitHostPolicy }),
     },
   );
   app.decorate('sfudRuntime', runtime);
   app.addHook('onClose', async () => {
     await runtime.shutdown();
   });
+  app.addHook('onRequest', (_request, _reply, done) => beginSalesforceRequestContext(done));
   app.addHook('onRequest', async (request, reply) => {
+    if (runtime.localMode && !runtime.localPasswordRequired) {
+      const host = request.headers.host;
+      if (host === undefined || !/^(?:127\.0\.0\.1|\[::1\]|localhost)(?::\d+)?$/iu.test(host)) {
+        return reply.code(403).send({ error: { code: 'HOST_DENIED', message: '로컬 주소로 접속하세요.' } });
+      }
+    }
     reply.header('x-content-type-options', 'nosniff');
     reply.header('x-frame-options', 'DENY');
     reply.header('referrer-policy', 'no-referrer');
@@ -85,17 +130,6 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
     if (request.url.startsWith('/api/')) reply.header('cache-control', 'no-store');
   });
 
-  await app.register(fastifyMultipart, {
-    preservePath: true,
-    throwFileSizeLimit: true,
-    limits: {
-      fields: 1,
-      files: 2_000,
-      parts: 2_001,
-      fileSize: 10 * 1024 * 1024,
-    },
-  });
-
   app.get('/api/v1/health', async (): Promise<HealthResponse> => ({
     status: 'ok',
     service: 'sfud-ui',
@@ -105,6 +139,16 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
   app.get('/api/v1/diagnostics', async (request, reply): Promise<DiagnosticsResponse | undefined> => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
+    const queue = runtime.deploymentQueue.status();
+    const comparisonQueue = runtime.comparisonQueue.status();
+    if (queue.activeJobId !== undefined
+      && !await runtime.jobAccess.canAccess('deployment', queue.activeJobId, session.user.id)) {
+      delete queue.activeJobId;
+    }
+    if (comparisonQueue.activeJobId !== undefined
+      && !await runtime.jobAccess.canAccess('comparison', comparisonQueue.activeJobId, session.user.id)) {
+      delete comparisonQueue.activeJobId;
+    }
     return {
       status: 'ok',
       service: 'sfud-ui',
@@ -115,8 +159,8 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
       engine: 'sqlite',
       status: 'ok',
     },
-    queue: runtime.deploymentQueue.status(),
-    comparisonQueue: runtime.comparisonQueue.status(),
+    queue,
+    comparisonQueue,
     recoveredJobCount: runtime.recoveredJobCount,
     recoveredComparisonCount: runtime.recoveredComparisonCount,
     };
@@ -124,10 +168,20 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
 
   await registerAuthRoutes(app, publicOrigin === undefined ? {} : { publicOrigin });
   await registerAdminRoutes(app);
+  await registerOrgExecutionAccessRoutes(app);
+  await registerSalesforceConnectionRoutes(app, {
+    ...(publicOrigin === undefined ? {} : { publicOrigin }),
+    ...(options.salesforceOAuth === undefined ? {} : { oauth: options.salesforceOAuth }),
+  });
   await registerProjectUploadRoutes(app);
   await registerSettingsRoutes(app);
+  await registerJobAccessRoutes(app);
+  await registerGitConnectionRoutes(app);
+  await registerGitProjectRoutes(app);
   await registerComparisonRoutes(app);
   await registerDeploymentRoutes(app);
+  await registerDeploymentPresetRoutes(app);
+  await registerDeploymentDraftRoutes(app);
   await registerWorkflowEventRoutes(app);
 
   if (await hasBuiltUi(assetsDirectory)) {
@@ -135,7 +189,9 @@ export async function createWebServer(options: WebServerOptions): Promise<Fastif
       root: assetsDirectory,
       wildcard: false,
     });
-    app.get('/*', async (_request, reply) => reply.sendFile('index.html'));
+    app.get('/*', async (request, reply) => request.url.startsWith('/api/')
+      ? reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'API를 찾을 수 없습니다.' } })
+      : reply.sendFile('index.html'));
   } else {
     app.get('/', async (_request, reply) => reply
       .code(503)

@@ -1,16 +1,213 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { GitError } from '../src/git/git-errors.js';
+import { deploymentErrorGuidance } from '../ui/src/deployment/error-guidance.js';
 import { SfudError } from '../src/core/errors.js';
-import type { SfClient, SfRunOptions } from '../src/salesforce/sf-client.js';
+import { SfCommandFailedError, type SfClient, type SfRunOptions } from '../src/salesforce/sf-client.js';
 import { openSqliteStore } from '../src/storage/sqlite-store.js';
 import { createWebServer } from '../src/web/server/app.js';
 import { writeFixtureFiles } from './support/files.js';
 
 describe('dry-run API', () => {
+  it.each([
+    { error: new SfCommandFailedError('인증 만료', 'invalid_grant'), code: 'SALESFORCE_AUTH_REQUIRED' },
+    { error: new GitError('DX_PROJECT_NOT_FOUND'), code: 'DX_PROJECT_NOT_FOUND' },
+  ])('실행 오류 구조코드 $code를 작업 API와 해결 안내까지 보존한다', async ({ error, code }) => {
+    const client = new DryRunSfClient();
+    const original = client.runJson.bind(client);
+    let releaseRetrieval!: () => void;
+    let conversionFailed!: () => void;
+    const retrievalGate = new Promise<void>((resolve) => { releaseRetrieval = resolve; });
+    const conversionFailure = new Promise<void>((resolve) => { conversionFailed = resolve; });
+    let retrievalFinished = false;
+    vi.spyOn(client, 'runJson').mockImplementation(async (args, options) => {
+      if (args.includes('convert')) { conversionFailed(); throw error; }
+      if (args.includes('retrieve')) {
+        await retrievalGate;
+        const result = await original(args, options);
+        retrievalFinished = true;
+        return result;
+      }
+      return original(args, options);
+    });
+    const fixture = await createFixture(client);
+    try {
+      const auth = await bootstrap(fixture.server);
+      const headers = { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken };
+      const workspace = (await fixture.server.inject({ url: '/api/v1/workspace', headers })).json();
+      const response = await fixture.server.inject({ method: 'POST', url: '/api/v1/deployments/dry-run',
+        headers: { ...headers, 'idempotency-key': `guidance-${code}` }, payload: {
+          projectId: workspace.projects[0].id, manifest: 'manifest/package.xml',
+          sourceId: workspace.sources.find((source: { kind: string }) => source.kind === 'local').id,
+          targetOrgId: 'org:target', testLevel: 'RunLocalTests', tests: [],
+        } });
+      expect(response.statusCode, response.body).toBe(202);
+      await conversionFailure;
+      // A failed conversion must not detach the still-writing sibling retrieval.
+      const idle = fixture.server.sfudRuntime.deploymentQueue.onIdle();
+      const endedBeforeRetrieval = await Promise.race([
+        idle.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
+      ]);
+      expect(endedBeforeRetrieval).toBe(false);
+      expect(retrievalFinished).toBe(false);
+      releaseRetrieval();
+      await idle;
+      expect(retrievalFinished).toBe(true);
+      const result = await fixture.server.inject({ url: `/api/v1/deployment-jobs/${response.json().job.id}`, headers });
+      expect(result.json().job).toMatchObject({ status: 'FAILED', errorCode: code });
+      expect(deploymentErrorGuidance(result.json().job.errorCode, result.json().job.status).settings).toBe(true);
+    } finally { releaseRetrieval(); await fixture.close(); }
+  });
+  it.each(['direct', 'approved'])('별칭 없는 username org에도 %s 배포한다', async (mode) => {
+    const client = new DryRunSfClient();
+    client.alias = undefined;
+    client.username = 'target+sandbox@example.com';
+    const fixture = await createFixture(client);
+    try {
+      const auth = await bootstrap(fixture.server);
+      const headers = { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken };
+      const workspace = (await fixture.server.inject({ url: '/api/v1/workspace', headers }))
+        .json<{ sources: Array<{ id: string; kind: string }>; orgs: Array<{ alias: string }> }>();
+      expect(workspace.orgs[0]!.alias).toBe(client.username);
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      const response = await fixture.server.inject({
+        method: 'POST', url: `/api/v1/deployments/${mode === 'direct' ? 'direct' : 'dry-run'}`,
+        headers: { ...headers, 'idempotency-key': `username-${mode}` },
+        payload: {
+          scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+          sourceId, targetOrgId: `org:${client.username}`, testLevel: 'RunLocalTests', tests: [],
+          ...(mode === 'direct' ? { targetConfirmation: client.username, confirmation: '실제 배포' } : {}),
+        },
+      });
+      expect(response.statusCode).toBe(202);
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+      let job = await fixture.server.sfudRuntime.deploymentJobs.getRequired(response.json<{ job: { id: string } }>().job.id);
+      if (mode === 'approved') {
+        expect(job.status).toBe('APPROVAL_PENDING');
+        const approved = await fixture.server.inject({
+          method: 'POST', url: '/api/v1/deployments/execute', headers,
+          payload: { dryRunJobId: job.id, payloadChecksum: job.payloadChecksum,
+            targetAlias: client.username, confirmation: '실제 배포' },
+        });
+        expect(approved.statusCode).toBe(202);
+        await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+        job = await fixture.server.sfudRuntime.deploymentJobs.getRequired(approved.json<{ job: { id: string } }>().job.id);
+      }
+      expect(job).toMatchObject({ status: 'SUCCEEDED', targetAlias: client.username });
+      for (const call of client.calls.filter(({ args }) => args[1] === 'deploy')) {
+        expect(call.args).toContain(client.username);
+      }
+    } finally { await fixture.close(); }
+  });
+
+  it('보호된 실행 기록이 run quota를 넘으면 source 준비 전 새 요청을 503으로 거부한다', async () => {
+    vi.stubEnv('SFUD_RUN_MAX_BYTES', '1');
+    const fixture = await createFixture(new DryRunSfClient());
+    try {
+      const auth = await bootstrap(fixture.server);
+      const protectedJob = await fixture.server.sfudRuntime.deploymentJobs.createDryRun({
+        source: `local:${fixture.projectPath}`, targetAlias: 'target', manifestPath: '@all', payloadChecksum: 'a'.repeat(64),
+        createdBy: (await fixture.server.sfudRuntime.store.database.get<{ id: string }>('SELECT id FROM users LIMIT 1'))!.id,
+        targetOrgIdentity: { alias: 'target', username: 'target@example.com', orgId: '00D000000000001' },
+      });
+      const payloadDirectory = path.join(fixture.root, 'data', 'runs', protectedJob.id);
+      await mkdir(payloadDirectory, { recursive: true });
+      await writeFile(path.join(payloadDirectory, 'protected.bin'), Buffer.alloc(2));
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ projects: Array<{ id: string }>; sources: Array<{ id: string; kind: string }> }>();
+      const callsBefore = fixture.client.calls.length;
+
+      const response = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/dry-run',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'run-storage-full' },
+        payload: {
+          projectId: workspace.projects[0]!.id, manifest: 'manifest/package.xml',
+          sourceId: workspace.sources.find((source) => source.kind === 'local')!.id,
+          targetOrgId: 'org:target', testLevel: 'RunLocalTests', tests: [], waitMinutes: 10, strict: false,
+        },
+      });
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toMatchObject({ error: { code: 'REQUEST_CAPACITY_EXCEEDED' } });
+      expect(fixture.client.calls).toHaveLength(callsBefore);
+      expect(await fixture.server.sfudRuntime.store.database.get('SELECT COUNT(*) count FROM deployment_jobs'))
+        .toEqual({ count: 1 });
+    } finally {
+      vi.unstubAllEnvs();
+      await fixture.close();
+    }
+  });
+
+  it('queue 예약이 가득 차도 durable admission lease를 남기지 않는다', async () => {
+    const fixture = await createFixture(new DryRunSfClient());
+    const reservations = Array.from({ length: 20 }, () => fixture.server.sfudRuntime.deploymentCoordinator.reserveQueueSlot());
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ projects: Array<{ id: string }>; sources: Array<{ id: string; kind: string }> }>();
+      const response = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/dry-run',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'queue-reservation-full' },
+        payload: {
+          projectId: workspace.projects[0]!.id, manifest: 'manifest/package.xml',
+          sourceId: workspace.sources.find((source) => source.kind === 'local')!.id,
+          targetOrgId: 'org:target', testLevel: 'RunLocalTests', tests: [], waitMinutes: 10, strict: false,
+        },
+      });
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toMatchObject({ error: { code: 'REQUEST_CAPACITY_EXCEEDED' } });
+      expect(await fixture.server.sfudRuntime.store.database.get('SELECT COUNT(*) count FROM deployment_admission_leases'))
+        .toEqual({ count: 0 });
+    } finally {
+      for (const reservation of reservations) reservation.release();
+      await fixture.close();
+    }
+  });
+
+  it('ADMIN 전용 원격 ID 연결은 report의 ID와 checkOnly를 대조하고 감사 기록을 남긴다', async () => {
+    const fixture = await createFixture(new DryRunSfClient());
+    try {
+      const auth = await bootstrap(fixture.server);
+      const admin = await fixture.server.sfudRuntime.store.database.get<{ id: string }>('SELECT id FROM users LIMIT 1');
+      const created = await fixture.server.sfudRuntime.deploymentJobs.createDirectDeployment({
+        source: `local:${fixture.projectPath}`, targetAlias: 'target', manifestPath: 'manifest/package.xml',
+        payloadChecksum: 'a'.repeat(64), requestHash: 'a'.repeat(64), clientRequestId: 'manual-reconcile-job',
+        createdBy: admin!.id, accessOwnerUserId: admin!.id, requestedTestLevel: 'RunLocalTests', requestedTests: [],
+        targetConfirmation: 'target', confirmation: '실제 배포',
+        targetOrgIdentity: { alias: 'target', username: 'target@example.com', orgId: '00D000000000001' },
+      });
+      await fixture.server.sfudRuntime.deploymentJobs.transition(created.job.id, 'DEPLOYING');
+      await fixture.server.sfudRuntime.deploymentJobs.attempts.begin({
+        jobId: created.job.id, operation: 'VALIDATE', payloadChecksum: 'a'.repeat(64), digestVersion: 1,
+        runDirectory: fixture.projectPath,
+      });
+      await fixture.server.sfudRuntime.deploymentJobs.recoverInterruptedJobs();
+
+      const response = await fixture.server.inject({
+        method: 'POST', url: `/api/v1/deployment-jobs/${created.job.id}/manual-reconcile`,
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: {
+          deploymentId: '0Af000000000001', operation: 'VALIDATE', observedAt: new Date().toISOString(),
+          evidence: 'Salesforce Deployment Status report의 대상 org, 실행 ID, 제출 시각을 확인했습니다.',
+        },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ job: {
+        status: 'VALIDATED_PENDING_EXECUTION', salesforceDeploymentId: '0Af000000000001',
+      } });
+      expect(await fixture.server.sfudRuntime.store.database.get(`
+        SELECT COUNT(*) count FROM audit_events
+        WHERE entity_id = ? AND event_type = 'DEPLOYMENT_ATTEMPT_MANUALLY_BOUND'
+      `, created.job.id)).toEqual({ count: 1 });
+    } finally { await fixture.close(); }
+  });
+
   it('허용된 source를 check-only로 검증하고 payload와 테스트 결과를 영속화한다', async () => {
     const fixture = await createFixture(new DryRunSfClient());
     try {
@@ -22,10 +219,10 @@ describe('dry-run API', () => {
         payload: { testClassSuffix: 'Spec' },
       });
       expect(savedSettings.statusCode).toBe(200);
-      expect(savedSettings.json()).toEqual({ settings: { testClassSuffix: 'Spec' } });
+      expect(savedSettings.json()).toEqual({ settings: { testClassSuffix: 'Spec', maximumComparisonFiles: 2000 } });
       expect((await fixture.server.inject({
         url: '/api/v1/settings', headers: { cookie: auth.cookie },
-      })).json()).toEqual({ settings: { testClassSuffix: 'Spec' } });
+      })).json()).toEqual({ settings: { testClassSuffix: 'Spec', maximumComparisonFiles: 2000 } });
       const invalidSettings = await fixture.server.inject({
         method: 'PUT',
         url: '/api/v1/settings',
@@ -152,14 +349,18 @@ describe('dry-run API', () => {
     }
   });
 
-  it('선택한 배포 대상 metadata만 dry-run하고 승인된 동일 payload를 실제 배포한다', async () => {
+  it.each([1, 2000])('비교 상한 %i에서 선택한 metadata만 검증하고 승인된 동일 payload를 배포한다', async (maximumComparisonFiles) => {
     const fixture = await createFixture(new DryRunSfClient());
     try {
+      const submitAuthorization = vi.spyOn(fixture.server.sfudRuntime.deploymentJobs, 'assertAccess');
       const auth = await bootstrap(fixture.server);
       const workspace = (await fixture.server.inject({
         url: '/api/v1/workspace', headers: { cookie: auth.cookie },
       })).json<{ sources: Array<{ id: string; kind: string }> }>();
       const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      await fixture.server.inject({ method: 'PUT', url: '/api/v1/settings',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: { testClassSuffix: '_Test', maximumComparisonFiles } });
       const created = await fixture.server.inject({
         method: 'POST', url: '/api/v1/deployments/dry-run',
         headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'dry-run-selected' },
@@ -178,16 +379,44 @@ describe('dry-run API', () => {
       const dryRunId = created.json<{ job: { id: string } }>().job.id;
       await fixture.server.sfudRuntime.deploymentQueue.onIdle();
       const dryRun = await fixture.server.sfudRuntime.deploymentJobs.getRequired(dryRunId);
-      expect(dryRun).toMatchObject({ status: 'APPROVAL_PENDING', prepared: true });
+      expect(dryRun).toMatchObject({ status: 'APPROVAL_PENDING', prepared: true,
+        comparisonLimit: { maximumFiles: maximumComparisonFiles, exceeded: maximumComparisonFiles === 1 } });
       const recentJobs = (await fixture.server.inject({
         url: '/api/v1/deployment-jobs', headers: { cookie: auth.cookie },
       })).json<{ jobs: Array<{ id: string; scope?: string; components?: unknown[] }> }>().jobs;
       expect(recentJobs.find((job) => job.id === dryRunId)).toMatchObject({
         scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
       });
+      expect(dryRun.manifestPath).toBe(path.join(
+        fixture.root, 'data', 'runs', dryRun.id, 'input', 'package.xml',
+      ));
       expect(await readFile(dryRun.manifestPath, 'utf8')).toContain('<members>Hello</members>');
       expect(await readFile(dryRun.manifestPath, 'utf8')).not.toContain('<members>Hello_Test</members>');
+      const retry = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/dry-run',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'dry-run-selected' },
+        payload: {
+          scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }], sourceId,
+          targetOrgId: 'org:target', testLevel: 'RunLocalTests',
+        },
+      });
+      expect(retry.json<{ job: { id: string } }>().job.id).toBe(dryRun.id);
+      expect(await readdir(path.join(fixture.root, 'data', 'runs'))).toEqual([dryRun.id]);
 
+      const reservations = Array.from({ length: 20 }, () => fixture.server.sfudRuntime.deploymentCoordinator.reserveQueueSlot());
+      const beforeCount = await fixture.server.sfudRuntime.store.database.get('SELECT COUNT(*) count FROM deployment_jobs');
+      try {
+        const saturated = await fixture.server.inject({
+          method: 'POST', url: '/api/v1/deployments/execute',
+          headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+          payload: { dryRunJobId: dryRun.id, payloadChecksum: dryRun.payloadChecksum,
+            targetAlias: 'target', confirmation: '실제 배포' },
+        });
+        expect(saturated.statusCode).toBe(503);
+        expect(saturated.json()).toMatchObject({ error: { code: 'REQUEST_CAPACITY_EXCEEDED' } });
+        expect(await fixture.server.sfudRuntime.store.database.get('SELECT COUNT(*) count FROM deployment_jobs')).toEqual(beforeCount);
+        expect(await fixture.server.sfudRuntime.deploymentJobs.getRequired(dryRun.id)).toMatchObject({ status: 'APPROVAL_PENDING' });
+      } finally { for (const reservation of reservations) reservation.release(); }
       const approved = await fixture.server.inject({
         method: 'POST', url: '/api/v1/deployments/execute',
         headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
@@ -202,6 +431,7 @@ describe('dry-run API', () => {
       expect(approved.json()).toMatchObject({ job: {
         prepared: true,
         payloadChecksum: dryRun.payloadChecksum,
+        comparisonLimit: { maximumFiles: maximumComparisonFiles, exceeded: maximumComparisonFiles === 1 },
         testPlan: { level: 'RunLocalTests' },
       } });
       const deploymentId = approved.json<{ job: { id: string } }>().job.id;
@@ -210,14 +440,56 @@ describe('dry-run API', () => {
         kind: 'DEPLOY', status: 'SUCCEEDED', prepared: true,
         testPlan: { level: 'RunLocalTests' },
         selectedComponents: [{ type: 'ApexClass', fullName: 'Hello' }],
+        executionMode: 'QUICK_DEPLOY', reusedValidationId: '0Af-check-only',
       });
+      expect((await fixture.server.inject({
+        url: `/api/v1/deployment-jobs/${deploymentId}`, headers: { cookie: auth.cookie },
+      })).json()).toMatchObject({ job: {
+        executionMode: 'QUICK_DEPLOY', reusedValidationId: '0Af-check-only',
+      } });
       const deployCalls = deploymentStartCalls(fixture.client.calls);
-      expect(deployCalls).toHaveLength(2);
+      expect(deployCalls).toHaveLength(1);
       expect(deployCalls[0]!.args).toContain('--dry-run');
-      expect(deployCalls[1]!.args).not.toContain('--dry-run');
-      expect(deployCalls[1]!.args).toEqual(expect.arrayContaining([
-        '--target-org', 'target', '--test-level', 'RunLocalTests',
-      ]));
+      const quickCalls = fixture.client.calls.filter((call) =>
+        call.args[0] === 'project' && call.args[1] === 'deploy' && call.args[2] === 'quick');
+      expect(quickCalls).toHaveLength(1);
+      expect(quickCalls[0]!.args).toEqual(expect.arrayContaining(['--job-id', '0Af-check-only', '--target-org', 'target', '--async']));
+      expect(quickCalls[0]!.args).not.toContain('--use-most-recent');
+      expect(submitAuthorization).toHaveBeenCalledWith(deploymentId, expect.any(String));
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('Quick Deploy 운영 제어를 끄면 일반 배포로 대체 제출하지 않는다', async () => {
+    const fixture = await createFixture(new DryRunSfClient(), { quickDeployEnabled: false });
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ sources: Array<{ id: string; kind: string }> }>();
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      const dryRunResponse = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/dry-run',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'quick-disabled-dry-run' },
+        payload: { scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }], sourceId, targetOrgId: 'org:target', testLevel: 'RunLocalTests' },
+      });
+      const dryRunId = dryRunResponse.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+      const dryRun = await fixture.server.sfudRuntime.deploymentJobs.getRequired(dryRunId);
+      const approved = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/execute',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
+        payload: { dryRunJobId: dryRun.id, payloadChecksum: dryRun.payloadChecksum, targetAlias: 'target', confirmation: '실제 배포' },
+      });
+      const deployId = approved.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+      expect(await fixture.server.sfudRuntime.deploymentJobs.getRequired(deployId)).toMatchObject({
+        status: 'FAILED', errorCode: 'JOB_EXECUTION_FAILED', executionMode: 'REVALIDATION_REQUIRED',
+        executionReason: expect.stringContaining('Quick Deploy 신규 제출을 비활성화'),
+      });
+      expect(deploymentStartCalls(fixture.client.calls)).toHaveLength(1);
+      expect(fixture.client.calls.filter((call) => call.args[2] === 'quick')).toHaveLength(0);
     } finally {
       await fixture.close();
     }
@@ -256,6 +528,48 @@ describe('dry-run API', () => {
       expect(deployCalls).toHaveLength(1);
       expect(deployCalls[0]!.args).not.toContain('--dry-run');
       expect(deployCalls[0]!.args).toEqual(expect.arrayContaining(['--test-level', 'NoTestRun']));
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('대상 org allowlist에서 회수된 DEPLOYER는 Salesforce 제출 직전에 차단한다', async () => {
+    const fixture = await createFixture(new DryRunSfClient());
+    try {
+      await bootstrap(fixture.server);
+      const admin = await fixture.server.sfudRuntime.store.database.get<{ id: string }>('SELECT id FROM users WHERE role = ?', 'ADMIN');
+      const deployer = await fixture.server.sfudRuntime.auth.createManagedUser({
+        actorUserId: admin!.id, email: 'deployer@example.com', displayName: 'Deployer', role: 'DEPLOYER',
+        password: 'deployer correct horse battery staple',
+      });
+      await fixture.server.sfudRuntime.orgExecutionAccess.grant('00D000000000001', admin!.id, admin!.id);
+      const login = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/auth/login',
+        payload: { email: 'deployer@example.com', password: 'deployer correct horse battery staple' },
+      });
+      const cookie = (login.headers['set-cookie'] as string[]).map((value) => value.split(';')[0]).join('; ');
+      const csrfToken = login.json<{ csrfToken: string }>().csrfToken;
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie },
+      })).json<{ sources: Array<{ id: string; kind: string }> }>();
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      const created = await fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/direct',
+        headers: { cookie, 'x-sfud-csrf': csrfToken, 'idempotency-key': 'direct-org-allowlist-denied' },
+        payload: {
+          scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+          sourceId, targetOrgId: 'org:target', testLevel: 'NoTestRun', tests: [],
+          targetConfirmation: 'target', confirmation: '실제 배포',
+        },
+      });
+      expect(created.statusCode).toBe(202);
+      const jobId = created.json<{ job: { id: string } }>().job.id;
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+
+      expect(await fixture.server.sfudRuntime.deploymentJobs.getRequired(jobId)).toMatchObject({
+        status: 'FAILED', errorCode: 'JOB_EXECUTION_FAILED', remoteStatus: 'NOT_SUBMITTED', createdBy: deployer.id,
+      });
+      expect(deploymentStartCalls(fixture.client.calls)).toHaveLength(0);
     } finally {
       await fixture.close();
     }
@@ -632,6 +946,41 @@ describe('dry-run API', () => {
     }
   });
 
+  it('사용자별 접수 준비 한도 초과는 source 조회와 파일 생성 전에 429로 거부한다', async () => {
+    const client = new GatedMetadataSfClient(1);
+    const fixture = await createFixture(client);
+    try {
+      const auth = await bootstrap(fixture.server);
+      const workspace = (await fixture.server.inject({
+        url: '/api/v1/workspace', headers: { cookie: auth.cookie },
+      })).json<{ sources: Array<{ id: string; kind: string }> }>();
+      const sourceId = workspace.sources.find((source) => source.kind === 'local')!.id;
+      const request = (key: string) => fixture.server.inject({
+        method: 'POST', url: '/api/v1/deployments/dry-run',
+        headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': key },
+        payload: {
+          scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }], sourceId,
+          targetOrgId: 'org:target', testLevel: 'RunLocalTests',
+        },
+      });
+      const first = request('admission-1');
+      const second = request('admission-2');
+      await client.waitForBlockedMetadata();
+
+      const rejected = await request('admission-3');
+      expect(rejected.statusCode).toBe(429);
+      expect(rejected.json()).toMatchObject({ error: { code: 'REQUEST_USER_LIMIT' } });
+      expect(await fixture.server.sfudRuntime.store.database.get('SELECT COUNT(*) count FROM deployment_jobs'))
+        .toEqual({ count: 0 });
+
+      client.releaseMetadata();
+      await Promise.all([first, second]);
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it('queue 대기 중 target alias가 다른 org를 가리키면 제출 전에 차단한다', async () => {
     const fixture = await createFixture(new DryRunSfClient('identity-changed'));
     try {
@@ -716,7 +1065,7 @@ describe('dry-run API', () => {
     }
   });
 
-  it('Salesforce 실패를 민감 정보 없이 FAILED로 기록한다', async () => {
+  it('제출 명령의 불명확한 실패를 민감 정보 없이 재확인 상태로 기록한다', async () => {
     const fixture = await createFixture(new DryRunSfClient('definitive'));
     try {
       const auth = await bootstrap(fixture.server);
@@ -738,7 +1087,7 @@ describe('dry-run API', () => {
       const jobId = created.json<{ job: { id: string } }>().job.id;
       await fixture.server.sfudRuntime.deploymentQueue.onIdle();
       const failed = await fixture.server.sfudRuntime.deploymentJobs.getRequired(jobId);
-      expect(failed).toMatchObject({ status: 'FAILED', errorCode: 'JOB_EXECUTION_FAILED' });
+      expect(failed).toMatchObject({ status: 'RECONCILE_REQUIRED', errorCode: 'EXTERNAL_STATE_UNKNOWN' });
       expect(failed.errorMessage).not.toContain('force://client:must-not-leak');
       expect(failed.errorMessage).toContain('force://[REDACTED]');
     } finally {
@@ -787,7 +1136,7 @@ describe('dry-run API', () => {
     }
   });
 
-  it('제출 후 Salesforce 응답이 끊기면 RECONCILE_REQUIRED로 기록한다', async () => {
+  it('제출 응답을 잃으면 오류 문자열의 ID를 신뢰하지 않고 재확인 상태를 유지한다', async () => {
     const fixture = await createFixture(new DryRunSfClient('ambiguous'));
     try {
       const auth = await bootstrap(fixture.server);
@@ -811,29 +1160,28 @@ describe('dry-run API', () => {
         status: 'RECONCILE_REQUIRED',
         remoteStatus: 'UNKNOWN',
         errorCode: 'EXTERNAL_STATE_UNKNOWN',
-        salesforceDeploymentId: '0Af000000000001AAA',
       });
+      expect((await fixture.server.sfudRuntime.deploymentJobs.getRequired(jobId)).salesforceDeploymentId).toBeUndefined();
       const reconciled = await fixture.server.inject({
         method: 'POST', url: `/api/v1/deployment-jobs/${jobId}/reconcile`,
         headers: { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken },
       });
-      expect(reconciled.statusCode).toBe(200);
-      expect(reconciled.json()).toMatchObject({ job: {
-        status: 'RECONCILE_REQUIRED', remoteStatus: 'SUCCEEDED',
-        persistenceWarning: expect.stringContaining('dry-run을 다시 실행'),
-      } });
+      expect(reconciled.statusCode).toBe(400);
+      expect(await fixture.server.sfudRuntime.deploymentJobs.getRequired(jobId)).toMatchObject({
+        status: 'RECONCILE_REQUIRED', remoteStatus: 'UNKNOWN',
+      });
       expect(deploymentStartCalls(fixture.client.calls)).toHaveLength(1);
       expect(await fixture.server.sfudRuntime.store.database.get(`
         SELECT COUNT(*) count FROM audit_events
         WHERE entity_id = ? AND event_type = 'DEPLOYMENT_RECONCILED'
-      `, jobId)).toEqual({ count: 1 });
+      `, jobId)).toEqual({ count: 0 });
     } finally {
       await fixture.close();
     }
   });
 
   it('실제 배포의 불명확한 원격 상태를 report 조회만으로 성공 확정한다', async () => {
-    const fixture = await createFixture(new DryRunSfClient('ambiguous'));
+    const fixture = await createFixture(new DryRunSfClient('report-interrupted'));
     try {
       const auth = await bootstrap(fixture.server);
       const workspace = (await fixture.server.inject({
@@ -977,10 +1325,12 @@ describe('dry-run API', () => {
 class DryRunSfClient implements SfClient {
   public readonly calls: Array<{ args: readonly string[]; options: SfRunOptions }> = [];
   public orgId = '00D000000000001';
+  public alias: string | undefined = 'target';
+  public username = 'target@example.com';
   private orgListCalls = 0;
 
   public constructor(
-    private readonly failure: 'none' | 'definitive' | 'ambiguous' | 'reported' | 'identity-changed' = 'none',
+    private readonly failure: 'none' | 'definitive' | 'ambiguous' | 'report-interrupted' | 'reported' | 'identity-changed' = 'none',
     private readonly coverage = 80,
   ) {}
 
@@ -998,7 +1348,7 @@ class DryRunSfClient implements SfClient {
         : this.orgId;
       return { status: 0, result: { nonScratchOrgs: [
         {
-          alias: 'target', username: 'target@example.com', orgId,
+          alias: this.alias, username: this.username, orgId,
           instanceUrl: 'https://target.example.my.salesforce.com', name: 'Target',
           orgEdition: 'Developer', connectedStatus: 'Connected',
         },
@@ -1020,9 +1370,12 @@ class DryRunSfClient implements SfClient {
     }
     if (args.includes('convert')) {
       await writeSnapshot(flagValue(args, '--output-dir'), 'source');
+      // The converted package carries the selected manifest, not an empty stub.
+      await writeFile(path.join(flagValue(args, '--output-dir'), 'package.xml'),
+        await readFile(flagValue(args, '--manifest'), 'utf8'));
       return { status: 0 };
     }
-    if (args[0] === 'project' && args[1] === 'deploy' && args[2] === 'start') {
+    if (args[0] === 'project' && args[1] === 'deploy' && ['start', 'quick'].includes(args[2]!)) {
       if (this.failure === 'definitive') {
         throw new SfudError('SF_COMMAND_FAILED', '실패 force://client:must-not-leak@example.com');
       }
@@ -1033,13 +1386,16 @@ class DryRunSfClient implements SfClient {
         );
       }
       return { status: 0, result: {
-        id: args.includes('--dry-run') ? '0Af-check-only' : '0Af-deploy',
+        id: this.failure === 'report-interrupted' ? '0Af000000000001AAA' : args.includes('--dry-run') ? '0Af-check-only' : args[2] === 'quick' ? '0Af-quick' : '0Af-deploy',
         status: 'Queued',
         done: false,
       } };
     }
     if (args[0] === 'project' && args[1] === 'deploy' && args[2] === 'report') {
       const id = flagValue(args, '--job-id');
+      if (this.failure === 'report-interrupted' && this.calls.filter(call => call.args[2] === 'report').length === 1) {
+        throw new SfudError('SF_COMMAND_TIMEOUT', 'report timeout');
+      }
       if (this.failure === 'reported') {
         return { status: 0, result: {
           id, status: 'Failed', done: true, success: false,
@@ -1063,6 +1419,8 @@ class DryRunSfClient implements SfClient {
       }
       return { status: 0, result: {
         id,
+        ...(id === '0Af000000000001' ? { createdDate: new Date().toISOString() } : {}),
+        ...(id === '0Af000000000001' || id === '0Af-check-only' ? { checkOnly: true } : {}),
         status: 'Succeeded',
         done: true,
         success: true,
@@ -1077,6 +1435,37 @@ class DryRunSfClient implements SfClient {
       } };
     }
     throw new Error(`예상하지 못한 sf 명령: ${args.join(' ')}`);
+  }
+}
+
+class GatedMetadataSfClient extends DryRunSfClient {
+  private metadataCalls = 0;
+  private readonly metadataBlocked: Promise<void>;
+  private metadataBlockedResolve!: () => void;
+  private readonly metadataGate: Promise<void>;
+  private metadataGateResolve!: () => void;
+
+  public constructor(private readonly blockAfter: number) {
+    super();
+    this.metadataBlocked = new Promise<void>((resolve) => { this.metadataBlockedResolve = resolve; });
+    this.metadataGate = new Promise<void>((resolve) => { this.metadataGateResolve = resolve; });
+  }
+
+  public async waitForBlockedMetadata(): Promise<void> {
+    await this.metadataBlocked;
+  }
+
+  public releaseMetadata(): void {
+    this.metadataGateResolve();
+  }
+
+  public override async runJson(args: readonly string[], options: SfRunOptions): Promise<unknown> {
+    if (args[0] === 'org' && args[1] === 'list' && args[2] === 'metadata-types') {
+      this.metadataCalls += 1;
+      if (this.metadataCalls >= this.blockAfter) this.metadataBlockedResolve();
+      await this.metadataGate;
+    }
+    return await super.runJson(args, options);
   }
 }
 
@@ -1111,7 +1500,7 @@ class AbortableDeploymentSfClient extends DryRunSfClient {
   }
 }
 
-async function createFixture(client: DryRunSfClient) {
+async function createFixture(client: DryRunSfClient, options: { quickDeployEnabled?: boolean } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-dry-run-api-'));
   const projectPath = path.join(root, 'project');
   await mkdir(path.join(projectPath, 'manifest'), { recursive: true });
@@ -1123,7 +1512,7 @@ async function createFixture(client: DryRunSfClient) {
   const server = await createWebServer({
     host: '127.0.0.1', port: 27_546, assetsDirectory: '/missing',
     databasePath: path.join(root, 'data', 'sfud.db'), projectPaths: [projectPath],
-    bootstrapToken: 'dry-run-bootstrap-token', sfClient: client,
+    bootstrapToken: 'dry-run-bootstrap-token', sfClient: client, ...options,
   });
   return {
     root,
@@ -1142,6 +1531,8 @@ async function bootstrap(server: Awaited<ReturnType<typeof createWebServer>>) {
       displayName: '관리자', password: 'dry run test password',
     },
   });
+  const userId = response.json<{ user: { id: string } }>().user.id;
+  await server.sfudRuntime.orgExecutionAccess.grant('00D000000000001', userId, userId);
   return {
     cookie: (response.headers['set-cookie'] as string[]).map((value) => value.split(';')[0]).join('; '),
     csrfToken: response.json<{ csrfToken: string }>().csrfToken,
@@ -1170,3 +1561,56 @@ function flagValue(args: readonly string[], flag: string): string {
 function deploymentStartCalls<T extends { args: readonly string[] }>(calls: readonly T[]): T[] {
   return calls.filter((call) => call.args[0] === 'project' && call.args[1] === 'deploy' && call.args[2] === 'start');
 }
+
+describe('미확정 요청의 Org identity 바인딩 API', () => {
+  it.each(['direct', 'dry-run'])('job 없는 원래 %s 요청의 target alias 변경을 SF 제출 전에 거부한다', async (operation) => {
+    const client = new DryRunSfClient();
+    const fixture = await createFixture(client);
+    try {
+      const auth = await bootstrap(fixture.server);
+      const headers = { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken };
+      const workspace = (await fixture.server.inject({ url: '/api/v1/workspace', headers })).json<{
+        sources: Array<{ id: string; kind: string; orgIdentityFingerprint?: string }>;
+        orgs: Array<{ id: string; orgIdentityFingerprint?: string }>;
+      }>();
+      const target = workspace.sources.find((source) => source.id === 'org:target')!;
+      expect(target.orgIdentityFingerprint).toMatch(/^[a-f0-9]{64}$/u);
+      expect(workspace.orgs[0]!.orgIdentityFingerprint).toBe(target.orgIdentityFingerprint);
+      expect(JSON.stringify(workspace)).not.toContain(client.orgId);
+      const payload = { scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+        sourceId: workspace.sources.find((source) => source.kind === 'local')!.id,
+        targetOrgId: 'org:target', expectedTargetIdentityFingerprint: target.orgIdentityFingerprint,
+        testLevel: 'RunLocalTests', tests: [],
+        ...(operation === 'direct' ? { targetConfirmation: 'target', confirmation: '실제 배포' } : {}) };
+      // The browser had persisted this body, but its first POST never reached the server.
+      client.orgId = '00D000000000099';
+      const response = await fixture.server.inject({ method: 'POST', url: `/api/v1/deployments/${operation}`,
+        headers: { ...headers, 'idempotency-key': `unconfirmed-original-${operation}` }, payload });
+      expect(response.statusCode, response.body).toBe(400);
+      expect(response.json().error.code).toBe('ORG_IDENTITY_CHANGED');
+      expect(await fixture.server.sfudRuntime.store.database.get('SELECT COUNT(*) count FROM deployment_jobs')).toEqual({ count: 0 });
+      expect(deploymentStartCalls(client.calls)).toHaveLength(0);
+    } finally { await fixture.close(); }
+  });
+  it('동일 identity direct 요청을 수락하고 admitted 요청은 alias 변경 후 원래 job으로 돌아온다', async () => {
+    const client = new DryRunSfClient();
+    const fixture = await createFixture(client);
+    try {
+      const auth = await bootstrap(fixture.server);
+      const headers = { cookie: auth.cookie, 'x-sfud-csrf': auth.csrfToken, 'idempotency-key': 'fingerprint-admitted-original' };
+      const workspace = (await fixture.server.inject({ url: '/api/v1/workspace', headers })).json<{ sources: Array<{ id: string; kind: string; orgIdentityFingerprint?: string }> }>();
+      const payload = { scope: 'selected', components: [{ type: 'ApexClass', fullName: 'Hello' }],
+        sourceId: workspace.sources.find((source) => source.kind === 'local')!.id,
+        targetOrgId: 'org:target', expectedTargetIdentityFingerprint: workspace.sources.find((source) => source.id === 'org:target')!.orgIdentityFingerprint,
+        testLevel: 'RunLocalTests', tests: [], targetConfirmation: 'target', confirmation: '실제 배포' };
+      const first = await fixture.server.inject({ method: 'POST', url: '/api/v1/deployments/direct', headers, payload });
+      expect(first.statusCode, first.body).toBe(202);
+      await fixture.server.sfudRuntime.deploymentQueue.onIdle();
+      const before = deploymentStartCalls(client.calls).length;
+      client.orgId = '00D000000000099';
+      const retry = await fixture.server.inject({ method: 'POST', url: '/api/v1/deployments/direct', headers, payload });
+      expect(retry.statusCode, retry.body).toBe(200); expect(retry.json().job.id).toBe(first.json().job.id);
+      expect(deploymentStartCalls(client.calls)).toHaveLength(before);
+    } finally { await fixture.close(); }
+  });
+});

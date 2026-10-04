@@ -5,6 +5,7 @@ import { requireAuthenticatedSession } from './auth-routes.js';
 
 interface UpdateSettingsBody {
   testClassSuffix?: unknown;
+  maximumComparisonFiles?: unknown;
 }
 
 export async function registerSettingsRoutes(app: FastifyInstance): Promise<void> {
@@ -27,6 +28,7 @@ export async function registerSettingsRoutes(app: FastifyInstance): Promise<void
       const settings = await app.sfudRuntime.settings.update(
         session.user.id,
         request.body.testClassSuffix,
+        request.body.maximumComparisonFiles,
       );
       return reply.send({ settings });
     } catch (error) {

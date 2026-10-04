@@ -1,4 +1,6 @@
+import type { JobSourceSnapshot } from '../sources/source-provenance.js';
 import { randomUUID } from 'node:crypto';
+import { initializeJobAccess, jobVisibilitySql } from '../storage/job-access-repository.js';
 
 import type { ComparisonResult, ComparisonSummary } from '../metadata/comparator.js';
 import type { DatabaseExecutor, DatabaseHandle } from '../storage/database-executor.js';
@@ -12,6 +14,10 @@ export type ComparisonJobStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
 export type ComparisonScope = 'MANIFEST' | 'ALL';
 
 export interface ComparisonJob {
+  excludedPackageIds?: string[];
+  excludePackageMetadata?: boolean;
+  comparisonLimit?: NonNullable<ComparisonResult['comparisonLimit']>;
+  sourceSnapshot?: JobSourceSnapshot;
   id: string;
   status: ComparisonJobStatus;
   scope: ComparisonScope;
@@ -36,6 +42,11 @@ export interface ComparisonJob {
 }
 
 export interface CreateComparisonJobInput {
+  excludedPackageIds?: string[];
+  excludePackageMetadata?: boolean;
+  id?: string;
+  sourceSnapshot?: JobSourceSnapshot;
+  accessOwnerUserId?: string;
   scope?: ComparisonScope;
   metadataType?: string;
   projectPath: string;
@@ -48,6 +59,10 @@ export interface CreateComparisonJobInput {
 }
 
 interface ComparisonJobRow {
+  excluded_package_ids_json?: string | null;
+  exclude_package_metadata?: number;
+  comparison_limit_json?: string | null;
+  source_provenance_json?: string | null;
   id: string;
   status: ComparisonJobStatus;
   scope: ComparisonScope;
@@ -85,7 +100,7 @@ export class ComparisonJobRepository {
   ) {}
 
   public async create(input: CreateComparisonJobInput): Promise<ComparisonJob> {
-    const id = this.createId();
+    const id = input.id ?? this.createId();
     const timestamp = this.now();
     await runInImmediateTransaction(this.database, async (transaction) => {
       await transaction.run(`
@@ -96,6 +111,13 @@ export class ComparisonJobRepository {
       `, id, input.scope ?? 'MANIFEST', input.metadataType ?? null,
       input.projectPath, input.manifestPath, input.leftSource, input.rightSource,
       input.strict ? 1 : 0, input.showIdentical ? 1 : 0, input.createdBy, timestamp, timestamp);
+      await initializeJobAccess(transaction, 'comparison', id, input.accessOwnerUserId ?? input.createdBy);
+      await transaction.run('UPDATE comparison_jobs SET exclude_package_metadata = ? WHERE id = ?',
+        input.excludePackageMetadata === true ? 1 : 0, id);
+      await transaction.run('UPDATE comparison_jobs SET excluded_package_ids_json = ? WHERE id = ?',
+        JSON.stringify(input.excludedPackageIds ?? []), id);
+      await transaction.run('UPDATE comparison_jobs SET source_provenance_json = ? WHERE id = ?',
+        input.sourceSnapshot === undefined ? null : JSON.stringify(input.sourceSnapshot), id);
       await this.writeAudit(transaction, input.createdBy, 'COMPARISON_QUEUED', id, {
         left: input.leftSource,
         right: input.rightSource,
@@ -135,19 +157,19 @@ export class ComparisonJobRepository {
     await runInImmediateTransaction(this.database, async (transaction) => {
       const result = await transaction.run(`
         UPDATE comparison_jobs
-        SET status = 'SUCCEEDED', result_json = NULL, result_artifact_path = ?, run_directory = ?,
+        SET status = 'SUCCEEDED', result_json = NULL, result_artifact_path = ?, run_directory = ?, comparison_limit_json = ?,
             summary_added = ?, summary_removed = ?, summary_modified = ?,
             summary_identical = ?, summary_total = ?, summary_different = ?,
             updated_at = ?, completed_at = ?
         WHERE id = ? AND status = 'RUNNING'
       `,
-      resultArtifactPath, runDirectory,
+      resultArtifactPath, runDirectory, resultValue.comparisonLimit === undefined ? null : JSON.stringify(resultValue.comparisonLimit),
       resultValue.summary.added, resultValue.summary.removed, resultValue.summary.modified,
       resultValue.summary.identical, resultValue.summary.total, resultValue.summary.different,
       timestamp, timestamp, id);
       if (result.changes !== 1) throw new Error(`완료할 수 없는 비교 작업입니다: ${id}`);
       const job = await getRequired(transaction, id);
-      await this.writeAudit(transaction, job.createdBy, 'COMPARISON_SUCCEEDED', id, { ...resultValue.summary }, timestamp);
+      await this.writeAudit(transaction, job.createdBy, 'COMPARISON_SUCCEEDED', id, { ...resultValue.summary, comparisonLimit: resultValue.comparisonLimit }, timestamp);
     });
     this.notify(await this.getRequired(id));
   }
@@ -188,14 +210,15 @@ export class ComparisonJobRepository {
     return await Promise.all(jobs.map(hydrateResult));
   }
 
-  public async listRecentSummary(limit = 30): Promise<ComparisonJob[]> {
+  public async listRecentSummary(limit = 30, userId?: string): Promise<ComparisonJob[]> {
     return (await this.database.all<ComparisonJobRow[]>(`
-      SELECT id, status, scope, metadata_type, project_path, manifest_path, left_source, right_source,
+      SELECT id, status, scope, excluded_package_ids_json, exclude_package_metadata, comparison_limit_json, source_provenance_json, metadata_type, project_path, manifest_path, left_source, right_source,
         strict, show_identical, created_by, run_directory,
         summary_added, summary_removed, summary_modified, summary_identical, summary_total, summary_different,
         error_code, error_message, created_at, updated_at, started_at, completed_at
-      FROM comparison_jobs ORDER BY created_at DESC, id DESC LIMIT ?
-    `, Math.min(Math.max(limit, 1), 100))).map(mapRow);
+      FROM comparison_jobs ${userId === undefined ? '' : `WHERE ${jobVisibilitySql('comparison')}`}
+      ORDER BY created_at DESC, id DESC LIMIT ?
+    `, ...(userId === undefined ? [] : [userId, userId]), Math.min(Math.max(limit, 1), 100))).map(mapRow);
   }
 
   private notify(job: ComparisonJob): ComparisonJob {
@@ -230,7 +253,11 @@ function mapRow(row: ComparisonJobRow): ComparisonJob {
     : JSON.parse(row.result_json) as ComparisonResult;
   const summary = summaryFromRow(row) ?? result?.summary;
   return {
+    excludePackageMetadata: row.exclude_package_metadata === 1,
+    excludedPackageIds: row.excluded_package_ids_json == null ? [] : JSON.parse(row.excluded_package_ids_json) as string[],
+    ...(row.comparison_limit_json == null ? {} : { comparisonLimit: JSON.parse(row.comparison_limit_json) as NonNullable<ComparisonResult['comparisonLimit']> }),
     id: row.id,
+    ...(row.source_provenance_json == null ? {} : { sourceSnapshot: JSON.parse(row.source_provenance_json) as JobSourceSnapshot }),
     status: row.status,
     scope: row.scope,
     ...(row.metadata_type === null ? {} : { metadataType: row.metadata_type }),

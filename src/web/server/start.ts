@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 
 import { SfudError } from '../../core/errors.js';
 import { createWebServer } from './app.js';
+import type { GitHostPolicy } from '../../git/git-network.js';
 
 export const DEFAULT_UI_HOST = '127.0.0.1';
 export const DEFAULT_UI_PORT = 27_546;
@@ -11,18 +12,22 @@ export const DEFAULT_UI_PORT = 27_546;
 export interface StartWebUiOptions {
   host: string;
   port: number;
+  localMode?: boolean;
+  accessPassword?: string;
   allowRemote: boolean;
   open: boolean;
   dataDirectory?: string;
   projectPaths?: string[];
   trustedProxies?: string[];
   publicOrigin?: string;
+  gitHostPolicy?: GitHostPolicy;
   logger?: boolean;
 }
 
 export async function startWebUi(options: StartWebUiOptions): Promise<FastifyInstance> {
-  assertSafeBind(options.host, options.allowRemote);
-  const app = await createWebServer(options);
+  const effectiveOptions = options;
+  assertSafeBind(effectiveOptions.host, effectiveOptions.allowRemote);
+  const app = await createWebServer(effectiveOptions);
   const closeOnSignal = () => {
     void app.close().catch((error: unknown) => {
       const reason = error instanceof Error ? error.message : String(error);
@@ -38,12 +43,12 @@ export async function startWebUi(options: StartWebUiOptions): Promise<FastifyIns
   });
 
   try {
-    const address = await app.listen({ host: options.host, port: options.port });
+    const address = await app.listen({ host: effectiveOptions.host, port: effectiveOptions.port });
     process.stdout.write(`sfud UI: ${address}\n`);
     if (await app.sfudRuntime.auth.isSetupRequired()) {
       process.stdout.write(`sfud 최초 관리자 설정 코드: ${app.sfudRuntime.auth.getBootstrapToken()}\n`);
     }
-    if (options.open && process.stdout.isTTY) {
+    if (effectiveOptions.open && process.stdout.isTTY) {
       openBrowser(address);
     }
     return app;
@@ -52,7 +57,7 @@ export async function startWebUi(options: StartWebUiOptions): Promise<FastifyIns
     const reason = error instanceof Error ? error.message : String(error);
     throw new SfudError(
       'UI_START_FAILED',
-      `${options.host}:${options.port}에서 웹 UI를 시작하지 못했습니다. ${reason}`,
+      `${effectiveOptions.host}:${effectiveOptions.port}에서 웹 UI를 시작하지 못했습니다. ${reason}`,
     );
   }
 }

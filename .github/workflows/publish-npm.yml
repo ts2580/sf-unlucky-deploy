@@ -1,0 +1,101 @@
+name: Publish npm from verified GitHub Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Annotated GitHub Release tag to publish from
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish-sf-unlucky-deploy
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 대상 tag의 소스 체크아웃
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Node.js 및 고정 npm 설정
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+
+      - name: RC·정식 소스 브랜치와 태그 검증
+        id: release-policy
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          git fetch origin --no-tags \
+            '+refs/heads/canary:refs/remotes/origin/canary' \
+            '+refs/heads/main:refs/remotes/origin/main'
+          node scripts/check-release-source.mjs "${INPUT_TAG}" publish
+
+      - name: tag·실행 ref·commit 일치와 GitHub Release 확인
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ steps.release-policy.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          test "${INPUT_TAG}" = "${GITHUB_REF_NAME}"
+          test "${GITHUB_REF}" = "refs/tags/${INPUT_TAG}"
+          test "$(git cat-file -t "refs/tags/${INPUT_TAG}")" = tag
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git rev-parse "refs/tags/${INPUT_TAG}^{commit}")" = "${GITHUB_SHA}"
+          release_json="$(gh api "repos/${REPOSITORY}/releases/tags/${INPUT_TAG}")"
+          test "$(jq -r '.draft' <<<"${release_json}")" = false
+          test "$(jq -r '.prerelease' <<<"${release_json}")" = "${PRERELEASE}"
+          test "$(jq -r '.target_commitish' <<<"${release_json}")" = "${GITHUB_SHA}"
+          test "$(gh api "repos/${REPOSITORY}" --jq '.private')" = false
+
+      - name: npm 패키징·발행 정책 검사
+        run: npm run test:npm-policy
+
+      - name: 동일 GitHub Release의 tarball·manifest·checksum 검증
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          tarball="trstyq-sf-unlucky-deploy-${INPUT_TAG#v}.tgz"
+          gh release download "${INPUT_TAG}" --repo "${REPOSITORY}" --dir release \
+            --pattern "${tarball}" \
+            --pattern 'sbom.cdx.json' \
+            --pattern 'SHA256SUMS' \
+            --pattern 'release-manifest.json'
+          test "$(find release -maxdepth 1 -name 'trstyq-sf-unlucky-deploy-*.tgz' -type f | wc -l)" -eq 1
+          source_run_id="$(jq -r '.runId' release/release-manifest.json)"
+          [[ "${source_run_id}" =~ ^[0-9]+$ ]]
+          source_run="$(gh api "repos/${REPOSITORY}/actions/runs/${source_run_id}")"
+          test "$(jq -r '.path' <<<"${source_run}")" = '.github/workflows/release.yml'
+          test "$(jq -r '.event' <<<"${source_run}")" = push
+          test "$(jq -r '.conclusion' <<<"${source_run}")" = success
+          test "$(jq -r '.head_sha' <<<"${source_run}")" = "${GITHUB_SHA}"
+          node scripts/release-manifest.mjs verify "${INPUT_TAG}" "${GITHUB_SHA}" "${source_run_id}" release
+          npm run release:check -- "${INPUT_TAG}"
+          node scripts/package-smoke.mjs "./release/${tarball}"
+
+      - name: npm OIDC publish or exact-artifact retry check
+        env:
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_SHA: ${{ github.sha }}
+          RELEASE_SOURCE_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: node scripts/publish-npm.mjs "./release/trstyq-sf-unlucky-deploy-${RELEASE_TAG#v}.tgz" "${RELEASE_TAG}"

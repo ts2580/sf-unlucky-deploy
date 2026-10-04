@@ -34,11 +34,14 @@ export async function writeSelectedManifest(options: {
   components: readonly SelectedMetadataComponent[];
   projectPath: string;
   runsDirectory: string;
+  jobId?: string;
 }): Promise<{ manifestPath: string; components: SelectedMetadataComponent[] }> {
   const components = normalizeSelectedComponents(options.components);
-  const directory = path.join(options.runsDirectory, 'selected-manifests');
+  const directory = options.jobId === undefined
+    ? path.join(options.runsDirectory, 'selected-manifests')
+    : path.join(options.runsDirectory, options.jobId, 'input');
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  const manifestPath = path.join(directory, `${randomUUID()}.xml`);
+  const manifestPath = path.join(directory, options.jobId === undefined ? `${randomUUID()}.xml` : 'package.xml');
   const version = await readProjectApiVersion(options.projectPath);
   await writeFile(manifestPath, renderSelectedManifest(components, version), {
     encoding: 'utf8',

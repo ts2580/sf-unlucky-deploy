@@ -18,9 +18,11 @@ export function AuthLoading({ failed }: { failed: boolean }) {
 
 export function AuthScreen({
   setupRequired,
+  personalAccess = false,
   onAuthenticated,
 }: {
   setupRequired: boolean;
+  personalAccess?: boolean;
   onAuthenticated: (user: ApiUser) => void;
 }) {
   const [error, setError] = useState('');
@@ -38,7 +40,7 @@ export function AuthScreen({
           displayName: form.get('displayName'),
           password: form.get('password'),
         }
-      : { email: form.get('email'), password: form.get('password') };
+      : { ...(personalAccess ? {} : { email: form.get('email') }), password: form.get('password') };
     try {
       const result = await authenticate(setupRequired, body);
       onAuthenticated(result.user);
@@ -56,10 +58,14 @@ export function AuthScreen({
         <div className="auth-brand"><img src="/favicon.svg" alt="" /><span><strong>sfud</strong><small>Deployment Console</small></span></div>
         <span className="auth-icon"><Icon name={setupRequired ? 'key' : 'shield'} /></span>
         <p className="eyebrow">{setupRequired ? 'FIRST ADMIN' : 'SECURE ACCESS'}</p>
-        <h1>{setupRequired ? '최초 관리자를 설정합니다.' : '다시 오셨군요.'}</h1>
-        <p>{setupRequired
-          ? '서버 시작 로그에 표시된 일회용 설정 코드와 관리자 정보를 입력하세요.'
-          : '배포 콘솔에 접근하려면 관리자에게 등록된 계정으로 로그인하세요.'}</p>
+        {personalAccess && <>
+          <h1>개인 배포 앱에 접속합니다.</h1>
+          <p>설정한 접속 비밀번호를 입력하세요.</p>
+        </>}
+        {setupRequired && <>
+          <h1>최초 관리자를 설정합니다.</h1>
+          <p>서버 시작 로그에 표시된 일회용 설정 코드와 관리자 정보를 입력하세요.</p>
+        </>}
         <form onSubmit={(event) => void submit(event)}>
           {setupRequired && <>
             <label htmlFor="bootstrap-token">초기 설정 코드</label>
@@ -67,17 +73,19 @@ export function AuthScreen({
             <label htmlFor="display-name">표시 이름</label>
             <input id="display-name" name="displayName" autoComplete="name" maxLength={80} required />
           </>}
-          <label htmlFor="auth-email">이메일</label>
-          <input id="auth-email" name="email" type="email" autoComplete="username" required />
-          <label htmlFor="auth-password">비밀번호</label>
+          {!personalAccess && <>
+            <label htmlFor="auth-email">이메일</label>
+            <input id="auth-email" name="email" type="email" autoComplete="username" required />
+          </>}
+          <label htmlFor="auth-password">{personalAccess ? '접속 비밀번호' : '비밀번호'}</label>
           <input id="auth-password" name="password" type="password" autoComplete={setupRequired ? 'new-password' : 'current-password'} minLength={12} maxLength={128} required />
           {setupRequired && <small className="auth-hint">12자 이상 128자 이하로 입력하세요.</small>}
           {error && <p className="auth-error" role="alert">{error}</p>}
           <button className="button button-primary" type="submit" disabled={submitting}>
-            <Icon name={setupRequired ? 'key' : 'shield'} />{submitting ? '확인 중……' : setupRequired ? '관리자 생성' : '로그인'}
+            <Icon name={setupRequired ? 'key' : 'shield'} />{submitting ? '확인 중……' : setupRequired ? '관리자 생성' : personalAccess ? '접속' : '로그인'}
           </button>
         </form>
-        <div className="auth-security"><Icon name="shield" />세션 원문과 비밀번호는 데이터베이스에 저장하지 않습니다.</div>
+        {!personalAccess && <div className="auth-security"><Icon name="shield" />세션 원문과 비밀번호는 데이터베이스에 저장하지 않습니다.</div>}
       </section>
     </main>
   );

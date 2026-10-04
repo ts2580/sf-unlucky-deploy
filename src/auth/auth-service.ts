@@ -3,10 +3,10 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import type { DatabaseExecutor, DatabaseHandle } from '../storage/database-executor.js';
 import { runInImmediateTransaction } from '../storage/transaction.js';
 import type { SfudUser, UserRole } from '../storage/user-repository.js';
-import { hashPassword, verifyPassword } from './password.js';
+import { hashPassword, passwordNeedsRehash, verifyPassword } from './password.js';
 
 const SESSION_LIFETIME_MS = 12 * 60 * 60 * 1_000;
-const FAKE_PASSWORD_DIGEST = 'scrypt$16384$8$1$MDEyMzQ1Njc4OWFiY2RlZg$3kLAKUwMy10P1x8fQiqWLxWgFa9tsv8KlTl9KlfPvqrYXZJtdQlkUdILMGQeKsgQHUl_VJusZ4QGtE8zpdlzLA';
+const FAKE_PASSWORD_DIGEST = 'scrypt$32768$8$1$MDEyMzQ1Njc4OWFiY2RlZg$wGUWwaS40LZ42Q8Fd65JImtzS0kpUzu-NsMmfFuNRLp-LWzEA1CZwf9aInwgukUgIvSodWn3FkBzM3KLsysR3w';
 
 export interface AuthenticatedSession {
   user: SfudUser;
@@ -41,10 +41,12 @@ interface SessionRow {
   updated_at: string;
   csrf_token_hash: string | null;
   expires_at: string;
+  local_password_digest?: string | null;
 }
 
 export class AuthService {
   private bootstrapToken: string | undefined;
+  private localAccessDigest: string | undefined;
 
   public constructor(
     private readonly database: DatabaseExecutor,
@@ -63,6 +65,50 @@ export class AuthService {
 
   public getBootstrapToken(): string | undefined {
     return this.bootstrapToken;
+  }
+
+  public async ensureLocalOperator(): Promise<void> {
+    const timestamp = this.now().toISOString();
+    await this.database.run(`
+      INSERT INTO users (id, email, display_name, role, created_at, updated_at)
+      VALUES ('local-operator', 'local@sfud.invalid', '로컬 운영자', 'ADMIN', ?, ?)
+      ON CONFLICT(id) DO NOTHING
+    `, timestamp, timestamp);
+  }
+
+  public async createLocalSession(): Promise<AuthenticatedSession> {
+    return this.createSession('local-operator');
+  }
+
+  public async configureLocalAccess(password: string | undefined): Promise<void> {
+    const current = await this.database.get<{ password_digest: string }>(
+      "SELECT password_digest FROM password_credentials WHERE user_id = 'local-operator'",
+    );
+    if (password === undefined && current === undefined) {
+      this.localAccessDigest = undefined;
+      return;
+    }
+    if (password !== undefined && current !== undefined
+      && await verifyPassword(password, current.password_digest)) {
+      this.localAccessDigest = current.password_digest;
+      return;
+    }
+    const digest = password === undefined ? undefined : await hashPassword(password);
+    const timestamp = this.now().toISOString();
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      // Auto-created loopback sessions must never unlock a newly protected server.
+      await transaction.run("UPDATE sessions SET revoked_at = ? WHERE user_id = 'local-operator' AND revoked_at IS NULL", timestamp);
+      if (digest === undefined) {
+        await transaction.run("DELETE FROM password_credentials WHERE user_id = 'local-operator'");
+      } else {
+        await transaction.run(`
+          INSERT INTO password_credentials (user_id, password_digest, updated_at)
+          VALUES ('local-operator', ?, ?)
+          ON CONFLICT(user_id) DO UPDATE SET password_digest = excluded.password_digest, updated_at = excluded.updated_at
+        `, digest, timestamp);
+      }
+    });
+    this.localAccessDigest = digest;
   }
 
   public async bootstrapAdmin(input: {
@@ -111,7 +157,16 @@ export class AuthService {
     if (!valid || row === undefined || row.disabled_at !== null) {
       throw new AuthError('INVALID_CREDENTIALS', '이메일 또는 비밀번호가 올바르지 않습니다.');
     }
-    return this.createSession(row.user_id);
+    if (passwordNeedsRehash(row.password_digest)) {
+      const replacement = await hashPassword(password);
+      await this.database.run(`
+        UPDATE password_credentials SET password_digest = ?, updated_at = ?
+        WHERE user_id = ? AND password_digest = ?
+      `, replacement, this.now().toISOString(), row.user_id, row.password_digest);
+      row.password_digest = replacement;
+      if (row.user_id === 'local-operator') this.localAccessDigest = replacement;
+    }
+    return this.createSession(row.user_id, row.password_digest);
   }
 
   public async authenticate(sessionToken: string | undefined): Promise<SfudUser | undefined> {
@@ -126,6 +181,7 @@ export class AuthService {
   public async sessionState(sessionToken: string | undefined): Promise<{
     user: SfudUser;
     csrfTokenHash: string;
+    sessionWorkspaceId: string;
     expiresAt: string;
   } | undefined> {
     if (sessionToken === undefined || sessionToken.length === 0) return undefined;
@@ -136,7 +192,7 @@ export class AuthService {
       || row.expires_at <= this.now().toISOString()
       || row.csrf_token_hash === null
     ) return undefined;
-    return { user: mapUser(row), csrfTokenHash: row.csrf_token_hash, expiresAt: row.expires_at };
+    return { user: mapUser(row), sessionWorkspaceId: row.session_id, csrfTokenHash: row.csrf_token_hash, expiresAt: row.expires_at };
   }
 
   public async revoke(sessionToken: string): Promise<void> {
@@ -269,13 +325,24 @@ export class AuthService {
     return this.getUserRequired(input.userId);
   }
 
-  private async createSession(userId: string): Promise<AuthenticatedSession> {
+  private async createSession(userId: string, verifiedPasswordDigest?: string): Promise<AuthenticatedSession> {
     const sessionToken = this.createSecret();
     const csrfToken = this.createSecret();
     const createdAt = this.now();
     const expiresAt = new Date(createdAt.getTime() + SESSION_LIFETIME_MS).toISOString();
     const sessionId = this.createId();
     await runInImmediateTransaction(this.database, async (transaction) => {
+      if (userId === 'local-operator') {
+        const credential = await transaction.get<{ password_digest: string }>(
+          "SELECT password_digest FROM password_credentials WHERE user_id = 'local-operator'",
+        );
+        // Check inside the insert transaction: a second process or a password change
+        // must not mint an automatic session or finish a login with an old password.
+        if (credential?.password_digest !== verifiedPasswordDigest
+          || credential?.password_digest !== this.localAccessDigest) {
+          throw new AuthError('INVALID_CREDENTIALS', '개인용 접속 설정이 변경되었습니다. 서버를 다시 시작하세요.');
+        }
+      }
       await transaction.run(`
         INSERT INTO sessions (
           id, user_id, token_hash, csrf_token_hash, expires_at, created_at
@@ -291,13 +358,18 @@ export class AuthService {
   }
 
   private async getSessionRow(sessionToken: string): Promise<SessionRow | undefined> {
-    return this.database.get<SessionRow>(`
+    const row = await this.database.get<SessionRow>(`
       SELECT s.id session_id, s.user_id, s.csrf_token_hash, s.expires_at,
-             u.email, u.display_name, u.role, u.disabled_at, u.created_at, u.updated_at
+             u.email, u.display_name, u.role, u.disabled_at, u.created_at, u.updated_at,
+             pc.password_digest local_password_digest
       FROM sessions s
       JOIN users u ON u.id = s.user_id
+      LEFT JOIN password_credentials pc ON pc.user_id = u.id
       WHERE s.token_hash = ? AND s.revoked_at IS NULL
     `, hashSecret(sessionToken));
+    if (row?.user_id === 'local-operator'
+      && (row.local_password_digest ?? undefined) !== this.localAccessDigest) return undefined;
+    return row;
   }
 
   private async getUserRequired(userId: string): Promise<SfudUser> {

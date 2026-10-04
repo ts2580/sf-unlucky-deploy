@@ -1,0 +1,108 @@
+name: Windows SQLite bundle
+
+on:
+  push:
+    branches: ['feature/release-*']
+    paths:
+      - .github/workflows/windows-bundle.yml
+      - scripts/windows-bundle-policy.mjs
+      - scripts/package-windows-bundle.mjs
+      - scripts/package-smoke.mjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-sqlite-bundle-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    outputs:
+      tarball: ${{ steps.bundle.outputs.bundle_tarball }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: 고정된 원본 릴리즈와 번들 버전 확인
+        id: bundle
+        shell: pwsh
+        run: |
+          $bundlePolicy = node --input-type=module -e "import { WINDOWS_BUNDLE } from './scripts/windows-bundle-policy.mjs'; console.log(JSON.stringify(WINDOWS_BUNDLE));" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Windows bundle policy 조회 실패' }
+          "source_tag=v$($bundlePolicy.baseVersion)" >> $env:GITHUB_OUTPUT
+          "source_commit=$($bundlePolicy.sourceCommit)" >> $env:GITHUB_OUTPUT
+          "source_tarball=trstyq-sf-unlucky-deploy-$($bundlePolicy.baseVersion).tgz" >> $env:GITHUB_OUTPUT
+          "bundle_tarball=trstyq-sf-unlucky-deploy-$($bundlePolicy.version).tgz" >> $env:GITHUB_OUTPUT
+      - name: 고정 npm CLI 준비
+        shell: pwsh
+        run: |
+          npm install --prefix "$env:RUNNER_TEMP/npm-tools" npm@11.20.0 --ignore-scripts --no-audit --no-fund
+          "SFUD_SMOKE_NPM_CLI=$env:RUNNER_TEMP/npm-tools/node_modules/npm/bin/npm-cli.js" >> $env:GITHUB_ENV
+      - name: 공개 원본 tarball과 릴리즈 증거 다운로드
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ steps.bundle.outputs.source_tag }}
+          SOURCE_COMMIT: ${{ steps.bundle.outputs.source_commit }}
+          SOURCE_TARBALL: ${{ steps.bundle.outputs.source_tarball }}
+        run: |
+          set -euo pipefail
+          gh release download "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --dir source-release \
+            --pattern "$SOURCE_TARBALL" --pattern release-manifest.json --pattern SHA256SUMS --pattern sbom.cdx.json
+          source_run_id="$(node -p "JSON.parse(require('fs').readFileSync('source-release/release-manifest.json', 'utf8')).runId")"
+          cd source-release
+          node ../scripts/release-manifest.mjs verify "$SOURCE_TAG" "$SOURCE_COMMIT" "$source_run_id" .
+      - name: Windows x64 의존성 및 공식 SQLite binary 동봉
+        shell: pwsh
+        env:
+          SOURCE_TARBALL: ${{ steps.bundle.outputs.source_tarball }}
+        run: node scripts/package-windows-bundle.mjs "source-release/$env:SOURCE_TARBALL" windows-release
+      - uses: actions/upload-artifact@v6
+        with:
+          name: windows-sqlite-bundle
+          path: windows-release/
+          if-no-files-found: error
+
+  offline-install:
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.19.0', '24']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - name: 고정 npm CLI 준비
+        shell: pwsh
+        run: |
+          npm install --prefix "$env:RUNNER_TEMP/npm-tools" npm@11.20.0 --ignore-scripts --no-audit --no-fund
+          "SFUD_SMOKE_NPM_CLI=$env:RUNNER_TEMP/npm-tools/node_modules/npm/bin/npm-cli.js" >> $env:GITHUB_ENV
+      - uses: actions/download-artifact@v7
+        with:
+          name: windows-sqlite-bundle
+          path: windows-release
+      - name: Node 외부 통신 차단 후 빈 캐시에서 오프라인 설치·실행 검증
+        shell: pwsh
+        env:
+          BUNDLE_TARBALL: ${{ needs.package.outputs.tarball }}
+        run: |
+          $nodePath = (Get-Command node).Source
+          $ruleName = 'SFUD Windows offline Node test'
+          New-NetFirewallRule -DisplayName $ruleName -Direction Outbound -Action Block -Program $nodePath -Profile Any | Out-Null
+          try {
+            node --input-type=module -e 'for (const host of ["https://github.com", "https://registry.npmjs.org"]) { let blocked = false; try { await fetch(host, {signal: AbortSignal.timeout(3000)}); } catch { blocked = true; } if (!blocked) throw new Error("Network was not blocked: " + host); console.log("Blocked: " + host); }'
+            if ($LASTEXITCODE -ne 0) { throw '외부 통신 차단 검증 실패' }
+            node scripts/package-smoke.mjs --windows-bundle "windows-release/$env:BUNDLE_TARBALL"
+            if ($LASTEXITCODE -ne 0) { throw '오프라인 설치 검사 실패' }
+          } finally {
+            Get-NetFirewallRule -DisplayName $ruleName | Remove-NetFirewallRule
+          }

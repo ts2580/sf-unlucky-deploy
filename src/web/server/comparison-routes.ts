@@ -1,12 +1,19 @@
 import type { FastifyInstance } from 'fastify';
+import { Type } from '@sinclair/typebox';
+import { WorkspaceResponseSchema } from '../../api/workspace-contracts.js';
+import { orgIdentityFingerprint } from '../../deploy/org-identity.js';
+import { SfudError } from '../../core/errors.js';
 
 import type { ComparisonJob } from '../../compare/comparison-job-repository.js';
 import { redactSensitiveText } from '../../salesforce/sf-client.js';
 import { hasTestClassSuffix } from '../../deploy/test-plan.js';
 import { requireAuthenticatedSession } from './auth-routes.js';
 import { maskOrgId } from './workspace-service.js';
+import { validateExcludedPackageIds } from '../../metadata/package-exclusion.js';
 
 interface CreateComparisonBody {
+  excludedPackageIds?: string[];
+  excludePackageMetadata?: boolean;
   projectId?: string;
   scope?: 'manifest' | 'all';
   manifest?: string;
@@ -37,15 +44,23 @@ interface ComponentPageQuery {
 }
 
 export async function registerComparisonRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/api/v1/workspace', async (request, reply) => {
+  app.get('/api/v1/workspace', { schema: { response: {
+    200: WorkspaceResponseSchema,
+    502: Type.Object({ error: Type.Object({ code: Type.String(), message: Type.String() }) }),
+  } } }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
     try {
-      const [orgs, projects, uploads] = await Promise.all([
+      const [orgs, projects] = await Promise.all([
         app.sfudRuntime.workspace.listOrgs(),
         Promise.resolve(app.sfudRuntime.workspace.listProjects()),
-        Promise.resolve(app.sfudRuntime.workspace.listUploadedProjects(session.user.id)),
       ]);
+      const fingerprints = new Map(orgs.filter((org) => org.connected && org.username !== undefined && org.orgId !== undefined).map((org) => [org.id, orgIdentityFingerprint({
+        alias: org.alias, username: org.username!, orgId: org.orgId!,
+        ...(org.connectionId === undefined ? {} : { connectionId: org.connectionId }),
+        ...(org.connectionGeneration === undefined ? {} : { connectionGeneration: org.connectionGeneration }),
+        ...(org.instanceUrlHash === undefined ? {} : { instanceUrlHash: org.instanceUrlHash }),
+      })]));
       return reply.send({
         orgs: orgs.map((org) => ({
           id: org.id,
@@ -53,20 +68,25 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
           label: org.label,
           connected: org.connected,
           ...(org.edition === undefined ? {} : { edition: org.edition }),
+          environment: org.environment ?? 'unknown',
           ...(org.username === undefined ? {} : { username: org.username }),
           ...(org.orgId === undefined ? {} : { maskedOrgId: maskOrgId(org.orgId) }),
+          ...(fingerprints.has(org.id) ? { orgIdentityFingerprint: fingerprints.get(org.id)! } : {}),
         })),
-        projects,
-        uploads,
+        projects: [...projects, ...app.sfudRuntime.gitImports.listProjects(session.user.id)],
         sources: [
+          ...await app.sfudRuntime.gitRegistrations.sources(session.user.id),
+          ...app.sfudRuntime.gitImports.listSources(session.user.id),
           ...orgs.filter((org) => org.connected).map((org) => ({
             id: org.id,
             kind: 'org' as const,
             location: 'org' as const,
             label: org.alias,
+            environment: org.environment ?? 'unknown',
             detail: [org.label, org.edition].filter(Boolean).join(' · '),
             ...(org.username === undefined ? {} : { username: org.username }),
             ...(org.orgId === undefined ? {} : { maskedOrgId: maskOrgId(org.orgId) }),
+            ...(fingerprints.has(org.id) ? { orgIdentityFingerprint: fingerprints.get(org.id)! } : {}),
           })),
           ...projects.map((project) => ({
             id: `project:${project.id}`,
@@ -75,13 +95,6 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
             label: project.displayName,
             detail: '서버에 명시적으로 등록된 DX 프로젝트',
           })),
-          ...uploads.map((project) => ({
-            id: `upload:${project.id}`,
-            kind: 'local' as const,
-            location: 'upload' as const,
-            label: project.displayName,
-            detail: '내 단말기에서 임시 업로드 · 마지막 사용 후 4시간',
-          })),
         ],
       });
     } catch (error) {
@@ -89,6 +102,18 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
         code: 'WORKSPACE_LOAD_FAILED',
         message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
       } });
+    }
+  });
+
+  app.get<{ Querystring: MetadataTypesQuery }>('/api/v1/installed-packages', async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply);
+    if (session === undefined) return;
+    try {
+      const sourceIds = (request.query.sourceIds ?? '').split(',').filter(Boolean);
+      return reply.send({ packages: await app.sfudRuntime.workspace.listPackages(sourceIds, session.user.id) });
+    } catch (error) {
+      return reply.code(400).send({ error: { code: 'INSTALLED_PACKAGES_LOAD_FAILED',
+        message: redactSensitiveText(error instanceof Error ? error.message : String(error)) } });
     }
   });
 
@@ -140,8 +165,13 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     try {
       const scope = comparisonScope(request.body?.scope);
       const sourceOnly = request.body?.sourceOnly === true;
+      if (request.body?.excludePackageMetadata !== undefined && typeof request.body.excludePackageMetadata !== 'boolean') {
+        throw new Error('설치 패키지 제외 여부는 boolean이어야 합니다.');
+      }
       const rightSourceId = requiredString(request.body?.rightSourceId, 'SOURCE 소스');
       const job = await app.sfudRuntime.comparisons.create({
+        excludedPackageIds: validateExcludedPackageIds(request.body?.excludedPackageIds),
+        excludePackageMetadata: request.body?.excludePackageMetadata === true,
         ...(scope === 'manifest'
           ? { projectId: requiredString(request.body?.projectId, 'manifest 프로젝트') }
           : {}),
@@ -158,9 +188,13 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
         strict: request.body?.strict === true,
         showIdentical: request.body?.showIdentical === true,
         createdBy: session.user.id,
+        sessionWorkspaceId: session.sessionWorkspaceId,
       });
       return reply.code(202).send({ job: publicJob(app, job, false) });
     } catch (error) {
+      if (error instanceof SfudError && error.code === 'REQUEST_CAPACITY_EXCEEDED') {
+        return reply.code(503).send({ error: { code: error.code, message: error.message } });
+      }
       return reply.code(400).send({ error: {
         code: 'INVALID_COMPARISON_REQUEST',
         message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
@@ -171,18 +205,23 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
   app.get('/api/v1/comparisons', async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
-    const jobs = await app.sfudRuntime.comparisonJobs.listRecentSummary();
+    const jobs = await app.sfudRuntime.comparisonJobs.listRecentSummary(30, session.user.id);
     return reply.send({ jobs: jobs.map((job) => publicJob(app, job, false)) });
   });
 
-  app.get<{ Params: { id: string } }>('/api/v1/comparisons/:id', async (request, reply) => {
+  app.get<{ Params: { id: string }; Querystring: { includeIdentical?: boolean } }>('/api/v1/comparisons/:id', {
+    schema: { querystring: Type.Object({ includeIdentical: Type.Optional(Type.Boolean()) }, { additionalProperties: false }) },
+  }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
+    if (!await app.sfudRuntime.jobAccess.canAccess('comparison', request.params.id, session.user.id)) {
+      return reply.code(404).send({ error: { code: 'COMPARISON_NOT_FOUND', message: '비교 작업을 찾을 수 없습니다.' } });
+    }
     const job = await app.sfudRuntime.comparisonJobs.get(request.params.id);
     if (job === undefined) {
       return reply.code(404).send({ error: { code: 'COMPARISON_NOT_FOUND', message: '비교 작업을 찾을 수 없습니다.' } });
     }
-    return reply.send({ job: publicJob(app, job, true) });
+    return reply.send({ job: publicJob(app, job, true, request.query.includeIdentical === true) });
   });
 
   app.get<{ Params: { id: string }; Querystring: ComponentPageQuery }>(
@@ -193,6 +232,9 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
       try {
         const page = positiveInteger(request.query.page, 1, 1_000_000, '페이지');
         const pageSize = positiveInteger(request.query.pageSize, 50, 100, '페이지 크기');
+        if (!await app.sfudRuntime.jobAccess.canAccess('comparison', request.params.id, session.user.id)) {
+          return reply.code(404).send({ error: { code: 'COMPARISON_NOT_FOUND', message: '비교 작업을 찾을 수 없습니다.' } });
+        }
         const job = await app.sfudRuntime.comparisonJobs.get(request.params.id);
         if (job === undefined) {
           return reply.code(404).send({ error: {
@@ -221,31 +263,34 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
   );
 }
 
-function publicJob(app: FastifyInstance, job: ComparisonJob, includeResult: boolean) {
-  const left = app.sfudRuntime.workspace.publicSource(job.leftSource);
-  const right = app.sfudRuntime.workspace.publicSource(job.rightSource);
+function publicJob(app: FastifyInstance, job: ComparisonJob, includeResult: boolean, includeIdentical = false) {
+  const left = job.sourceSnapshot?.left ?? app.sfudRuntime.workspace.publicSource(job.leftSource);
+  const right = job.sourceSnapshot?.right ?? app.sfudRuntime.workspace.publicSource(job.rightSource);
   const result = includeResult && job.result !== undefined ? {
     ...job.result,
     left: { ...job.result.left, displayName: left.label },
     right: { ...job.result.right, displayName: right.label },
-    components: job.showIdentical
+    components: job.showIdentical || includeIdentical
       ? job.result.components
       : job.result.components.filter((component) => component.status !== 'IDENTICAL'),
   } : undefined;
   return {
+    ...(job.comparisonLimit === undefined ? {} : { comparisonLimit: job.comparisonLimit }),
     id: job.id,
-    mode: job.leftSource === job.rightSource ? 'source' : 'compare',
+    mode: job.leftSource === job.rightSource || job.comparisonLimit?.exceeded === true ? 'source' : 'compare',
     status: job.status,
-    projectId: app.sfudRuntime.workspace.publicSource(`local:${job.projectPath}`).id.replace(/^project:/u, ''),
+    projectId: (job.sourceSnapshot?.project ?? app.sfudRuntime.workspace.publicSource(`local:${job.projectPath}`)).id.replace(/^project:/u, ''),
     scope: job.scope === 'ALL' ? 'all' : 'manifest',
     ...(job.metadataType === undefined ? {} : { metadataType: job.metadataType }),
     manifest: job.scope === 'ALL'
       ? job.metadataType ?? '전체 배포 가능 메타데이터 (SF CLI)'
-      : app.sfudRuntime.workspace.publicManifest(job.projectPath, job.manifestPath),
+      : job.sourceSnapshot?.manifest ?? app.sfudRuntime.workspace.publicManifest(job.projectPath, job.manifestPath),
     left,
     right,
     strict: job.strict,
     showIdentical: job.showIdentical,
+    excludePackageMetadata: job.excludePackageMetadata === true,
+    excludedPackageIds: job.excludedPackageIds ?? [],
     ...(job.summary === undefined ? {} : { summary: job.summary }),
     ...(result === undefined ? {} : { result }),
     ...(job.errorCode === undefined ? {} : { errorCode: job.errorCode }),

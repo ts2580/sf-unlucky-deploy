@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { SingleJobQueue } from '../src/deploy/single-job-queue.js';
+import { JobQueueCapacityError, SingleJobQueue } from '../src/deploy/single-job-queue.js';
+import { currentSalesforceConnectionPin, currentSalesforceUserId, pinSalesforceConnection, runAsSalesforceUser } from '../src/salesforce/user-context.js';
 
 describe('단일 배포 작업 큐', () => {
   it('여러 작업이 동시에 실행되지 않도록 직렬화한다', async () => {
@@ -69,5 +70,61 @@ describe('단일 배포 작업 큐', () => {
     await aborted;
     expect(await queue.waitForIdle(100)).toBe(true);
     expect(queue.status()).toEqual({ queuedCount: 0, accepting: false });
+  });
+
+  it('준비 전에 대기 슬롯을 예약하고 enqueue 또는 실패에서 한 번만 반납한다', async () => {
+    const queue = new SingleJobQueue(1, 1);
+    const reservation = queue.reserve();
+    expect(() => queue.reserve()).toThrow(JobQueueCapacityError);
+    const task = queue.enqueue('job-1', async () => 'completed', reservation);
+    await expect(task).resolves.toBe('completed');
+    const next = queue.reserve();
+    next.release();
+    next.release();
+    expect(queue.reserve()).toBeDefined();
+  });
+
+  it('대기 중인 작업은 enqueue 당시 사용자와 연결 pin 전체를 복원하고 no-context 작업은 격리한다', async () => {
+    const queue = new SingleJobQueue();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started: string[] = [];
+    const owners: Array<string | undefined> = [];
+    const pins: Array<ReturnType<typeof currentSalesforceConnectionPin>> = [];
+    let signalStarted!: () => void;
+    const startedSignal = new Promise<void>((resolve) => { signalStarted = resolve; });
+    const first = runAsSalesforceUser('user-a', async () => {
+      pinSalesforceConnection('shared-alias', 'connection-a', 4);
+      return queue.enqueue('user-a-job', async () => {
+        started.push('a');
+        signalStarted();
+        owners.push(currentSalesforceUserId());
+        pins.push(currentSalesforceConnectionPin('shared-alias'));
+        await gate;
+      });
+    });
+    await startedSignal;
+    const second = runAsSalesforceUser('user-b', async () => {
+      pinSalesforceConnection('shared-alias', 'connection-b', 7);
+      return queue.enqueue('user-b-job', async () => {
+        started.push('b');
+        owners.push(currentSalesforceUserId());
+        pins.push(currentSalesforceConnectionPin('shared-alias'));
+      });
+    });
+    const anonymous = queue.enqueue('anonymous-job', async () => {
+      started.push('none');
+      owners.push(currentSalesforceUserId());
+      pins.push(currentSalesforceConnectionPin('shared-alias'));
+    });
+    release();
+    await Promise.all([first, second, anonymous]);
+    expect(started).toEqual(['a', 'b', 'none']);
+    expect(owners).toEqual(['user-a', 'user-b', undefined]);
+    expect(pins).toEqual([
+      { id: 'connection-a', generation: 4 },
+      { id: 'connection-b', generation: 7 },
+      undefined,
+    ]);
   });
 });

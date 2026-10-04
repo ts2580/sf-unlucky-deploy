@@ -18,7 +18,7 @@ load_sfud_env() {
     const { parseEnv } = require("node:util");
     const values = parseEnv(readFileSync(process.argv[1], "utf8"));
     for (const key of Object.keys(values).sort()) {
-      if (/^SFUD_[A-Z0-9_]+$/.test(key)) {
+      if (key === "LOCAL" || /^SFUD_[A-Z0-9_]+$/.test(key)) {
         process.stdout.write(`${key}=${values[key]}\0`);
       }
     }
@@ -31,10 +31,8 @@ load_sfud_env() {
   while IFS= read -r -d '' env_entry; do
     env_key="${env_entry%%=*}"
     env_value="${env_entry#*=}"
-    if [[ ! -v "$env_key" ]]; then
-      printf -v "$env_key" '%s' "$env_value"
-      export "$env_key"
-    fi
+    printf -v "$env_key" '%s' "$env_value"
+    export "$env_key"
   done < "$env_dump"
   rm -f -- "$env_dump"
 }
@@ -57,6 +55,10 @@ if [[ ! "$UI_PORT" =~ ^[0-9]+$ ]] || ((UI_PORT < 1 || UI_PORT > 65535)); then
 fi
 if [[ ! "$SHUTDOWN_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || ((SHUTDOWN_TIMEOUT_SECONDS < 1)); then
   echo "SFUD_SHUTDOWN_TIMEOUT_SECONDS는 1 이상의 정수여야 합니다." >&2
+  exit 2
+fi
+if [[ "${LOCAL:-false}" != "true" && "${LOCAL:-false}" != "false" ]]; then
+  echo "[INVALID_LOCAL_MODE] LOCAL 환경변수는 true 또는 false여야 합니다." >&2
   exit 2
 fi
 if ! command -v lsof >/dev/null 2>&1; then
