@@ -31,6 +31,7 @@ try {
   if (!entries.includes('package/npm-shrinkwrap.json')) throw new Error('릴리즈 tarball에 npm-shrinkwrap.json이 없습니다.');
   const archivePackageJson = JSON.parse(await readTarball(tarball, '-xOf', 'package/package.json'));
   const sourcePackageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
+  const expectedCliVersion = windowsBundle ? WINDOWS_BUNDLE.baseVersion : sourcePackageJson.version;
   assertPackedMetadataMatches(archivePackageJson, windowsBundle ? { ...sourcePackageJson, version: WINDOWS_BUNDLE.version,
     publishConfig: { ...sourcePackageJson.publishConfig, tag: 'win32-x64' } } : sourcePackageJson);
   if (windowsBundle && (JSON.stringify(archivePackageJson.os) !== '["win32"]' || JSON.stringify(archivePackageJson.cpu) !== '["x64"]'
@@ -48,7 +49,7 @@ try {
   await runNpm(['ls', '--global', '--all', '--prefix', prefix, ...offlineArgs]);
   const executable = process.platform === 'win32' ? path.join(prefix, 'sfud.cmd') : path.join(prefix, 'bin', 'sfud');
   const actualVersion = (await run(executable, ['--version'], temporaryDirectory)).trim();
-  if (actualVersion !== sourcePackageJson.version) throw new Error(`설치된 sfud 버전 불일치: ${actualVersion} != ${sourcePackageJson.version}`);
+  if (actualVersion !== expectedCliVersion) throw new Error(`설치된 sfud 버전 불일치: ${actualVersion} != ${expectedCliVersion}`);
   const help = await run(executable, ['--help'], temporaryDirectory);
   if (!help.includes('Salesforce')) throw new Error('설치된 CLI 도움말이 예상한 명령 출력을 반환하지 않습니다.');
 
