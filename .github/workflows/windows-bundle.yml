@@ -58,10 +58,10 @@ jobs:
           cd source-release
           node ../scripts/release-manifest.mjs verify "$SOURCE_TAG" "$SOURCE_COMMIT" "$source_run_id" .
       - name: Windows x64 의존성 및 공식 SQLite binary 동봉
-        shell: bash
+        shell: pwsh
         env:
           SOURCE_TARBALL: ${{ steps.bundle.outputs.source_tarball }}
-        run: node scripts/package-windows-bundle.mjs "source-release/$SOURCE_TARBALL" windows-release
+        run: node scripts/package-windows-bundle.mjs "source-release/$env:SOURCE_TARBALL" windows-release
       - uses: actions/upload-artifact@v6
         with:
           name: windows-sqlite-bundle
