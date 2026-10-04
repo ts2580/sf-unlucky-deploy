@@ -58,6 +58,12 @@ RC는 `canary`에서 GitHub prerelease와 npm `next`로 공개한다. RC 검증 
 
 GitHub Release의 설치 검증이 완료되면 `publish-npm.yml`을 해당 태그 ref로 수동 실행한다. npm은 정식 버전도 우선 `next`에 발행하고, registry 산출물 검증 후 소유자가 `latest`로 별도 승격한다. 원본 Release와 동일한 태그·커밋·파일의 발행 재시도는 허용하며, 해당 커밋이 RC는 `canary`, 정식은 `main` 이력에 있어야 한다.
 
+일반 npm 패키지를 발행할 때 같은 원본 버전의 SQLite 포함 Windows x64 번들도 함께 발행한다. RC 번들은 같은 패키지 이름에 `<원본 버전>.win32-x64.<번들 차수>` 버전과 `win32-x64` npm 태그를 사용한다. 예: 일반판 `0.4.0-rc.4` / `next`, Windows 번들 `0.4.0-rc.4.win32-x64.1` / `win32-x64`.
+
+Windows 번들은 공개된 일반 Release tarball을 입력으로 사용한다. `scripts/windows-bundle-policy.mjs`에 원본 버전·커밋·SHA-256과 새 번들 버전을 고정한 뒤 `Windows SQLite bundle` 워크플로를 실행한다. 이 워크플로는 `feature/release-*` 브랜치의 관련 파일 변경으로도 실행된다. 수동 실행은 워크플로가 기본 브랜치에 반영된 뒤 사용한다. Windows Node 22.19/24에서 외부 통신 차단·빈 캐시·오프라인 설치·CLI·UI·SQLite·재시작 검사를 모두 통과해야 한다.
+
+검증된 Windows 산출물은 원본 GitHub Release에 추가 Asset으로 올리고, 같은 tarball을 npm `win32-x64`로 발행한다. 원본 실행 코드와 UI의 바이트 일치, GitHub Asset·npm tarball의 체크섬 일치, 일반판 `next` 및 `latest` 보존을 확인한다. 두 패키지의 발행·registry 검증 결과를 각각 보고하며, 한쪽이 미완료면 해당 릴리즈의 npm 배포를 모두 완료한 것으로 보고하지 않는다. npm에서 발행용 2단계 인증을 요구하면 계정 소유자의 브라우저 인증 후 계속한다.
+
 ## 현재 검증 범위
 
 - TypeScript 타입 검사
