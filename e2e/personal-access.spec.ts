@@ -39,5 +39,9 @@ test('개인용 비밀번호 접속·모바일 로그아웃·재접속을 실제
     await page.getByRole('button', { name: '접속', exact: true }).click();
     await expect(page.getByRole('button', { name: '로그아웃', exact: true })).toBeVisible();
     expect(errors).toEqual([]);
-  } finally { await app.close(); }
+  } finally {
+    // Close Chromium's connections before waiting for the fixture HTTP server.
+    await test.step('브라우저 연결 종료', () => page.context().close());
+    await test.step('테스트 서버 종료', () => app.close());
+  }
 });

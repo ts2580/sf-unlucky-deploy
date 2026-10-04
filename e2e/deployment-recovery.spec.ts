@@ -37,7 +37,11 @@ test('refresh preserves prior tab draft until explicit restore and never submits
     await page.locator('details').filter({ has: page.getByText('탭별 선택 초안', { exact: true }) }).locator('summary').click();
     await page.getByRole('combobox', { name: '선택 초안', exact: true }).selectOption('draft-one'); await page.getByRole('button', { name: '선택 초안 복원', exact: true }).click();
     await expect(page.locator('#deploy-scope')).toHaveValue('CustomObject'); expect(posts).toEqual([]);
-  } finally { await page.goto('about:blank'); await app.close(); }
+  } finally {
+    // Close Chromium's connections before waiting for the fixture HTTP server.
+    await test.step('브라우저 연결 종료', () => page.context().close());
+    await test.step('테스트 서버 종료', () => app.close());
+  }
 });
 test('unknown submission survives refresh and read-only lookup restores the original job', async ({ page }) => {
   const app = await createWebServer({ host: '127.0.0.1', port: 0, localMode: true, accessPassword: 'recovery-test-password', databasePath: ':memory:', sfClient: { async runJson() { return { result: { nonScratchOrgs: [] } }; } } });
@@ -64,7 +68,11 @@ test('unknown submission survives refresh and read-only lookup restores the orig
     await expect(page.getByText('원래 작업 설정을 재검증했습니다. 현재 비교에서 컴포넌트를 다시 선택하세요.')).toBeVisible();
     await expect(page.getByText('선택된 배포 대상이 없습니다', { exact: true })).toBeVisible();
     expect(keys).toHaveLength(1);
-  } finally { await page.goto('about:blank'); await app.close(); }
+  } finally {
+    // Close Chromium's connections before waiting for the fixture HTTP server.
+    await test.step('브라우저 연결 종료', () => page.context().close());
+    await test.step('테스트 서버 종료', () => app.close());
+  }
 });
 test('immediate refresh without BroadcastChannel keeps the owner fallback available for explicit revalidation', async ({ page }) => {
   const app = await createWebServer({ host: '127.0.0.1', port: 0, localMode: true, accessPassword: 'recovery-test-password', databasePath: ':memory:', sfClient: { async runJson() { return { result: { nonScratchOrgs: [] } }; } } });
@@ -88,7 +96,11 @@ test('immediate refresh without BroadcastChannel keeps the owner fallback availa
     await page.getByRole('button', { name: '응답 전 선택 복원', exact: true }).click();
     await expect(page.locator('#deploy-scope')).toHaveValue('CustomObject');
     expect(saved.metadataType).toBe('CustomObject'); expect(writes).toHaveLength(1);
-  } finally { await page.goto('about:blank'); await app.close(); }
+  } finally {
+    // Close Chromium's connections before waiting for the fixture HTTP server.
+    await test.step('브라우저 연결 종료', () => page.context().close());
+    await test.step('테스트 서버 종료', () => app.close());
+  }
 });
 test('a rejected retry cannot erase an older ambiguous key', async ({ page }) => {
   const app = await createWebServer({ host: '127.0.0.1', port: 0, localMode: true, accessPassword: 'recovery-test-password', databasePath: ':memory:', sfClient: { async runJson() { return { result: { nonScratchOrgs: [] } }; } } });
@@ -106,5 +118,9 @@ test('a rejected retry cannot erase an older ambiguous key', async ({ page }) =>
     await page.getByRole('button', { name: '원래 요청 그대로 재시도', exact: true }).click();
     await expect(page.getByText('fixture permission denial')).toBeVisible(); expect(keys).toHaveLength(2); expect(keys[1]).toBe(keys[0]);
     await page.reload(); await expect(page.getByRole('button', { name: '원래 요청 결과 조회' })).toBeVisible(); expect(keys).toHaveLength(2);
-  } finally { await page.goto('about:blank'); await app.close(); }
+  } finally {
+    // Close Chromium's connections before waiting for the fixture HTTP server.
+    await test.step('브라우저 연결 종료', () => page.context().close());
+    await test.step('테스트 서버 종료', () => app.close());
+  }
 });
