@@ -80,10 +80,10 @@ node dist/cli.js --help
 
 ### npm 패키지 설치
 
-npm 패키지 이름은 `@trstyq/sf-unlucky-deploy`이고 실행 명령은 `sfud`입니다. 시험판은 `next` 채널로 설치하며 프로젝트 라이선스는 MIT입니다. 특정 시험판을 고정하려면 `@next` 대신 발행된 버전 번호를 지정하세요.
+npm 패키지 이름은 `@trstyq/sf-unlucky-deploy`이고 실행 명령은 `sfud`입니다. 정식 일반판은 `latest`, 시험판 일반판은 `next` 채널로 설치하며 프로젝트 라이선스는 MIT입니다. 특정 버전을 고정하려면 `@latest` 대신 `@0.4.0`처럼 발행된 버전 번호를 지정하세요.
 
 ```bash
-npm install --global --allow-scripts=sqlite3 @trstyq/sf-unlucky-deploy@next
+npm install --global --allow-scripts=sqlite3 @trstyq/sf-unlucky-deploy@latest
 sfud --version
 sfud --help
 ```
@@ -95,7 +95,7 @@ npm install --global --ignore-scripts @trstyq/sf-unlucky-deploy@win32-x64
 sfud --version
 ```
 
-일반판과 같은 패키지 이름·실행 명령을 사용하므로 기존 전역 설치를 대체합니다. Windows 번들 버전은 `0.4.0-rc.4.win32-x64.1`처럼 원본 버전·플랫폼·번들 차수로 구분하고, `sfud --version`은 원본 앱 버전(`0.4.0-rc.4`)을 표시합니다. Windows ARM64용이 아니며, Git과 Salesforce CLI는 별도로 설치해야 합니다.
+일반판과 같은 패키지 이름·실행 명령을 사용하므로 기존 전역 설치를 대체합니다. 같은 설치 명령을 다시 실행하면 해당 채널의 버전으로 갱신됩니다. Windows 번들 버전은 정식 `0.4.0-win32-x64.1`, 시험판 `0.4.0-rc.4.win32-x64.1`처럼 원본 버전·플랫폼·번들 차수로 구분하고, `sfud --version`은 원본 앱 버전(정식 번들의 경우 `0.4.0`)을 표시합니다. Windows ARM64용이 아니며, Git과 Salesforce CLI는 별도로 설치해야 합니다.
 
 Salesforce CLI v2(`sf`)와 Git은 별도로 설치하고, 필요한 Org를 미리 로그인해야 합니다. 설치된 `sfud`는 현재 디렉터리의 `.env`를 자동으로 읽지 않습니다. `0.4.0-rc.2`부터 `sfud ui`, `sfud compare`, `sfud deploy`를 처음 실행하면 사용자 홈에 `.sfud/config.json`과 `.sfud/secrets.env`를 자동으로 생성합니다. Linux의 기본 경로는 `~/.sfud/config.json`, Windows는 `%USERPROFILE%\.sfud\config.json`입니다. npm 설치 시에는 생성하지 않으므로 설치 스크립트를 끈 환경에서도 첫 실행 시 동작합니다. `--help`, `--version`, `config path` 조회는 파일을 만들지 않습니다. 이전 시험판 `0.4.0-rc.1`은 자동 생성을 지원하지 않으므로 아래 초기화 명령이 필요합니다.
 

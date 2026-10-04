@@ -15,10 +15,18 @@ sf-unlucky-deploy는 Git·로컬 프로젝트·Salesforce Org의 메타데이터
 Node.js **22.19.0 이상**, npm, Salesforce CLI v2(`sf`), Git이 필요하다.
 
 ```bash
-npm install --global --allow-scripts=sqlite3 @trstyq/sf-unlucky-deploy@next
+npm install --global --allow-scripts=sqlite3 @trstyq/sf-unlucky-deploy@latest
 sfud config init
 sfud ui --project "/path/to/salesforce-project"
 ```
+
+Windows x64에서는 SQLite 바이너리를 포함한 번들을 설치할 수 있다.
+
+```powershell
+npm install --global --ignore-scripts @trstyq/sf-unlucky-deploy@win32-x64
+```
+
+정식 일반판은 `latest`, 시험판 일반판은 `next`, Windows 번들은 `win32-x64` 채널을 사용한다. 같은 설치 명령을 다시 실행하면 해당 채널의 버전으로 갱신된다.
 
 `--project`에는 `sfdx-project.json`이 있는 로컬 Salesforce DX 프로젝트 경로를 넣는다. 여러 프로젝트는 옵션을 반복해서 등록하고, Git과 Org만 사용할 때는 생략한다.
 
