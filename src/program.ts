@@ -17,7 +17,7 @@ import { getHomeConfigPaths, initializeHomeConfiguration } from './config/user-c
 import { runSetup } from './config/setup.js';
 import { formatDoctorReport, runDoctor } from './config/doctor.js';
 
-export const CLI_VERSION = '0.4.0-rc.4';
+export const CLI_VERSION = '0.4.0';
 
 export interface ProgramDependencies extends CommandDependencies, DeployCommandDependencies {}
 
