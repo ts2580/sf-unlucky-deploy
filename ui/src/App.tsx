@@ -1,3 +1,4 @@
+import { JobResume } from './deployment/JobResume';
 import type { WorkspaceResponse } from '../../src/api/workspace-contracts';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
@@ -120,7 +121,7 @@ export function App() {
   useEffect(() => {
     const handleUnauthorized = () => {
       setDashboardWorkspace(null); setRecentComparisons([]); setRecentDeployments([]);
-      setAuth({ setupRequired: false, authenticated: false });
+      setAuth((current) => ({ ...current, user: undefined, setupRequired: false, authenticated: false }));
     };
     window.addEventListener('sfud:unauthorized', handleUnauthorized);
     return () => window.removeEventListener('sfud:unauthorized', handleUnauthorized);
@@ -150,9 +151,9 @@ export function App() {
   }
 
   if (!auth.authenticated || auth.user === undefined) {
-    return <AuthScreen setupRequired={auth.setupRequired} onAuthenticated={(user) => {
+    return <AuthScreen setupRequired={auth.setupRequired} personalAccess={auth.localMode === true && auth.passwordRequired === true} onAuthenticated={(user) => {
       setDashboardWorkspace(null); setRecentComparisons([]); setRecentDeployments([]);
-      setAuth({ setupRequired: false, authenticated: true, user });
+      setAuth({ ...auth, setupRequired: false, authenticated: true, user });
     }} />;
   }
 
@@ -170,7 +171,7 @@ export function App() {
   const logout = async () => {
     await logoutSession();
     setDashboardWorkspace(null); setRecentComparisons([]); setRecentDeployments([]);
-    setAuth({ setupRequired: false, authenticated: false });
+    setAuth({ ...auth, user: undefined, setupRequired: false, authenticated: false });
   };
 
   return (
@@ -224,10 +225,10 @@ export function App() {
             />
             <StatusPill label={dashboardWorkspace === null ? 'Salesforce CLI 확인 중' : 'Salesforce CLI 연결됨'} state={dashboardWorkspace === null ? 'pending' : 'online'} />
             <div className="org-count"><Icon name="cloud" /><strong>{connectedOrgCount}</strong><span>ORG</span></div>
-            <div className={`account-menu${auth.localMode ? ' account-menu-local' : ''}`} title={auth.user.email}>
+            <div className={`account-menu${auth.localMode && !auth.passwordRequired ? ' account-menu-local' : ''}`} title={auth.user.email}>
               <span><Icon name="user" /></span>
               <div><strong>{auth.user.displayName}</strong><small>{auth.user.role}</small></div>
-              {!auth.localMode && <button type="button" onClick={() => void logout()} aria-label="로그아웃"><Icon name="logout" /></button>}
+              {(!auth.localMode || auth.passwordRequired) && <button type="button" onClick={() => void logout()} aria-label="로그아웃"><Icon name="logout" /></button>}
             </div>
           </div>
         </header>
@@ -318,8 +319,11 @@ export function App() {
             <button type="button" aria-label="안전 정책 자세히 보기"><Icon name="chevron" /></button>
           </section>
           </>}
-          {currentPage === 'deploy' && <DeploymentPage user={auth.user} />}
+          {currentPage === 'deploy' && (new URLSearchParams(window.location.search).get('job')
+            ? <JobResume key={`${auth.user.id}-${window.location.search}`} user={auth.user} jobId={new URLSearchParams(window.location.search).get('job')!} resource={new URLSearchParams(window.location.search).get('resource') === 'comparison' ? 'comparison' : 'deployment'} />
+            : <DeploymentPage key={auth.user.id} user={auth.user} />)}
           {currentPage === 'runs' && <RunsPage runs={recentRuns} comparisons={recentComparisons} deployments={recentDeployments} />}
+          {['auth', 'settings'].includes(currentPage) && /^\/deploy\?(?:draft|restoreTab|job)=[a-zA-Z0-9-]+$/u.test(new URLSearchParams(window.location.search).get('return') ?? '') && <a className="button button-secondary" href={new URLSearchParams(window.location.search).get('return')!}>배포 선택으로 돌아가기</a>}
           {currentPage === 'auth' && <div className="page-stack"><PageIntro kicker="CONNECTIONS" title="Salesforce와 Git 인증을 관리합니다." /><div className="settings-grid"><SalesforceConnections /><GitSettings key={auth.user.id} user={auth.user} section="connections" /></div></div>}
           {currentPage === 'settings' && <SettingsPage user={auth.user} health={health} remoteAccess={remoteAccess} workspace={dashboardWorkspace} />}
           {currentPage === 'admin' && (auth.user.role === 'ADMIN'
@@ -375,7 +379,7 @@ function RunsPage({ runs, comparisons, deployments }: { runs: DashboardRun[]; co
         {visibleRuns.length === 0 ? <p className="empty-runs">{runs.length === 0 ? '아직 저장된 실행이 없습니다.' : '선택한 종류의 실행이 없습니다.'}</p>
           : <div className="connection-table-scroll runs-table-scroll" role="region" aria-label="실행 기록 표 영역" tabIndex={0}><table className="connection-table runs-table" aria-label="실행 기록"><thead><tr><th scope="col">종류</th><th scope="col">대상</th><th scope="col">상태</th><th scope="col">시간</th><th scope="col">요약</th></tr></thead><tbody>{visibleRuns.map((run) => <tr key={run.id}>
             <th scope="row"><span className={`tag tag-${run.tone}`}>{run.kind}</span></th>
-            <td><div className="connection-cell-content"><strong>{run.source} → {run.target}</strong></div></td>
+            <td><div className="connection-cell-content"><a href={`/deploy?resource=${run.kind === '비교' ? 'comparison' : 'deployment'}&job=${encodeURIComponent(run.id)}`}>{run.source} → {run.target}</a></div></td>
             <td><span className={`connection-state ${run.tone === 'green' ? 'connection-state-ready' : run.tone === 'amber' ? 'connection-state-warning' : 'connection-state-pending'}`}>{run.statusLabel}</span></td>
             <td><time dateTime={run.createdAt}>{run.time}</time></td>
             <td>{run.summary}</td>

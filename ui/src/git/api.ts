@@ -1,6 +1,6 @@
 import { GitConnectionListResponseSchema, GitProvidersResponseSchema,
   type GitConnectionListResponse, type GitProvidersResponse, type GitProviderId } from '../../../src/api/git-contracts';
-import { GitCatalogResponseSchema, GitImportListResponseSchema, GitImportRequestSchema, GitImportResponseSchema,
+import { GitProjectRootsResponseSchema, type GitProjectRootsResponse, GitCatalogResponseSchema, GitImportListResponseSchema, GitImportRequestSchema, GitImportResponseSchema,
   GitRepositoryRequestSchema, GitRepositoryResponseSchema, GitRefsRequestSchema, GitRefsResponseSchema,
   type GitCatalogPage, type GitCatalogQuery, type GitImportListResponse, type GitImportRequestBody, type GitImportResponse,
   type GitRepositoryRequest, type GitRepositoryResponse, type GitRefsRequest, type GitRefsResponse } from '../../../src/api/git-project-contracts';
@@ -26,3 +26,6 @@ export function catalog(id: string, query: GitCatalogQuery, signal?: AbortSignal
     { signal, responseSchema: GitCatalogResponseSchema });
 }
 export function errorMessage(error: unknown): string { return error instanceof Error ? error.message : 'Git 요청을 완료하지 못했습니다.'; }
+
+export const projectRoots = (body: GitImportRequestBody) => apiRequest<GitProjectRootsResponse, GitImportRequestBody>('/api/v1/git/project-roots',
+  { method: 'POST', csrf: true, body, requestSchema: GitImportRequestSchema, responseSchema: GitProjectRootsResponseSchema });

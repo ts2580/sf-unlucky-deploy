@@ -28,6 +28,8 @@ export const WorkspaceSourceSchema = Type.Object({
   detail: Type.Optional(Type.String()),
   username: Type.Optional(Type.String()),
   maskedOrgId: Type.Optional(Type.String()),
+  orgIdentityFingerprint: Type.Optional(Type.String({ pattern: '^[a-f0-9]{64}$' })),
+  environment: Type.Optional(Type.Union([Type.Literal('production'), Type.Literal('sandbox'), Type.Literal('unknown')])),
   expiresAt: Type.Optional(Type.String()),
   provenance: Type.Optional(GitProvenanceSchema),
 }, { additionalProperties: false });
@@ -43,6 +45,8 @@ export const WorkspaceResponseSchema = Type.Object({
     id: Type.String(), alias: Type.String(), label: Type.String(), connected: Type.Boolean(),
     edition: Type.Optional(Type.String()), username: Type.Optional(Type.String()),
     maskedOrgId: Type.Optional(Type.String()),
+    orgIdentityFingerprint: Type.Optional(Type.String({ pattern: '^[a-f0-9]{64}$' })),
+    environment: Type.Optional(Type.Union([Type.Literal('production'), Type.Literal('sandbox'), Type.Literal('unknown')])),
   }, { additionalProperties: false }))),
 }, { additionalProperties: false });
 

@@ -35,9 +35,12 @@ export class GitRegistrationService {
     if (this.closed) throw new GitError('IMPORT_CANCELLED');
     if (request.ref.kind !== 'branch') throw new GitError('INVALID_REF');
     validateGitRef(request.ref);
-    safeGitPath(request.projectRoot ?? '.', true);
+    if (request.projectRoot !== undefined) safeGitPath(request.projectRoot, true);
     const address = normalizeRepository(request.repositoryPath, request.provider);
-    const repository = await this.imports.inspect(request, undefined, owner);
+    const repository = await this.imports.projectRoots(owner, request);
+    const projectRoot = request.projectRoot ?? (repository.projectRoots.length === 1 ? repository.projectRoots[0] : undefined);
+    if (projectRoot === undefined) throw new GitError('PROJECT_SELECTION_REQUIRED');
+    if (!repository.projectRoots.includes(projectRoot)) throw new GitError('DX_PROJECT_NOT_FOUND');
     if ((await this.list(owner)).length >= 50) throw new GitError('GIT_QUOTA_EXCEEDED');
     if (this.closed) throw new GitError('IMPORT_CANCELLED');
     const id = randomUUID();
@@ -45,11 +48,11 @@ export class GitRegistrationService {
     const { metadataType: _type, ...saved } = request;
     await this.database.run(`INSERT INTO git_registrations(id, owner_user_id, request_json, repository_id, status, created_at, repository_url_verified)
       VALUES (?, ?, ?, ?, 'PENDING', ?, 1)`, id, owner,
-    JSON.stringify({ ...saved, repositoryPath: connectionRepositoryPath(address), projectRoot: request.projectRoot ?? '.' }), repository.repositoryId, new Date().toISOString());
-    await this.sync(id, owner);
+    JSON.stringify({ ...saved, repositoryPath: connectionRepositoryPath(address), projectRoot }), repository.repositoryId, new Date().toISOString());
+    await this.sync(id, owner, true);
     return this.get(id, owner);
   }
-  public async sync(id: string, owner: string): Promise<GitRegistration> {
+  public async sync(id: string, owner: string, requireExpectedCommit = false): Promise<GitRegistration> {
     if (this.closed) throw new GitError('IMPORT_CANCELLED');
     const leave = this.admit(owner);
     const prior = this.tails.get(id) ?? Promise.resolve();
@@ -59,7 +62,7 @@ export class GitRegistrationService {
       await this.database.run("UPDATE git_registrations SET status = 'SYNCING', error_message = NULL WHERE id = ?", id);
       try {
         await this.assertRepository(registered, owner);
-        const result = await this.imports.warm(owner, registered.request);
+        const result = await this.imports.warm(owner, registered.request, requireExpectedCommit);
         await this.database.run("UPDATE git_registrations SET status = 'READY', last_commit_sha = ?, last_synced_at = ?, error_message = NULL WHERE id = ?",
           result.commitSha, result.syncedAt, id);
       } catch (error) {
@@ -126,9 +129,19 @@ export class GitRegistrationService {
     await Promise.allSettled(this.tails.values());
   }
   public async sources(owner: string): Promise<WorkspaceSource[]> {
-    return (await this.list(owner)).filter((item) => !item.requiresRepositoryUrl).map((item) => ({ id: `git-registered:${item.id}`, kind: 'local', location: 'git',
-      label: `${item.alias ?? item.request.repositoryPath} · ${item.request.ref.name}`,
-      detail: '등록 브랜치 · 비교 시작 시 자동 동기화' }));
+    const connections = await this.database.all<{ id: string; alias: string | null; repository_path: string | null }[]>(
+      "SELECT id, alias, repository_path FROM git_connections WHERE owner_user_id = ? AND status <> 'REVOKED'", owner,
+    );
+    const byId = new Map(connections.map((connection) => [connection.id, connection]));
+    return (await this.list(owner)).filter((item) => !item.requiresRepositoryUrl).map((item) => {
+      const address = normalizeRepository(item.request.repositoryPath, item.request.provider);
+      const connection = item.request.connectionId === undefined ? undefined : byId.get(item.request.connectionId);
+      const name = item.alias ?? (connection?.alias == null ? address.repositoryPath
+        : connection.repository_path == null ? `${connection.alias} · ${address.repositoryPath}` : connection.alias);
+      return { id: `git-registered:${item.id}`, kind: 'local', location: 'git',
+        label: `${name} · ${item.request.ref.name}`,
+        detail: `${address.host}/${address.repositoryPath} · 프로젝트 ${item.request.projectRoot ?? '.'} · 비교 시작 시 자동 동기화` };
+    });
   }
 }
 function map(row: Row): GitRegistration {

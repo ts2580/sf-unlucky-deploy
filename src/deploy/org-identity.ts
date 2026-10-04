@@ -7,6 +7,14 @@ export interface OrgIdentitySnapshot {
   instanceUrlHash?: string;
 }
 
+/** Public opaque identity binding; no auth data is included. Field order is versioned and stable. */
+export function orgIdentityFingerprint(identity: OrgIdentitySnapshot): string {
+  return createHash('sha256').update(JSON.stringify([
+    'sfud-org-identity-v1', identity.alias, identity.username.toLowerCase(), identity.orgId,
+    identity.connectionId ?? null, identity.connectionGeneration ?? null, identity.instanceUrlHash ?? null,
+  ])).digest('hex');
+}
+
 export function sameOrgIdentity(
   expected: OrgIdentitySnapshot,
   actual: OrgIdentitySnapshot,
@@ -21,3 +29,4 @@ export function sameOrgIdentity(
       || expected.instanceUrlHash === actual.instanceUrlHash
     );
 }
+import { createHash } from 'node:crypto';

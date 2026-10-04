@@ -29,7 +29,7 @@ interface ConnectionRow {
   alias: string | null;
   status: GitConnection['status']; key_version: number; token_version: number; created_at: string; updated_at: string;
 }
-type SaveConnection = Omit<GitConnection, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'expiresAt' | 'alias'> & { tokens: GitTokens };
+type SaveConnection = Omit<GitConnection, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'expiresAt'> & { tokens: GitTokens };
 
 export class GitConnectionRepository {
   public constructor(private readonly database: DatabaseExecutor, private readonly vault?: TokenVault) {}
@@ -46,6 +46,7 @@ export class GitConnectionRepository {
   public async save(input: SaveConnection, expected?: { id: string; tokenVersion: number; changeTarget?: boolean }): Promise<GitConnection> {
     const vault = this.requireVault();
     validateTokens(input.tokens);
+    const alias = input.alias === undefined ? undefined : normalizeGitAlias(input.alias);
     const repository = input.repositoryPath === undefined ? undefined : normalizeRepository(input.repositoryPath, input.provider);
     if ((repository === undefined ? normalizeRepository('account/repository', input.provider).host : repository.host) !== input.providerHost
       || !safeValue(input.providerAccountId, 200) || !safeValue(input.displayName, 200)
@@ -102,6 +103,7 @@ export class GitConnectionRepository {
         access, input.tokens.expiresAt ?? null, JSON.stringify(input.grantedPermissions),
         vault.currentKeyVersion, now, now, apiUsername, input.repositoryPath ?? null);
       }
+      if (alias !== undefined) await db.run('UPDATE git_connections SET alias = ? WHERE id = ? AND owner_user_id = ?', alias, id, input.ownerUserId);
       await audit(db, input.ownerUserId, id, 'GIT_CONNECTION_SAVED', now);
       return publicConnection((await db.get<ConnectionRow>('SELECT * FROM git_connections WHERE id = ?', id))!);
     };

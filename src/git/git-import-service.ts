@@ -60,7 +60,7 @@ export class GitImportService {
   private readonly enabled: boolean;
   private readonly cache: GitCache | undefined;
   private active = 0;
-  private readonly warming = new Map<AbortController, Promise<{ commitSha: string; syncedAt: string }>>();
+  private readonly warming = new Map<AbortController, Promise<unknown>>();
   private closed = false;
 
   public constructor(private readonly history: GitImportRepository,
@@ -151,23 +151,24 @@ export class GitImportService {
     }
   }
 
-  public async warm(owner: string, input: GitImportRequest): Promise<{ commitSha: string; syncedAt: string }> {
+  public async warm(owner: string, input: GitImportRequest, requireExpectedCommit = false): Promise<{ commitSha: string; syncedAt: string }> {
     if (this.closed) throw new GitError('IMPORT_CANCELLED');
     if (this.cache === undefined) throw new GitError('PROVIDER_NOT_CONFIGURED');
     if (this.warming.size >= 2) throw new GitError('GIT_QUOTA_EXCEEDED');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    const work = runGitOperation(this.options.diagnosticsFile, undefined, 'warm', () => this.warmRepository(owner, input, controller.signal));
+    const work = runGitOperation(this.options.diagnosticsFile, undefined, 'warm', () => this.warmRepository(owner, input, controller.signal, requireExpectedCommit));
     this.warming.set(controller, work);
     try { return await work; }
     finally { clearTimeout(timer); this.warming.delete(controller); }
   }
 
-  private async warmRepository(owner: string, input: GitImportRequest, signal: AbortSignal) {
+  private async warmRepository(owner: string, input: GitImportRequest, signal: AbortSignal, requireExpectedCommit: boolean) {
     if (input.ref.kind !== 'branch') throw new GitError('INVALID_REF');
     validateGitRef(input.ref);
     const { repository, authorization } = await this.authorize(input, owner, signal);
     const sha = await this.providerFor(authorization, input.provider).resolveCommit(repository, input.ref, authorization?.apiCredential, signal);
+    if (requireExpectedCommit && sha !== input.expectedCommitSha) throw new GitError('REF_CHANGED');
     const lease = await this.cache!.acquire([owner, input.connectionId ?? 'public', repository.provider, repository.host, repository.repositoryId], signal);
     try {
       const objects = await this.client.fetch({ directory: lease.directory, repository, commitSha: sha,
@@ -182,6 +183,39 @@ export class GitImportService {
       if (signal.aborted) throw new GitError('IMPORT_CANCELLED');
       return { commitSha: sha, syncedAt: new Date().toISOString() };
     } finally { await lease.release(); }
+  }
+
+  public async projectRoots(owner: string, input: GitImportRequest): Promise<{ projectRoots: string[]; commitSha: string; repositoryId: string }> {
+    if (this.closed) throw new GitError('IMPORT_CANCELLED');
+    if (this.cache === undefined) throw new GitError('PROVIDER_NOT_CONFIGURED');
+    validateGitRef(input.ref); assertCommitSha(input.expectedCommitSha);
+    if (this.warming.size >= 2) throw new GitError('GIT_QUOTA_EXCEEDED');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const work = (async () => {
+      const signal = controller.signal;
+      const { repository, authorization } = await this.authorize(input, owner, signal);
+      const provider = this.providerFor(authorization, input.provider);
+      const resolve = () => provider.resolveCommit(repository, input.ref, authorization?.apiCredential, signal);
+      const sha = await resolve();
+      if (sha !== input.expectedCommitSha) throw new GitError('REF_CHANGED');
+      const lease = await this.cache!.acquire([owner, input.connectionId ?? 'public', repository.provider, repository.host, repository.repositoryId], signal);
+      try {
+        const objects = await this.client.fetch({ directory: lease.directory, repository, commitSha: sha,
+          partial: true, signal, onDiskUsage: lease.checkBytes,
+          ...(input.ref.kind === 'branch' ? { ref: input.ref.name } : {}),
+          ...(authorization === undefined ? {} : { credentialProvider: authorization.credentialProvider }) });
+        const projectRoots = await new GitMaterializer(objects).discover(sha, signal);
+        if (projectRoots.length === 0) throw new GitError('DX_PROJECT_NOT_FOUND');
+        if (await resolve() !== sha) throw new GitError('REF_CHANGED');
+        await authorization?.assertCurrent();
+        if (signal.aborted || this.closed) throw new GitError('IMPORT_CANCELLED');
+        return { projectRoots, commitSha: sha, repositoryId: repository.repositoryId };
+      } finally { await lease.release(); }
+    })();
+    this.warming.set(controller, work);
+    try { return await work; }
+    finally { clearTimeout(timer); this.warming.delete(controller); }
   }
 
   public async prepareLatest(owner: string, input: GitImportRequest,

@@ -9,6 +9,8 @@ import type { GitFetchOptions } from '../src/git/git-client.js';
 import type { GitObjectReader } from '../src/git/git-object-store.js';
 import type { GitProvider } from '../src/git/git-provider.js';
 import { normalizeRepository } from '../src/git/git-repository.js';
+import { GitRegistrationService } from '../src/git/git-registration-service.js';
+import { GitCache } from '../src/git/git-cache.js';
 import { GitError } from '../src/git/git-errors.js';
 import { writeFixtureFiles } from './support/files.js';
 import { sha256DirectoryV2 } from '../src/core/files.js';
@@ -33,7 +35,7 @@ function objects(roots = ['.']): GitObjectReader {
   };
 }
 
-async function fixture(options: { roots?: string[]; timeoutMs?: number; quota?: number; executeSf?: boolean;
+async function fixture(options: { cache?: boolean; roots?: string[]; timeoutMs?: number; quota?: number; executeSf?: boolean;
   fetch?: (options: GitFetchOptions) => Promise<GitObjectReader> } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-git-import-service-'));
   const server = await createWebServer({ host: '127.0.0.1', port: 0, assetsDirectory: '/missing',
@@ -79,13 +81,14 @@ async function fixture(options: { roots?: string[]; timeoutMs?: number; quota?: 
   };
   const fetch = vi.fn(options.fetch ?? (async (input: GitFetchOptions) => { input.onDiskUsage(100); return objects(options.roots); }));
   const history = new GitImportRepository(server.sfudRuntime.store.database);
+  const cache = options.cache ? await GitCache.create(':memory:') : undefined;
   const service = new GitImportService(history, server.sfudRuntime.workspace.managedProjects, {
-    providers: { github: provider, gitlab: provider, bitbucket: provider }, client: { fetch },
+    ...(cache === undefined ? {} : { cache }), providers: { github: provider, gitlab: provider, bitbucket: provider }, client: { fetch },
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
   });
   server.sfudRuntime.gitImports = service;
   server.sfudRuntime.workspace.gitImports = service;
-  cleanups.push(async () => { await service.close(); await server.close(); await rm(root, { recursive: true, force: true }); });
+  cleanups.push(async () => { await service.close(); await cache?.close(); await server.close(); await rm(root, { recursive: true, force: true }); });
   const ready = async (id: string, status: GitImportRecord['status'] = 'READY') => {
     await vi.waitFor(async () => { expect((await service.get(id, owner.user.id)).status).toBe(status); });
     return service.get(id, owner.user.id);
@@ -94,6 +97,44 @@ async function fixture(options: { roots?: string[]; timeoutMs?: number; quota?: 
 }
 
 describe('Git 가져오기 수명주기와 작업 연결', { timeout: 30_000 }, () => {
+  it('등록 경로를 동기화와 비교 준비까지 보존하고 다중·잘못된 경로를 거부한다', async () => {
+    const f = await fixture({ cache: true, roots: ['nested'] });
+    const registrations = new GitRegistrationService(f.server.sfudRuntime.store.database, f.service);
+    const saved = await registrations.register(f.owner, request);
+    expect(saved.request.projectRoot).toBe('nested');
+    expect((await registrations.sync(saved.id, f.owner)).lastCommitSha).toBe(sha);
+    expect((await registrations.prepare(saved.id, f.owner, 'ApexClass')).provenance?.projectRoot).toBe('nested');
+    await expect(registrations.register(f.owner, { ...request, projectRoot: 'missing' })).rejects.toMatchObject({ code: 'DX_PROJECT_NOT_FOUND' });
+    const multi = await fixture({ cache: true, roots: ['.', 'nested'] });
+    const many = new GitRegistrationService(multi.server.sfudRuntime.store.database, multi.service);
+    await expect(many.register(multi.owner, request)).rejects.toMatchObject({ code: 'PROJECT_SELECTION_REQUIRED' });
+    expect((await many.register(multi.owner, { ...request, projectRoot: 'nested' })).request.projectRoot).toBe('nested');
+    await registrations.close(); await many.close();
+  });
+  it.each([['.'], ['packages/salesforce'], ['a', 'b'], ['.', 'nested']])('후보 경로를 고정 커밋에서 찾는다: %j', async (...roots) => {
+    const f = await fixture({ cache: true, roots });
+    expect(await f.service.projectRoots(f.owner, request)).toMatchObject({ projectRoots: [...roots].sort(), commitSha: sha });
+    f.provider.resolveCommit = vi.fn(async () => '2'.repeat(40));
+    await expect(f.service.projectRoots(f.owner, request)).rejects.toMatchObject({ code: 'REF_CHANGED' });
+  });
+  it('후보를 확인한 후 최초 등록 동기화 전에 이동한 ref를 거부한다', async () => {
+    const f = await fixture({ cache: true, roots: ['nested'] });
+    vi.mocked(f.provider.resolveCommit).mockResolvedValueOnce(sha).mockResolvedValueOnce(sha).mockResolvedValueOnce('2'.repeat(40));
+    const registrations = new GitRegistrationService(f.server.sfudRuntime.store.database, f.service);
+    await expect(registrations.register(f.owner, request)).rejects.toMatchObject({ code: 'REF_CHANGED' });
+    const saved = (await registrations.list(f.owner))[0]!;
+    expect(saved.status).toBe('FAILED');
+    expect(saved.request.projectRoot).toBe('nested');
+    expect(saved.lastCommitSha).toBeUndefined();
+    await registrations.close();
+  });
+  it('후보 조회 중 ref 이동과 프로젝트 없는 저장소를 거부한다', async () => {
+    const f = await fixture({ cache: true, roots: ['nested'] });
+    vi.mocked(f.provider.resolveCommit).mockResolvedValueOnce(sha).mockResolvedValueOnce('2'.repeat(40));
+    await expect(f.service.projectRoots(f.owner, request)).rejects.toMatchObject({ code: 'REF_CHANGED' });
+    const empty = await fixture({ cache: true, roots: [] });
+    await expect(empty.service.projectRoots(empty.owner, request)).rejects.toMatchObject({ code: 'DX_PROJECT_NOT_FOUND' });
+  });
   it('202 API, 사용자 격리, manifest/type/Apex, 작업 pin과 삭제 뒤 immutable 출처를 연결한다', async () => {
     const f = await fixture();
     expect((await f.server.inject({ method: 'POST', url: '/api/v1/git/imports', payload: request })).statusCode).toBe(401);

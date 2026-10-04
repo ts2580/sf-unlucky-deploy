@@ -61,11 +61,6 @@ if [[ "${LOCAL:-false}" != "true" && "${LOCAL:-false}" != "false" ]]; then
   echo "[INVALID_LOCAL_MODE] LOCAL 환경변수는 true 또는 false여야 합니다." >&2
   exit 2
 fi
-if [[ "${LOCAL:-false}" == "true" ]]; then
-  UI_HOST="127.0.0.1"
-  export SFUD_UI_HOST="$UI_HOST"
-  unset SFUD_PUBLIC_ORIGIN SFUD_TRUSTED_PROXIES
-fi
 if ! command -v lsof >/dev/null 2>&1; then
   echo "포트 점유 프로세스를 확인하려면 lsof가 필요합니다." >&2
   exit 1

@@ -28,6 +28,7 @@ import {
 import { parseSourceSpec } from '../sources/source-spec.js';
 import { createSnapshot } from '../sources/snapshot.js';
 import { createRunContext, writeRunMetadata } from './run-context.js';
+import { settledSnapshots } from './settled-snapshots.js';
 
 export interface DeployCommandOptions {
   maximumComparisonFiles?: number;
@@ -116,7 +117,7 @@ export async function runDeployCommand(
   const sourceManifests = generatedManifest?.sourceManifests;
   await writeRunMetadata(context, 'deploy', targetSource, source.displayName, manifestPath, dependencies.sourceSnapshot);
 
-  const [targetSnapshot, sourceSnapshot] = await Promise.all([
+  const [targetSnapshot, sourceSnapshot] = await settledSnapshots([
     createSnapshot({
       source: targetSource,
       manifestPath,

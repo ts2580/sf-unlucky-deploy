@@ -136,6 +136,21 @@ describe('사용자 홈 설정 보안', { timeout: process.platform === 'win32' 
     await expect(loadHomeConfiguration({ SFUD_CONFIG_DIR: directory })).rejects.toThrow(/닫히지 않은/u);
   });
 
+  it('개인용 접속 비밀번호는 secrets.env에서만 읽고 환경변수 우선순위와 비출력을 유지한다', async () => {
+    const { directory, environment } = await configHome();
+    const privateValue = 'personal-private-password';
+    await writeFile(path.join(directory, 'secrets.env'), `SFUD_ACCESS_PASSWORD=${privateValue}\n`, { mode: 0o600 });
+    await chmod(path.join(directory, 'secrets.env'), 0o600);
+    await loadHomeConfiguration(environment);
+    expect(environment.SFUD_ACCESS_PASSWORD).toBe(privateValue);
+    const override = { SFUD_CONFIG_DIR: directory, SFUD_ACCESS_PASSWORD: '' };
+    await loadHomeConfiguration(override);
+    expect(override.SFUD_ACCESS_PASSWORD).toBe('');
+    await writeConfig(directory, { SFUD_ACCESS_PASSWORD: privateValue });
+    await expect(loadHomeConfiguration({ SFUD_CONFIG_DIR: directory })).rejects.toThrow(/허용되지 않은 설정 키/u);
+    await expect(loadHomeConfiguration({ SFUD_CONFIG_DIR: directory })).rejects.not.toThrow(privateValue);
+  });
+
   it('알 수 없는 키, secret의 JSON 주입, 잘못된 타입과 큰 파일을 값 출력 없이 거부한다', async () => {
     const { directory } = await configHome();
     const privateValue = 'private-secret-value-that-must-not-appear';

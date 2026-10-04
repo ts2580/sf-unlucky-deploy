@@ -13,6 +13,7 @@ export interface StartWebUiOptions {
   host: string;
   port: number;
   localMode?: boolean;
+  accessPassword?: string;
   allowRemote: boolean;
   open: boolean;
   dataDirectory?: string;
@@ -24,13 +25,7 @@ export interface StartWebUiOptions {
 }
 
 export async function startWebUi(options: StartWebUiOptions): Promise<FastifyInstance> {
-  const effectiveOptions = options.localMode === true
-    ? { ...options, host: DEFAULT_UI_HOST, allowRemote: false }
-    : options;
-  if (effectiveOptions.localMode === true) {
-    delete effectiveOptions.trustedProxies;
-    delete effectiveOptions.publicOrigin;
-  }
+  const effectiveOptions = options;
   assertSafeBind(effectiveOptions.host, effectiveOptions.allowRemote);
   const app = await createWebServer(effectiveOptions);
   const closeOnSignal = () => {

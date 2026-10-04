@@ -46,12 +46,14 @@ export async function registerAuthRoutes(
   app.get('/api/v1/auth/status', async (request, reply): Promise<AuthStatusResponse> => {
     let user = await app.sfudRuntime.auth.authenticate(readCookie(request, SESSION_COOKIE));
     if (app.sfudRuntime.localMode) {
-      if (user === undefined) {
+      if (user === undefined && !app.sfudRuntime.localPasswordRequired) {
         const session = await app.sfudRuntime.auth.createLocalSession();
         setAuthCookies(request, reply, session.sessionToken, session.csrfToken);
         user = session.user;
       }
-      return { localMode: true, setupRequired: false, authenticated: true, user: toApiUser(user) };
+      return { localMode: true, passwordRequired: app.sfudRuntime.localPasswordRequired,
+        setupRequired: false, authenticated: user !== undefined,
+        ...(user === undefined ? {} : { user: toApiUser(user) }) };
     }
     return {
       setupRequired: await app.sfudRuntime.auth.isSetupRequired(),
@@ -93,11 +95,13 @@ export async function registerAuthRoutes(
   });
 
   app.post<{ Body: LoginBody }>('/api/v1/auth/login', async (request, reply) => {
-    if (app.sfudRuntime.localMode) return sendError(reply, 403, 'LOCAL_MODE', '로컬 모드에서는 로그인을 사용할 수 없습니다.');
+    const personalLogin = app.sfudRuntime.localMode && app.sfudRuntime.localPasswordRequired;
+    if (app.sfudRuntime.localMode && !personalLogin) return sendError(reply, 403, 'LOCAL_MODE', '로컬 모드에서는 로그인을 사용할 수 없습니다.');
     if (!hasAllowedOrigin(request, options.publicOrigin)) {
       return sendError(reply, 403, 'ORIGIN_DENIED', '허용되지 않은 요청 출처입니다.');
     }
-    const email = typeof request.body?.email === 'string' ? request.body.email : '';
+    const email = personalLogin ? 'local@sfud.invalid'
+      : typeof request.body?.email === 'string' ? request.body.email : '';
     const accountKey = email.trim().toLowerCase().slice(0, 254);
     const ipAttempt = ipLimiter.reserve(request.ip);
     if (ipAttempt === undefined) {
@@ -130,6 +134,9 @@ export async function registerAuthRoutes(
     } catch (error) {
       ipAttempt.fail();
       accountAttempt.fail();
+      if (personalLogin && error instanceof AuthError && error.code === 'INVALID_CREDENTIALS') {
+        return sendError(reply, 401, error.code, '접속 비밀번호가 올바르지 않습니다.');
+      }
       return sendAuthError(reply, error);
     } finally {
       releaseSlot();
@@ -137,7 +144,7 @@ export async function registerAuthRoutes(
   });
 
   app.post('/api/v1/auth/logout', async (request, reply) => {
-    if (app.sfudRuntime.localMode) return sendError(reply, 403, 'LOCAL_MODE', '로컬 모드에서는 로그아웃을 사용할 수 없습니다.');
+    if (app.sfudRuntime.localMode && !app.sfudRuntime.localPasswordRequired) return sendError(reply, 403, 'LOCAL_MODE', '로컬 모드에서는 로그아웃을 사용할 수 없습니다.');
     const session = await requireAuthenticatedSession(app, request, reply, { csrf: true });
     if (session === undefined) return;
     await app.sfudRuntime.auth.revoke(readCookie(request, SESSION_COOKIE)!);

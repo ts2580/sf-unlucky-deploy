@@ -1,10 +1,11 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react';
 
-export function ConnectionDialog({ title, busy, onClose, children }: {
+export function ConnectionDialog({ title, busy, onClose, children, className = '' }: {
   title: string;
   busy: boolean;
   onClose: () => void;
   children: ReactNode;
+  className?: string;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -21,7 +22,7 @@ export function ConnectionDialog({ title, busy, onClose, children }: {
     };
   }, []);
 
-  return <dialog ref={dialog} className="connection-dialog" aria-labelledby={titleId}
+  return <dialog ref={dialog} className={`connection-dialog ${className}`} aria-labelledby={titleId}
     onKeyDown={(event) => {
       if (event.key !== 'Tab') return;
       const controls = [...event.currentTarget.querySelectorAll<HTMLElement>(

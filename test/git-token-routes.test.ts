@@ -29,8 +29,9 @@ describe('Git PAT/API token 연결 라우트', { timeout: 30_000 }, () => {
     try {
       const owner = await bootstrap(fixture.server);
       const payload = { provider: 'gitlab', token: 'alias-token-fixture', repositoryPath: 'https://git.example.com/group/repository.git' };
-      const created = await fixture.server.inject({ method: 'POST', url: '/api/v1/git/connections', headers: headers(owner), payload });
+      const created = await fixture.server.inject({ method: 'POST', url: '/api/v1/git/connections', headers: headers(owner), payload: { ...payload, alias: '처음 별칭' } });
       expect(created.statusCode, created.body).toBe(201);
+      expect(created.json().connection.alias).toBe('처음 별칭');
       const id = created.json().connection.id as string;
       const url = `/api/v1/git/connections/${id}/alias`;
       const db = fixture.server.sfudRuntime.store.database;
@@ -51,7 +52,15 @@ describe('Git PAT/API token 연결 라우트', { timeout: 30_000 }, () => {
       const replaced = await fixture.server.inject({ method: 'PUT', url: `/api/v1/git/connections/${id}`, headers: headers(owner), payload: { ...payload, token: 'replacement-fixture' } });
       expect(replaced.statusCode, replaced.body).toBe(200);
       expect(replaced.json().connection.alias).toBe('커넥스 운영');
-      const cleared = await fixture.server.inject({ method: 'PATCH', url, headers: headers(owner), payload: { alias: '  ' } });
+      const combined = await fixture.server.inject({ method: 'PUT', url: `/api/v1/git/connections/${id}`, headers: headers(owner), payload: { ...payload, token: 'combined-fixture', alias: '함께 저장' } });
+      expect(combined.statusCode, combined.body).toBe(200);
+      expect(combined.json().connection.alias).toBe('함께 저장');
+      fixture.setProviderStatus(401);
+      const failed = await fixture.server.inject({ method: 'PUT', url: `/api/v1/git/connections/${id}`, headers: headers(owner), payload: { provider: 'github', changeTarget: true, token: 'failed-fixture', alias: '저장되면 안 됨' } });
+      expect(failed.statusCode).toBe(400);
+      expect((await new GitConnectionRepository(db).list(owner.userId))[0]?.alias).toBe('함께 저장');
+      fixture.setProviderStatus(200);
+      const cleared = await fixture.server.inject({ method: 'PUT', url: `/api/v1/git/connections/${id}`, headers: headers(owner), payload: { ...payload, token: 'clear-fixture', alias: '  ' } });
       expect(cleared.json().connection.alias).toBeUndefined();
     } finally { await fixture.close(); }
   });

@@ -37,6 +37,7 @@ export interface WorkspaceOrg {
   alias: string;
   label: string;
   edition?: string;
+  environment?: 'production' | 'sandbox' | 'unknown';
   connected: boolean;
   username?: string;
   orgId?: string;
@@ -59,6 +60,8 @@ interface RawOrg {
   username?: unknown;
   name?: unknown;
   orgEdition?: unknown;
+  isSandbox?: unknown;
+  IsSandbox?: unknown;
   connectedStatus?: unknown;
   orgId?: unknown;
   instanceUrl?: unknown;
@@ -325,6 +328,8 @@ export class WorkspaceService {
           alias,
           label: stringValue(rawOrg.name) ?? alias,
           ...(stringValue(rawOrg.orgEdition) === undefined ? {} : { edition: stringValue(rawOrg.orgEdition)! }),
+          environment: typeof rawOrg.isSandbox === 'boolean' ? (rawOrg.isSandbox ? 'sandbox' : 'production')
+            : typeof rawOrg.IsSandbox === 'boolean' ? (rawOrg.IsSandbox ? 'sandbox' : 'production') : 'unknown',
           connected: stringValue(rawOrg.connectedStatus)?.toLowerCase() === 'connected',
           ...(stringValue(rawOrg.username) === undefined ? {} : { username: stringValue(rawOrg.username)! }),
           ...(stringValue(rawOrg.orgId) === undefined ? {} : { orgId: stringValue(rawOrg.orgId)! }),

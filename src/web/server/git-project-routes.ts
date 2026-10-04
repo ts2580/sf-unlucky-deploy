@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { Type } from '@sinclair/typebox';
-import { GitImportListResponseSchema, GitImportRequestSchema, GitImportResponseSchema,
+import { GitProjectRootsResponseSchema, GitImportListResponseSchema, GitImportRequestSchema, GitImportResponseSchema,
   GitRefsRequestSchema, GitRepositoryRequestSchema, GitRepositoryResponseSchema, GitRefsResponseSchema, type GitImportRequestBody, type GitRefsRequest,
   type GitRepositoryRequest } from '../../api/git-project-contracts.js';
 import { GitError } from '../../git/git-errors.js';
@@ -24,6 +24,14 @@ export async function registerGitProjectRoutes(app: FastifyInstance): Promise<vo
     const session = await requireAuthenticatedSession(app, request, reply);
     if (session === undefined) return;
     return { registrations: await app.sfudRuntime.gitRegistrations.list(session.user.id) };
+  });
+  app.post<{ Body: GitImportRequestBody }>('/api/v1/git/project-roots', {
+    schema: { body: GitImportRequestSchema, response: { 200: GitProjectRootsResponseSchema } },
+  }, async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply, mutation);
+    if (session === undefined) return;
+    try { return await app.sfudRuntime.gitImports.projectRoots(session.user.id, request.body); }
+    catch (error) { return sendError(reply, error); }
   });
   app.post<{ Body: GitImportRequestBody }>('/api/v1/git/registrations', {
     schema: { body: GitImportRequestSchema },
