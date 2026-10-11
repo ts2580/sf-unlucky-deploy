@@ -70,6 +70,7 @@ describe('deployment presets', () => {
     const prepared = await resolvePreset(runtime, 'owner', 'saved', true);
     expect(prepared.selection).toMatchObject({ sourceId: 'git:prepared', tests: ['Saved_Test'], components: [{ type: 'ApexClass', fullName: 'SavedClass' }] });
     expect(prepared.preparationRequired).toBe(false);
+    expect(prepared.warnings).toEqual(['Git ref가 이동했습니다. 현재 커밋으로 다시 비교·검증하세요.']);
 
     // 등록 브랜치도 불러올 때는 조회하지 않고, 실행 준비 시 실제 Git 소스로 변환한다.
     const getRegistration = vi.fn().mockResolvedValue({ id: 'registered', request: settings.source.kind === 'git' ? settings.source.request : {}, repositoryId: '42' });

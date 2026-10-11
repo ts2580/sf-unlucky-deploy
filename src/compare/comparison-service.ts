@@ -116,8 +116,10 @@ export class ComparisonService {
         ...(input.sourceOnly === true ? [] : [input.leftSourceId]),
         input.rightSourceId,
       ], input.createdBy);
-      if ((input.components?.map((component) => component.type) ?? [input.metadataType!]).some((type) => !availableTypes.some((entry) => entry.name === type))) {
-        throw new Error(`선택한 Salesforce metadata type을 사용할 수 없습니다: ${input.metadataType}`);
+      const unavailableType = (input.components?.map((component) => component.type) ?? [input.metadataType!])
+        .find((type) => !availableTypes.some((entry) => entry.name === type));
+      if (unavailableType !== undefined) {
+        throw new Error(`선택한 Salesforce metadata type을 사용할 수 없습니다: ${unavailableType}`);
       }
     }
     const manifestPath = scope === 'selected'
