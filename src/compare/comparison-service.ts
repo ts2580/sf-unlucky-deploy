@@ -11,13 +11,15 @@ import { ComparisonJobRepository, type ComparisonJob } from './comparison-job-re
 import type { WorkspaceService } from '../web/server/workspace-service.js';
 import { immutableSourceSnapshot } from '../sources/source-provenance.js';
 import { validateExcludedPackageIds } from '../metadata/package-exclusion.js';
+import { normalizeSelectedComponents, writeSelectedManifest, type SelectedMetadataComponent } from '../deploy/selected-manifest.js';
 
 export interface CreateComparisonInput {
   excludedPackageIds?: string[];
   excludePackageMetadata?: boolean;
   sessionWorkspaceId?: string;
   projectId?: string;
-  scope?: 'manifest' | 'all';
+  scope?: 'manifest' | 'all' | 'selected';
+  components?: SelectedMetadataComponent[];
   metadataType?: string;
   manifest?: string;
   leftSourceId: string;
@@ -39,15 +41,19 @@ export class ComparisonService {
   ) {}
 
   public async create(input: CreateComparisonInput): Promise<ComparisonJob> {
+    if (input.scope === 'selected') input = { ...input, components: normalizeSelectedComponents(input.components ?? []) };
+    else if (input.components !== undefined) throw new Error('선택 항목은 selected 비교에서만 사용할 수 있습니다.');
     const jobId = randomUUID();
     const prepared: string[] = [];
     const releases: (() => void)[] = [];
     const prepare = async (id: string, side: string) => {
       if (!id.startsWith('git-registered:')) return id;
-      if (this.workspace.gitRegistrations === undefined || input.scope !== 'all' || input.metadataType === undefined) {
+      const types = new Set(input.components?.map((component) => component.type));
+      const metadataType = input.scope === 'selected' && types.size === 1 ? [...types][0] : input.metadataType;
+      if (this.workspace.gitRegistrations === undefined || !['all', 'selected'].includes(input.scope ?? '') || metadataType === undefined) {
         throw new Error('등록 브랜치는 메타데이터 타입을 선택해 비교하세요.');
       }
-      const record = await this.workspace.gitRegistrations.prepare(id.slice('git-registered:'.length), input.createdBy, input.metadataType,
+      const record = await this.workspace.gitRegistrations.prepare(id.slice('git-registered:'.length), input.createdBy, metadataType,
         { sessionId: input.sessionWorkspaceId ?? randomUUID(), jobId, side });
       const sourceId = `git:${record.id}`;
       prepared.push(record.id);
@@ -93,9 +99,9 @@ export class ComparisonService {
     }
     for (const source of [leftSource, rightSource]) {
       assertGitMetadataScope(source === leftSource ? leftResolved.snapshot : rightResolved.snapshot,
-        input.metadataType === undefined ? undefined : [input.metadataType]);
+        input.components?.map((component) => component.type) ?? (input.metadataType === undefined ? undefined : [input.metadataType]));
     }
-    const project = scope === 'all'
+    const project = scope !== 'manifest'
       ? this.workspace.projectForSources(input.sourceOnly === true ? [rightSource] : [leftSource, rightSource])
       : await this.workspace.resolveProject(requiredProjectId(input.projectId), input.createdBy);
     if (input.sourceOnly !== true && leftSource === rightSource) throw new Error('서로 다른 비교 소스를 선택하세요.');
@@ -105,16 +111,20 @@ export class ComparisonService {
     if (scope === 'all' && input.metadataType === undefined) {
       throw new Error('전체 메타데이터 검색은 지원하지 않습니다. Salesforce metadata type을 선택하세요.');
     }
-    if (input.metadataType !== undefined) {
+    if (input.metadataType !== undefined || input.components !== undefined) {
       const availableTypes = await this.workspace.listMetadataTypes([
         ...(input.sourceOnly === true ? [] : [input.leftSourceId]),
         input.rightSourceId,
       ], input.createdBy);
-      if (!availableTypes.some((entry) => entry.name === input.metadataType)) {
-        throw new Error(`선택한 Salesforce metadata type을 사용할 수 없습니다: ${input.metadataType}`);
+      const unavailableType = (input.components?.map((component) => component.type) ?? [input.metadataType!])
+        .find((type) => !availableTypes.some((entry) => entry.name === type));
+      if (unavailableType !== undefined) {
+        throw new Error(`선택한 Salesforce metadata type을 사용할 수 없습니다: ${unavailableType}`);
       }
     }
-    const manifestPath = scope === 'all'
+    const manifestPath = scope === 'selected'
+      ? (await writeSelectedManifest({ components: input.components!, projectPath: project.realPath, runsDirectory: this.runsDirectory, jobId })).manifestPath
+      : scope === 'all'
       ? '@all'
       : (await this.workspace.resolveManifest(
         requiredProjectId(input.projectId),
@@ -141,7 +151,7 @@ export class ComparisonService {
         rightSource,
         sourceSnapshot: { left: immutableSourceSnapshot(leftResolved.snapshot), right: immutableSourceSnapshot(rightResolved.snapshot),
           project: this.workspace.publicSource(`local:${project.realPath}`),
-          manifest: this.workspace.publicManifest(project.realPath, manifestPath) },
+          manifest: scope === 'selected' ? '선택 항목' : this.workspace.publicManifest(project.realPath, manifestPath) },
         strict: input.strict,
         showIdentical: input.showIdentical,
         createdBy: input.createdBy,
@@ -153,7 +163,7 @@ export class ComparisonService {
     }
     void this.queue.enqueue(job.id, async (signal) => {
       try {
-        await this.execute(job.id, signal);
+        await this.execute(job.id, signal, input.components?.map((component) => `${component.type}:${component.fullName}`));
       } finally {
         releaseSources();
       }
@@ -167,7 +177,7 @@ export class ComparisonService {
     return job;
   }
 
-  private async execute(jobId: string, signal: AbortSignal): Promise<void> {
+  private async execute(jobId: string, signal: AbortSignal, componentKeys?: string[]): Promise<void> {
     await this.repository.markRunning(jobId);
     const job = await this.repository.getRequired(jobId);
     try {
@@ -176,6 +186,7 @@ export class ComparisonService {
         excludedPackageIds: job.excludedPackageIds ?? [],
         excludePackageMetadata: job.excludePackageMetadata === true,
         maximumComparisonFiles: settings?.maximumComparisonFiles ?? 2000,
+        ...(componentKeys === undefined ? {} : { componentKeys }),
         left: job.leftSource,
         right: job.rightSource,
         ...(job.scope === 'ALL'
@@ -184,7 +195,7 @@ export class ComparisonService {
             ...(job.metadataType === undefined ? {} : { metadataType: job.metadataType }),
           }
           : { manifest: job.manifestPath }),
-        reportDir: path.join(this.runsDirectory, job.id),
+        reportDir: path.join(this.runsDirectory, job.id, ...(componentKeys === undefined ? [] : ['comparison'])),
         strict: job.strict,
         showIdentical: job.showIdentical,
         sourceOnly: job.leftSource === job.rightSource,

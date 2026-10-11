@@ -48,8 +48,9 @@ interface ComparisonSummary {
 export interface CreateComparisonRequest {
   excludedPackageIds?: string[];
   excludePackageMetadata?: boolean;
-  scope: 'all';
-  metadataType: string;
+  scope: 'all' | 'selected';
+  metadataType?: string;
+  components?: Array<{ type: string; fullName: string }>;
   leftSourceId?: string;
   rightSourceId: string;
   sourceOnly?: boolean;

@@ -6,7 +6,7 @@ import { createWebServer } from '../src/web/server/app.js';
 import { resolvePreset, captureSelection } from '../src/web/server/deployment-selection-resolver.js';
 import type { WebRuntime } from '../src/web/server/runtime.js';
 import type { DeploymentSelection } from '../src/api/deployment-preset-contracts.js';
-const selection: DeploymentSelection = { sourceId: 'org:source', targetId: 'org:target', compareCurrentType: true, showIdentical: false, metadataType: 'ApexClass', excludedPackageIds: [], testLevel: 'auto', tests: [] };
+const selection: DeploymentSelection = { sourceId: 'org:source', targetId: 'org:target', compareCurrentType: true, showIdentical: false, metadataType: 'ApexClass', excludedPackageIds: [], testLevel: 'RunSpecifiedTests', tests: ['Saved_Test'], components: [{ type: 'ApexClass', fullName: 'SavedClass' }, { type: 'Flow', fullName: 'SavedFlow' }] };
 describe('deployment presets', () => {
   it('CRUD is owned, CSRF/role protected and survives restart; alias identity replacement cannot resolve', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-presets-'));
@@ -25,6 +25,9 @@ describe('deployment presets', () => {
       expect((await app.inject({ method: 'POST', url, headers: { cookie: headers.cookie }, payload })).statusCode).toBe(403);
       expect((await app.inject({ method: 'POST', url, headers: otherHeaders, payload })).statusCode).toBe(403);
       expect((await app.inject({ method: 'POST', url, headers, payload: { ...payload, token: 'secret' } })).statusCode).toBe(400);
+      for (const components of [[{ type: 'ApexClass', fullName: '*' }], [{ type: '../ApexClass', fullName: 'SavedClass' }], [{ type: 'ApexClass', fullName: 'SavedClass', key: 'extra' }]]) {
+        expect((await app.inject({ method: 'POST', url, headers, payload: { ...payload, selection: { ...selection, components } } })).statusCode).toBe(400);
+      }
       const created = await app.inject({ method: 'POST', url, headers, payload });
       expect(created.statusCode, created.body).toBe(201); const id = created.json().id;
       expect((await app.inject({ url, headers: otherHeaders })).json()).toEqual({ presets: [] });
@@ -33,9 +36,12 @@ describe('deployment presets', () => {
       expect((await app.inject({ url: `${url}/${id}/resolve`, headers })).json().selection).toMatchObject(selection);
       await app.close(); app = await createWebServer(options);
       expect((await app.inject({ url, headers })).json().presets[0].id).toBe(id);
+      expect((await app.inject({ url: `${url}/${id}/resolve`, headers })).json().selection).toMatchObject(selection);
       expect((await app.inject({ method: 'PUT', url: `${url}/${id}`, headers, payload: { ...payload, name: '변경' } })).statusCode).toBe(200);
       targetOrgId = '00D000000000003';
-      expect((await app.inject({ url: `${url}/${id}/resolve`, headers })).statusCode).toBe(409);
+      // 불러오기는 저장된 목록만 읽고, 원격 identity 확인은 사용자가 실행할 때 수행한다.
+      expect((await app.inject({ url: `${url}/${id}/resolve`, headers })).json().selection).toMatchObject(selection);
+      expect((await app.inject({ method: 'POST', url: `${url}/${id}/prepare`, headers })).statusCode).toBe(409);
       expect((await app.inject({ method: 'DELETE', url: `${url}/${id}`, headers })).statusCode).toBe(204);
     } finally { await app.close(); await rm(root, { recursive: true, force: true }); }
   });
@@ -43,15 +49,37 @@ describe('deployment presets', () => {
     const get = vi.fn().mockResolvedValue({ status: 'READY', provider: 'github', repositoryPath: 'https://github.com/team/repo', ref: { kind: 'branch', name: 'main' }, expectedCommitSha: 'a'.repeat(40), provenance: { repositoryId: '42', commitSha: 'a'.repeat(40), projectRoot: 'nested', metadataType: 'ApexClass' }, metadataType: 'ApexClass' });
     const imports = { get, inspect: vi.fn().mockResolvedValue({ repositoryId: '42' }), refs: vi.fn().mockResolvedValue({ refs: [{ name: 'main', commitSha: 'b'.repeat(40) }] }), projectRoots: vi.fn().mockResolvedValue({ projectRoots: ['nested'] }), prepareLatest: vi.fn() };
     const runtime = { gitImports: imports, workspace: { getOrgIdentity: vi.fn().mockResolvedValue({ alias: 'target', orgId: '00D1', username: 'target@example.com' }), publicSource: (id: string) => ({ id, kind: 'org', label: 'target' }) } } as unknown as WebRuntime;
-    const settings = await captureSelection(runtime, 'owner', { ...selection, sourceId: 'git:ephemeral' });
+    const settings = await captureSelection(runtime, 'owner', { ...selection, sourceId: 'git:ephemeral', components: [{ type: 'ApexClass', fullName: 'SavedClass' }] });
     expect(settings.source).toMatchObject({ kind: 'git', request: { projectRoot: 'nested' } });
     expect(JSON.stringify(settings)).not.toContain('ephemeral');
     runtime.presets = { get: vi.fn().mockResolvedValue({ preset: { id: 'saved', name: 'test', schemaVersion: 1, createdAt: '', updatedAt: '' }, settings }) } as unknown as WebRuntime['presets'];
+    vi.clearAllMocks();
     const result = await resolvePreset(runtime, 'owner', 'saved');
-    expect(result.selection).toBeUndefined(); expect(result.preparationRequired).toBe(true);
-    expect(imports.prepareLatest).not.toHaveBeenCalled(); expect(result.warnings).toHaveLength(1);
+    expect(result.selection).toMatchObject({ sourceId: 'git-preset:saved:source', components: [{ type: 'ApexClass', fullName: 'SavedClass' }], tests: ['Saved_Test'] });
+    expect(result.preparationRequired).toBe(true);
+    for (const call of Object.values(imports)) expect(call).not.toHaveBeenCalled();
+    expect(runtime.workspace.getOrgIdentity).not.toHaveBeenCalled();
     imports.projectRoots.mockResolvedValueOnce({ projectRoots: ['different'] });
-    await expect(resolvePreset(runtime, 'owner', 'saved')).rejects.toThrow('프로젝트 경로');
+    await expect(resolvePreset(runtime, 'owner', 'saved', true)).rejects.toThrow('프로젝트 경로');
+    const preparedSource = { id: 'git:prepared', kind: 'local', location: 'git', label: 'Prepared source' };
+    Object.assign(imports, {
+      prepareLatest: vi.fn().mockResolvedValue({ id: 'prepared', status: 'READY', provenance: {} }),
+      resolve: vi.fn().mockReturnValue({ realPath: '/prepared' }),
+      sourceForPath: vi.fn().mockReturnValue(preparedSource),
+    });
+    const prepared = await resolvePreset(runtime, 'owner', 'saved', true);
+    expect(prepared.selection).toMatchObject({ sourceId: 'git:prepared', tests: ['Saved_Test'], components: [{ type: 'ApexClass', fullName: 'SavedClass' }] });
+    expect(prepared.preparationRequired).toBe(false);
+    expect(prepared.warnings).toEqual(['Git ref가 이동했습니다. 현재 커밋으로 다시 비교·검증하세요.']);
+
+    // 등록 브랜치도 불러올 때는 조회하지 않고, 실행 준비 시 실제 Git 소스로 변환한다.
+    const getRegistration = vi.fn().mockResolvedValue({ id: 'registered', request: settings.source.kind === 'git' ? settings.source.request : {}, repositoryId: '42' });
+    runtime.gitRegistrations = { get: getRegistration } as unknown as WebRuntime['gitRegistrations'];
+    const registeredSettings = { ...settings, source: { ...settings.source, registrationId: 'registered' } };
+    runtime.presets.get = vi.fn().mockResolvedValue({ preset: { id: 'saved', name: 'test', schemaVersion: 1, createdAt: '', updatedAt: '' }, settings: registeredSettings });
+    expect((await resolvePreset(runtime, 'owner', 'saved')).selection?.sourceId).toBe('git-registered:registered');
+    expect(getRegistration).not.toHaveBeenCalled();
+    expect((await resolvePreset(runtime, 'owner', 'saved', true)).selection?.sourceId).toBe('git:prepared');
   });
 });
 

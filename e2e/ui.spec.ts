@@ -613,8 +613,8 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   const semanticEqualComponent = page.locator('details.component-result').filter({ hasText: 'Admin' });
   await expect(semanticEqualComponent.locator('.component-status')).toHaveText('IDENTICAL');
   await semanticEqualComponent.locator('summary').click();
-  await expect(semanticEqualComponent).toContainText('원문 SHA-256은 다릅니다. XML 의미 비교는 동일');
-  await expect(semanticEqualComponent).toContainText('metadata type 등록 정책');
+  await expect(semanticEqualComponent).toContainText('파일 표현은 다르지만 비교 결과는 동일합니다.');
+  await expect(semanticEqualComponent).not.toContainText('metadata type 등록 정책');
   await expect(page.locator('.component-status', { hasText: 'MODIFIED' })).toBeVisible();
   const modifiedComponent = page.locator('details.component-result').filter({ hasText: 'Hello' });
   await modifiedComponent.locator('summary').click();
@@ -906,6 +906,10 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByRole('complementary', { name: '배포 대상' }))
     .toContainText('target · target@example.com · 00D00…001');
   const directTestInput = page.getByLabel('테스트 클래스 직접 입력');
+  // 배포 항목 선택이나 직접 입력 포커스 없이 소스의 후보를 먼저 표시한다.
+  await expect(page.getByRole('region', { name: 'Apex 테스트 클래스 선택' })
+    .getByRole('checkbox', { name: 'Hello_Test' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeDisabled();
   await directTestInput.fill('Hello_Test, ord');
   const directTestSuggestions = page.getByRole('listbox', { name: 'source 테스트 클래스 검색 결과' });
   const orderSuggestion = directTestSuggestions.getByRole('option', { name: 'Order_Test' });

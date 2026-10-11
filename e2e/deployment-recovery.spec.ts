@@ -16,27 +16,40 @@ async function login(page: Page) { await page.getByLabel('접속 비밀번호').
 test('refresh preserves prior tab draft until explicit restore and never submits deployment', async ({ page }) => {
   const app = await createWebServer({ host: '127.0.0.1', port: 0, localMode: true, accessPassword: 'recovery-test-password', databasePath: ':memory:', sfClient: { async runJson() { return { result: { nonScratchOrgs: [] } }; } } });
   const posts: string[] = []; const writes: unknown[] = [];
-  let saved = { ...selection }; const tabId = '10000000-0000-4000-8000-000000000001';
-  const draft = { id: 'draft-one', tabId, expiresAt: '2099-01-01T00:00:00Z', updatedAt: '2026-10-04T01:00:00Z' };
+  let saved = { ...selection };
+  const draft = { id: 'draft-one', tabId: '', expiresAt: '2099-01-01T00:00:00Z', updatedAt: '2026-10-04T01:00:00Z' };
   try {
     const address = await app.listen({ host: '127.0.0.1', port: 0 }); await mockWorkspace(page);
     await page.route('**/api/v1/deployment-drafts', (route) => {
-      if (route.request().method() === 'PUT') { const body = route.request().postDataJSON(); writes.push(body); saved = body.selection; return route.fulfill({ json: draft }); }
-      return route.fulfill({ json: { drafts: [draft] } });
+      if (route.request().method() === 'PUT') { const body = route.request().postDataJSON(); draft.tabId = body.tabId; writes.push(body); saved = body.selection; return route.fulfill({ json: draft }); }
+      return route.fulfill({ json: { drafts: writes.length ? [draft] : [] } });
     });
     await page.route('**/api/v1/deployment-drafts/draft-one/resolve', (route) => route.fulfill({ json: { draft, resolved: { preset: { id: draft.id, name: '초안', schemaVersion: 1, createdAt: draft.updatedAt, updatedAt: draft.updatedAt }, selection: saved, warnings: [], preparationRequired: false } } }));
     page.on('request', (request) => { if (request.method() === 'POST' && request.url().includes('/deployments/')) posts.push(request.url()); });
     await page.goto(`${address}/deploy`); await login(page);
     await expect(page.locator('#deploy-scope')).toHaveValue('ApexClass');
+    await expect(page.getByRole('region', { name: '이전 작업 선택 복원', exact: true })).toHaveCount(0);
+    await expect(page.getByText('탭별 선택 초안', { exact: true })).toHaveCount(0);
     // A new untouched screen cannot replace the saved draft with defaults.
     await page.waitForTimeout(900); expect(writes).toHaveLength(0);
     await page.locator('#deploy-scope').fill('CustomObject'); await expect.poll(() => writes.length).toBe(1);
     expect(saved.metadataType).toBe('CustomObject');
+    await expect(page.getByRole('region', { name: '이전 작업 선택 복원', exact: true })).toHaveCount(0);
     await page.reload(); await expect(page.locator('#deploy-scope')).toHaveValue('ApexClass'); await page.waitForTimeout(900);
     expect(writes).toHaveLength(1); expect(saved.metadataType).toBe('CustomObject');
-    await page.locator('details').filter({ has: page.getByText('탭별 선택 초안', { exact: true }) }).locator('summary').click();
-    await page.getByRole('combobox', { name: '선택 초안', exact: true }).selectOption('draft-one'); await page.getByRole('button', { name: '선택 초안 복원', exact: true }).click();
+    await expect(page.getByText('이전 작업 선택을 복원할까요?', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '이전 선택 복원', exact: true }).click();
     await expect(page.locator('#deploy-scope')).toHaveValue('CustomObject'); expect(posts).toEqual([]);
+    await expect(page.getByRole('button', { name: '이전 선택 복원', exact: true })).toHaveCount(0);
+    await page.reload();
+    await page.getByRole('region', { name: '이전 작업 선택 복원', exact: true }).getByRole('button', { name: '닫기', exact: true }).click();
+    await expect(page.getByRole('region', { name: '이전 작업 선택 복원', exact: true })).toHaveCount(0);
+    await expect(page.locator('#deploy-scope')).toHaveValue('ApexClass');
+    await page.locator('#deploy-scope').fill('CustomObject'); await expect.poll(() => writes.length).toBe(2);
+    await page.reload(); await expect(page.getByText('이전 작업 선택을 복원할까요?', { exact: true })).toBeVisible();
+    await page.locator('#deploy-scope').fill('Apex'); await expect.poll(() => writes.length).toBe(3);
+    await expect(page.getByRole('region', { name: '이전 작업 선택 복원', exact: true })).toHaveCount(0);
+    expect(saved.metadataType).toBe('Apex'); expect(posts).toEqual([]);
   } finally {
     // Close Chromium's connections before waiting for the fixture HTTP server.
     await test.step('브라우저 연결 종료', () => page.context().close());
@@ -91,13 +104,80 @@ test('immediate refresh without BroadcastChannel keeps the owner fallback availa
     await page.locator('#deploy-scope').fill('CustomObject');
     await page.reload(); await expect(page.locator('#deploy-scope')).toHaveValue('ApexClass');
     expect(writes).toHaveLength(0);
-    const details = page.locator('details').filter({ has: page.getByText('탭별 선택 초안', { exact: true }) }); await details.locator('summary').click();
-    await page.getByRole('combobox', { name: '응답 전 선택 초안', exact: true }).selectOption({ index: 1 });
-    await page.getByRole('button', { name: '응답 전 선택 복원', exact: true }).click();
+    await page.getByRole('button', { name: '이전 선택 복원', exact: true }).click();
     await expect(page.locator('#deploy-scope')).toHaveValue('CustomObject');
     expect(saved.metadataType).toBe('CustomObject'); expect(writes).toHaveLength(1);
   } finally {
     // Close Chromium's connections before waiting for the fixture HTTP server.
+    await test.step('브라우저 연결 종료', () => page.context().close());
+    await test.step('테스트 서버 종료', () => app.close());
+  }
+});
+test('a slow initial draft lookup cannot delay local protection of new selections', async ({ page }) => {
+  const app = await createWebServer({ host: '127.0.0.1', port: 0, localMode: true, accessPassword: 'recovery-test-password', databasePath: ':memory:', sfClient: { async runJson() { return { result: { nonScratchOrgs: [] } }; } } });
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  try {
+    const address = await app.listen({ host: '127.0.0.1', port: 0 }); await mockWorkspace(page);
+    await page.route('**/api/v1/deployment-drafts', async (route) => {
+      await pending;
+      await route.fulfill({ json: { drafts: [] } });
+    });
+    await page.goto(`${address}/deploy`); await login(page);
+    await expect(page.locator('#deploy-scope')).toHaveValue('ApexClass');
+    await page.locator('#deploy-scope').fill('CustomObject');
+    await expect.poll(() => page.evaluate(() => Object.entries(localStorage).some(([key, value]) => key.startsWith('sfud:draft-fallback:v1:') && JSON.parse(value).selection.metadataType === 'CustomObject'))).toBe(true);
+    await page.reload();
+    await expect(page.getByRole('button', { name: '이전 선택 복원', exact: true })).toBeVisible();
+    await expect(page.locator('#deploy-scope')).toHaveValue('ApexClass');
+  } finally {
+    release();
+    await test.step('브라우저 연결 종료', () => page.context().close());
+    await test.step('테스트 서버 종료', () => app.close());
+  }
+});
+test('recovery ignores other tabs and expired selections, and prepares a return selection only on request', async ({ page }) => {
+  const app = await createWebServer({ host: '127.0.0.1', port: 0, localMode: true, accessPassword: 'recovery-test-password', databasePath: ':memory:', sfClient: { async runJson() { return { result: { nonScratchOrgs: [] } }; } } });
+  const errors: string[] = []; const submissions: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('request', (request) => { if (request.method() === 'POST' && request.url().includes('/deployments/')) submissions.push(request.url()); });
+  let tabId = ''; let resolves = 0; let preparations = 0;
+  const draft = { id: 'return-draft', tabId: 'another-tab', expiresAt: '2099-01-01T00:00:00Z', updatedAt: '2026-10-04T01:00:00Z' };
+  const preset = { id: draft.id, name: '선택 초안', schemaVersion: 1, createdAt: draft.updatedAt, updatedAt: draft.updatedAt };
+  try {
+    const address = await app.listen({ host: '127.0.0.1', port: 0 }); await mockWorkspace(page);
+    await page.route('**/api/v1/deployment-drafts', (route) => route.fulfill({ json: { drafts: [draft, { ...draft, id: 'expired', tabId, expiresAt: '2000-01-01T00:00:00Z' }] } }));
+    await page.route('**/api/v1/deployment-drafts/return-draft/resolve', (route) => {
+      resolves++; return route.fulfill({ json: { draft, resolved: { preset, warnings: [], preparationRequired: true } } });
+    });
+    await page.route('**/api/v1/deployment-drafts/return-draft/prepare', (route) => {
+      preparations++; return route.fulfill({ json: { draft: { ...draft, tabId }, resolved: { preset, selection: { ...selection, expectedTargetIdentityFingerprint: target.orgIdentityFingerprint, metadataType: 'CustomObject' }, warnings: [], preparationRequired: false } } });
+    });
+    await page.goto(`${address}/deploy`); await login(page);
+    await expect(page.locator('#deploy-scope')).toHaveValue('ApexClass');
+    tabId = await page.evaluate(() => {
+      const key = Object.keys(sessionStorage).find((key) => key.startsWith('sfud:draft-tab:'))!;
+      return sessionStorage.getItem(key)!;
+    });
+    await page.reload(); await expect(page.locator('#deploy-scope')).toHaveValue('ApexClass');
+    await expect(page.getByRole('region', { name: '이전 작업 선택 복원', exact: true })).toHaveCount(0);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${address}/deploy?draft=return-draft`);
+    const recovery = page.getByRole('region', { name: '이전 작업 선택 복원', exact: true });
+    await expect(recovery.getByRole('button', { name: '이전 선택 복원', exact: true })).toBeEnabled();
+    expect(resolves).toBe(0); expect(preparations).toBe(0);
+    const bounds = (await recovery.boundingBox())!;
+    expect(bounds.x).toBeGreaterThanOrEqual(0); expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
+    await recovery.screenshot({ path: test.info().outputPath('recovery-mobile.png') });
+    await recovery.getByRole('button', { name: '이전 선택 복원', exact: true }).click();
+    await expect(recovery.getByRole('button', { name: 'Git 소스 준비 후 복원', exact: true })).toBeVisible();
+    expect(resolves).toBe(1); expect(preparations).toBe(0);
+    await recovery.getByRole('button', { name: 'Git 소스 준비 후 복원', exact: true }).click();
+    await expect(page.locator('#deploy-scope')).toHaveValue('CustomObject');
+    await expect(page).toHaveURL(`${address}/deploy`);
+    await expect(page.getByText('선택된 배포 대상이 없습니다', { exact: true })).toBeVisible();
+    expect(preparations).toBe(1); expect(submissions).toEqual([]); expect(errors).toEqual([]);
+  } finally {
     await test.step('브라우저 연결 종료', () => page.context().close());
     await test.step('테스트 서버 종료', () => app.close());
   }

@@ -4,11 +4,16 @@ import type { SavedDeploymentSelection, SavedSource } from '../../storage/deploy
 import type { WebRuntime } from './runtime.js';
 import { sameOrgIdentity, orgIdentityFingerprint } from '../../deploy/org-identity.js';
 import type { WorkspaceSource } from '../../api/workspace-contracts.js';
+import { normalizeSelectedComponents } from '../../deploy/selected-manifest.js';
 
 export async function captureSelection(runtime: WebRuntime, owner: string, selection: DeploymentSelection, refreshIdentity = true): Promise<SavedDeploymentSelection> {
   const { sourceId, targetId, expectedSourceIdentityFingerprint, expectedTargetIdentityFingerprint, ...options } = selection;
   const source = await captureSource(runtime, owner, sourceId, refreshIdentity);
   const target = await captureSource(runtime, owner, targetId, refreshIdentity);
+  if (options.components !== undefined) {
+    options.components = options.components.length === 0 ? [] : normalizeSelectedComponents(options.components);
+    if (options.components.length > 0 && target.kind !== 'org') throw new Error('배포 항목은 Org 타겟에만 저장할 수 있습니다.');
+  }
   if (source.kind === 'org' && expectedSourceIdentityFingerprint !== undefined && orgIdentityFingerprint(source.identity) !== expectedSourceIdentityFingerprint) throw new Error('원래 Source Org identity가 변경되었습니다.');
   if (target.kind === 'org' && expectedTargetIdentityFingerprint !== undefined && orgIdentityFingerprint(target.identity) !== expectedTargetIdentityFingerprint) throw new Error('원래 Target Org identity가 변경되었습니다.');
   for (const saved of [source, target]) {
@@ -16,9 +21,18 @@ export async function captureSelection(runtime: WebRuntime, owner: string, selec
       throw new Error('준비된 Git 메타데이터 타입과 현재 비교 범위가 다릅니다.');
     }
   }
+  if (source.kind === 'git' && source.request.metadataType !== undefined
+    && options.components?.some((component) => component.type !== source.request.metadataType)) {
+    throw new Error('준비된 Git 소스에 포함되지 않은 메타데이터 타입입니다.');
+  }
   return { options, source, target };
 }
 async function captureSource(runtime: WebRuntime, owner: string, id: string, refreshIdentity: boolean): Promise<SavedSource> {
+  const savedSource = /^git-preset:([^:]+):(source|target)$/u.exec(id);
+  if (savedSource !== null) {
+    const { settings } = await runtime.presets.get(owner, savedSource[1]!);
+    return savedSource[2] === 'source' ? settings.source : settings.target;
+  }
   if (id.startsWith('org:')) return { kind: 'org', identity: await runtime.workspace.getOrgIdentity(id.slice(4), refreshIdentity) };
   if (id.startsWith('project:')) {
     await runtime.workspace.resolveSource(id, owner);
@@ -43,19 +57,32 @@ async function captureSource(runtime: WebRuntime, owner: string, id: string, ref
 }
 export async function resolvePreset(runtime: WebRuntime, owner: string, id: string, prepare = false): Promise<ResolvedDeploymentPreset> {
   const { preset, settings } = await runtime.presets.get(owner, id);
-  return await resolveSavedSelection(runtime, owner, preset, settings, prepare);
+  if (prepare) return await resolveSavedSelection(runtime, owner, preset, settings, true, true);
+  // Loading is an owned database read. Remote source preparation belongs to compare/deploy actions.
+  const savedSource = (saved: SavedSource, side: 'source' | 'target'): WorkspaceSource => {
+    if (saved.kind === 'org') return { id: `org:${saved.identity.alias}`, kind: 'org', location: 'org', label: saved.identity.alias,
+      username: saved.identity.username, maskedOrgId: maskOrgId(saved.identity.orgId), orgIdentityFingerprint: orgIdentityFingerprint(saved.identity), environment: 'unknown' };
+    if (saved.kind === 'project') return { id: saved.id, kind: 'local', location: 'server', label: saved.id };
+    return { id: saved.registrationId === undefined ? `git-preset:${id}:${side}` : `git-registered:${saved.registrationId}`,
+      kind: 'local', location: 'git', label: `${saved.request.repositoryPath} · ${saved.request.ref.name}` };
+  };
+  const source = savedSource(settings.source, 'source'); const target = savedSource(settings.target, 'target');
+  return { preset, source, target, selection: { ...settings.options, sourceId: source.id, targetId: target.id,
+    ...(source.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.orgIdentityFingerprint }),
+    ...(target.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.orgIdentityFingerprint }) },
+  warnings: [], preparationRequired: settings.source.kind === 'git' || settings.target.kind === 'git' };
 }
-export async function resolveSavedSelection(runtime: WebRuntime, owner: string, preset: DeploymentPresetSummary, settings: SavedDeploymentSelection, prepare = false): Promise<ResolvedDeploymentPreset> {
+export async function resolveSavedSelection(runtime: WebRuntime, owner: string, preset: DeploymentPresetSummary, settings: SavedDeploymentSelection, prepare = false, materializeRegistered = false): Promise<ResolvedDeploymentPreset> {
   const warnings: string[] = [];
-  const source = await resolveSavedSource(runtime, owner, settings.source, warnings, prepare, settings.options.metadataType);
-  const target = await resolveSavedSource(runtime, owner, settings.target, warnings, prepare, settings.options.metadataType);
+  const source = await resolveSavedSource(runtime, owner, settings.source, warnings, prepare, settings.options.metadataType, materializeRegistered);
+  const target = await resolveSavedSource(runtime, owner, settings.target, warnings, prepare, settings.options.metadataType, materializeRegistered);
   return { preset,
     ...(source.id === undefined || target.id === undefined ? {} : { selection: { ...settings.options, sourceId: source.id, targetId: target.id, ...(source.source?.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.source.orgIdentityFingerprint }), ...(target.source?.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.source.orgIdentityFingerprint }) } }),
     ...(source.source === undefined ? {} : { source: source.source }),
     ...(target.source === undefined ? {} : { target: target.source }),
     warnings, preparationRequired: source.preparationRequired || target.preparationRequired };
 }
-async function resolveSavedSource(runtime: WebRuntime, owner: string, saved: SavedSource, warnings: string[], prepare: boolean, metadataType?: string): Promise<{ id?: string; source?: WorkspaceSource; preparationRequired: boolean }> {
+async function resolveSavedSource(runtime: WebRuntime, owner: string, saved: SavedSource, warnings: string[], prepare: boolean, metadataType?: string, materializeRegistered = false): Promise<{ id?: string; source?: WorkspaceSource; preparationRequired: boolean }> {
   if (saved.kind === 'org') {
     const current = await runtime.workspace.getOrgIdentity(saved.identity.alias, true);
     if (!sameOrgIdentity(saved.identity, current)) throw new Error('저장한 Org identity 또는 연결이 변경되었습니다. 대상을 다시 선택하세요.');
@@ -92,7 +119,7 @@ async function resolveSavedSource(runtime: WebRuntime, owner: string, saved: Sav
   const currentRequest = { ...request, expectedCommitSha: sha, ...(metadataType === undefined ? {} : { metadataType }) };
   const roots = await runtime.gitImports.projectRoots(owner, currentRequest);
   if (currentRequest.projectRoot === undefined || !roots.projectRoots.includes(currentRequest.projectRoot)) throw new Error('저장한 DX 프로젝트 경로를 찾을 수 없습니다.');
-  if (registered !== undefined) return { id: `git-registered:${registered.id}`, preparationRequired: false };
+  if (registered !== undefined && !materializeRegistered) return { id: `git-registered:${registered.id}`, preparationRequired: false };
   if (!prepare) return { preparationRequired: true };
   const imported = await runtime.gitImports.prepareLatest(owner, currentRequest);
   if (imported.status !== 'READY' || imported.provenance === undefined) throw new Error('Git 소스 준비가 완료되지 않았습니다.');

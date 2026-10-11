@@ -1,10 +1,12 @@
 import type { WorkspaceSource } from '../../../src/api/workspace-contracts';
+import { comparisonDisplayWarnings } from '../../../src/reports/comparison-display';
 import { useEffect, useState } from 'react';
 
 import { ComparisonFileDiff } from '../ComparisonFileDiff';
 import { Icon } from '../components/Icon';
 import type { ComparisonComponent, ComparisonJobResponse } from './api';
 import { getComparisonJob } from './api';
+import { downloadMarkdown, renderComparisonMarkdown } from './markdown-download';
 
 const METADATA_RESULTS_PER_PAGE = 20;
 const VISIBLE_RESULT_PAGES = 5;
@@ -114,7 +116,13 @@ export function ComparisonResultPanel({
     <section className="comparison-result" aria-labelledby="comparison-result-title">
       <div className="comparison-result-head">
         <div><p className="eyebrow">{sourceOnly ? 'SOURCE METADATA' : 'COMPARISON COMPLETE'}</p><h2 id="comparison-result-title">{sourceOnly ? displaySource.label : `${displaySource.label} → ${displayTarget.label}`}</h2><small>{job.manifest}</small></div>
-        <span className="result-success"><Icon name="check" />{job.result.comparisonLimit?.exceeded === true ? '비교 제한 초과 · 배포 목록 준비 완료' : sourceOnly ? '받아오기 완료' : '비교 완료'}</span>
+        <div className="comparison-result-actions">
+          {!sourceOnly && <button type="button" className="button button-secondary" disabled={identicalLoading || Boolean(filterError) || filteredComponents.length === 0}
+            title="현재 검색·상태 필터에 맞는 모든 페이지의 diff를 Markdown으로 다운로드" onClick={() => downloadMarkdown(
+              renderComparisonMarkdown(job, filteredComponents, deploymentView ? 'after' : 'before'), `sfud-comparison-${job.id}-diff`,
+            )}>Diff MD 다운로드</button>}
+          <span className="result-success"><Icon name="check" />{job.result.comparisonLimit?.exceeded === true ? '비교 제한 초과 · 배포 목록 준비 완료' : sourceOnly ? '받아오기 완료' : '비교 완료'}</span>
+        </div>
       </div>
       {[job.right, ...(sourceOnly ? [] : [job.left])].filter((source) => source.provenance !== undefined).map((source) =>
         <p className="git-sha" key={source.id}>비교 기준: {source.label} · {source.provenance!.refName} · <code>{source.provenance!.commitSha}</code>
@@ -137,7 +145,7 @@ export function ComparisonResultPanel({
       </div>
       {identicalLoading && <p className="comparison-warning" role="status">동일 항목 불러오는 중…</p>}
       {filterError && <p className="comparison-warning" role="alert">{filterError} <button type="button" onClick={() => { setFilterError(''); setLoadAttempt((value) => value + 1); }}>다시 시도</button></p>}
-      {job.result.warnings.map((warning) => <p className="comparison-warning" key={warning}><Icon name="shield" />{warning}</p>)}
+      {comparisonDisplayWarnings(job.result.warnings).map((warning) => <p className="comparison-warning" key={warning}><Icon name="shield" />{warning}</p>)}
       {deploymentView && !comparisonOnly && !sourceOnly && summary.removed > 0 && <p className="comparison-warning"><Icon name="shield" />TARGET ONLY 항목은 destructive manifest 없이는 target org에서 삭제되지 않습니다.</p>}
       <div className="component-results">
         {filteredComponents.length === 0
