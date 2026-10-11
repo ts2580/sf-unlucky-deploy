@@ -354,6 +354,12 @@ describe('비교 API', () => {
         const xml = await readFile(flagValue(args, '--manifest'), 'utf8');
         expect(xml).toContain('<members>Hello</members>'); expect(xml).not.toContain('Unchanged'); expect(xml).not.toContain('<members>*</members>');
       }
+      const unavailable = await server.inject({ method: 'POST', url: '/api/v1/comparisons',
+        headers: { cookie, 'x-sfud-csrf': csrfToken }, payload: { scope: 'selected',
+          leftSourceId: 'org:left', rightSourceId: 'org:right',
+          components: [{ type: 'ApexClass', fullName: 'Hello' }, { type: 'RemovedMetadataType', fullName: 'OldItem' }] } });
+      expect(unavailable.statusCode).toBe(400);
+      expect(unavailable.json().error.message).toBe('선택한 Salesforce metadata type을 사용할 수 없습니다: RemovedMetadataType');
       for (const components of [[], [{ type: 'ApexClass', fullName: '*' }], [{ type: 'ApexClass', fullName: 'Hello', key: 'extra' }]]) {
         expect((await server.inject({ method: 'POST', url: '/api/v1/comparisons', headers: { cookie, 'x-sfud-csrf': csrfToken },
           payload: { scope: 'selected', leftSourceId: 'org:left', rightSourceId: 'org:right', components } })).statusCode).toBe(400);

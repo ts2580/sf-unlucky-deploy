@@ -9,7 +9,7 @@ for (const width of [1440, 768, 390]) {
       databasePath: ':memory:', sfClient: { async runJson() { return { result: { nonScratchOrgs: ['source', 'target'].map((alias, index) => ({
         alias, username: `${alias}@example.com`, orgId: `00D00000000000${index + 1}`, connectedStatus: 'Connected', isSandbox: true,
       })) } }; } } });
-    const errors: string[] = []; const deploymentPosts: string[] = [];
+    const errors: string[] = []; const deploymentPosts: string[] = []; const comparisons: Record<string, unknown>[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
     page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
     page.on('request', (request) => { if (request.method() === 'POST' && /\/api\/v1\/deployments\//u.test(request.url())) deploymentPosts.push(request.url()); });
@@ -37,7 +37,19 @@ for (const width of [1440, 768, 390]) {
       await page.route('**/api/v1/deployment-presets/preset-fixture/resolve', async (route) => {
         resolveStarted = true;
         if (slowResolve) await new Promise<void>((resolve) => { release = resolve; });
-        await route.fulfill({ json: { preset, selection: saved, warnings: [], preparationRequired: false } });
+        const selection = { ...saved }; if (width === 390) delete selection.components;
+        await route.fulfill({ json: { preset, selection, warnings: [], preparationRequired: false } });
+      });
+      await page.route('**/api/v1/deployment-presets/preset-fixture/prepare', (route) => route.fulfill({ json: {
+        preset, selection: saved, warnings: [], preparationRequired: false,
+      } }));
+      await page.route('**/api/v1/comparisons', (route) => {
+        if (route.request().method() === 'GET') return route.fulfill({ json: { jobs: [] } });
+        comparisons.push(route.request().postDataJSON());
+        return route.fulfill({ json: { job: { id: 'legacy-preset-comparison', status: 'SUCCEEDED', scope: 'all', metadataType: 'CustomObject',
+          manifest: 'CustomObject', left: { id: 'org:target', kind: 'org', label: 'target' }, right: { id: 'org:source', kind: 'org', label: 'source' },
+          result: { summary: { added: 1, removed: 0, modified: 0, identical: 0, total: 1, different: 1 }, warnings: [],
+            components: [{ key: 'CustomObject:Sample__c', type: 'CustomObject', fullName: 'Sample__c', status: 'ADDED', files: [] }] } } } });
       });
       await page.goto(`${address}/deploy`);
       await page.getByLabel('접속 비밀번호').fill('preset-ui-fixture-password');
@@ -55,6 +67,13 @@ for (const width of [1440, 768, 390]) {
       await settings.getByRole('combobox', { name: '저장 설정', exact: true }).selectOption(preset.id);
       await settings.getByRole('button', { name: '불러오기', exact: true }).click();
       await expect(page.locator('#deploy-scope')).toHaveValue('CustomObject');
+      await expect(page.getByRole('region', { name: '저장한 배포 항목' })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: '메타데이터 비교', exact: true })).toBeEnabled();
+      await page.getByRole('button', { name: '메타데이터 비교', exact: true }).click();
+      await expect(page.getByLabel('Sample__c 배포 대상으로 선택')).toBeVisible();
+      expect(comparisons).toHaveLength(1);
+      expect(comparisons[0]).toMatchObject({ scope: 'all', metadataType: 'CustomObject', leftSourceId: 'org:target', rightSourceId: 'org:source' });
+      expect(comparisons[0]).not.toHaveProperty('components');
       expect(deploymentPosts).toEqual([]);
       await page.screenshot({ path: testInfo.outputPath(`presets-${width}.png`), fullPage: true });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);

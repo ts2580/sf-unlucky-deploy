@@ -7,6 +7,7 @@ import { DeploymentDrafts } from './DeploymentDrafts';
 import { PendingSubmissions } from './PendingSubmissions';
 import { persistPending, completePending, listPending, settleRejectedPending } from './pending-submissions';
 import { DeploymentPresets } from './DeploymentPresets';
+import { ConnectionDialog } from '../components/ConnectionDialog';
 import { ResolvedDeploymentPresetSchema, type DeploymentSelection, type ResolvedDeploymentPreset } from '../../../src/api/deployment-preset-contracts';
 import { gitMetadataTypes } from '../../../src/api/git-metadata-types';
 import type { WorkspaceSource, WorkspaceResponse } from '../../../src/api/workspace-contracts';
@@ -100,10 +101,16 @@ function directDeploymentDescription(testLevel: string, testCount: number): stri
   return `${testLevel} · Salesforce 테스트 후 배포합니다.`;
 }
 
+interface PreparedActionSources {
+  key: string; sourceId: string; targetId: string; source?: WorkspaceSource; target?: WorkspaceSource;
+}
+
 export function DeploymentPage({ user }: { user: ApiUser }) {
   const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null);
   const [loadedPreset, setLoadedPreset] = useState<ResolvedDeploymentPreset | null>(null);
-  const actionSourcesRef = useRef<{ key: string; sourceId: string; targetId: string } | null>(null);
+  const actionSourcesRef = useRef<PreparedActionSources | null>(null);
+  const [presetSourceReview, setPresetSourceReview] = useState<{ prepared: PreparedActionSources; warnings: string[] } | null>(null);
+  const savedComponentMode = (loadedPreset?.selection?.components?.length ?? 0) > 0;
   const [gitConnections, setGitConnections] = useState<GitConnection[]>([]);
   const [gitConnectionsLoading, setGitConnectionsLoading] = useState(true);
   const [metadataTypes, setMetadataTypes] = useState<MetadataTypeOption[]>([]);
@@ -181,6 +188,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     compareCurrentType,
     packageSelectionKey,
   ].join('\u0000');
+  const preparedActionKey = loadedPreset === null ? null : `${loadedPreset.preset.id}\u0000${workflowSelectionKey}`;
+  const preparedAction = actionSourcesRef.current?.key === preparedActionKey ? actionSourcesRef.current : null;
   const deploymentSourceId = loadedPreset !== null ? sourceId : sourceId.startsWith('git-registered:')
     ? comparisonJob?.status === 'SUCCEEDED' && comparisonJobSelectionKeyRef.current === workflowSelectionKey
       && comparisonJob.right.id.startsWith('git:') ? comparisonJob.right.id : ''
@@ -240,7 +249,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   }, []);
 
   useEffect(() => {
-    if (loadedPreset?.selection !== undefined) {
+    if (loadedPreset?.selection !== undefined && (savedComponentMode || loadedPreset.selection.metadataType !== undefined)) {
       const names = new Set([loadedPreset.selection.metadataType, ...(loadedPreset.selection.components ?? []).map((component) => component.type)].filter((name): name is string => name !== undefined));
       setMetadataTypes((current) => [...new Map([...current, ...[...names].map((name) => ({ name, directoryName: name }))].map((entry) => [entry.name, entry])).values()]);
       setMetadataTypesStatus('ready'); setMetadataTypesError('');
@@ -288,7 +297,9 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
           : 'Salesforce metadata type을 불러오지 못했습니다.');
       });
     return () => controller.abort();
-  }, [compareCurrentType, metadataTypeSourceIds, sourceId, targetOrgId, preparedMetadataType, metadataScopeMismatch, loadedPreset]);
+  }, [compareCurrentType, metadataTypeSourceIds, sourceId, targetOrgId, preparedMetadataType, metadataScopeMismatch, loadedPreset, savedComponentMode]);
+
+  useEffect(() => { setPresetSourceReview(null); }, [preparedActionKey]);
 
   useEffect(() => {
     comparisonRequestControllerRef.current?.abort();
@@ -361,7 +372,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   }, [deploymentSourceId, comparisonOnly, loadedPreset]);
 
   const source = preparedGitSource?.id === sourceId ? preparedGitSource : workspace?.sources.find((entry) => entry.id === sourceId);
-  const executionSource = sourceId.startsWith('git-registered:') && comparisonJob?.status === 'SUCCEEDED' && comparisonJobSelectionKeyRef.current === workflowSelectionKey ? comparisonJob.right : source;
+  const executionSource = preparedAction?.source ?? (sourceId.startsWith('git-registered:') && comparisonJob?.status === 'SUCCEEDED' && comparisonJobSelectionKeyRef.current === workflowSelectionKey ? comparisonJob.right : source);
+  const executionTarget = preparedAction?.target ?? target;
   const comparing = comparisonSubmitting
     || (comparisonJob !== null && ['QUEUED', 'RUNNING'].includes(comparisonJob.status));
   const dryRunning = dryRunSubmitting
@@ -427,20 +439,25 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     });
   };
 
-  const prepareActionSources = async (signal: AbortSignal) => {
-    if (loadedPreset === null) return { sourceId: deploymentSourceId, targetId: targetOrgId };
-    const key = `${loadedPreset.preset.id}\u0000${workflowSelectionKey}`;
+  const prepareActionSources = async (signal: AbortSignal): Promise<PreparedActionSources | null> => {
+    if (loadedPreset === null) return { key: workflowSelectionKey, sourceId: deploymentSourceId, targetId: targetOrgId };
+    const key = preparedActionKey!;
     if (actionSourcesRef.current?.key === key) return actionSourcesRef.current;
     const value = await apiRequest<ResolvedDeploymentPreset>(`/api/v1/deployment-presets/${encodeURIComponent(loadedPreset.preset.id)}/prepare`, { method: 'POST', csrf: true, signal, timeoutMs: 120_000, responseSchema: ResolvedDeploymentPresetSchema });
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
     if (value.selection === undefined) throw new Error('작업에 사용할 소스를 준비하지 못했습니다.');
-    const prepared = { key, sourceId: value.selection.sourceId, targetId: value.selection.targetId };
+    const prepared = { key, sourceId: value.selection.sourceId, targetId: value.selection.targetId,
+      ...(value.source === undefined ? {} : { source: value.source }), ...(value.target === undefined ? {} : { target: value.target }) };
+    if (value.warnings.length > 0) {
+      setPresetSourceReview({ prepared, warnings: value.warnings });
+      return null;
+    }
     actionSourcesRef.current = prepared;
     return prepared;
   };
 
   const runComparison = async () => {
-    if ((loadedPreset !== null ? deploymentCart.length === 0 : selectedMetadataType === undefined || metadataScopeMismatch) || !sourceId || (compareCurrentType && !targetOrgId)) return;
+    if ((savedComponentMode ? deploymentCart.length === 0 : selectedMetadataType === undefined || metadataScopeMismatch) || !sourceId || (compareCurrentType && !targetOrgId)) return;
     setError('');
     setComparisonJob(null);
     if (loadedPreset === null && sourceId.startsWith('git-registered:')) {
@@ -453,10 +470,11 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     comparisonRequestControllerRef.current = controller;
     comparisonJobSelectionKeyRef.current = selectionKey;
     try {
-      if (loadedPreset !== null) actionSourcesRef.current = null;
+      if (loadedPreset !== null && comparisonJob !== null) actionSourcesRef.current = null;
       const action = loadedPreset === null ? { sourceId, targetId: targetOrgId } : await prepareActionSources(controller.signal);
+      if (action === null) return;
       const data = await startComparison({
-          ...(loadedPreset === null ? { scope: 'all' as const, metadataType: selectedMetadataType!.name }
+          ...(!savedComponentMode ? { scope: 'all' as const, metadataType: selectedMetadataType!.name }
             : { scope: 'selected' as const, components: deploymentCart.map(({ type, fullName }) => ({ type, fullName })) }),
           ...(compareCurrentType ? { leftSourceId: action.targetId } : { sourceOnly: true }),
           rightSourceId: action.sourceId,
@@ -497,6 +515,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     let allowClearFreshRequest = false;
     try {
       const action = await prepareActionSources(controller.signal);
+      if (action === null) return;
       const body: CreateDryRunRequest = {
         scope: 'selected',
         components: deploymentCart.map(({ type, fullName }) => ({ type, fullName })),
@@ -512,7 +531,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       const idempotencyKey = dryRunIdempotencyKeyRef.current ?? createIdempotencyKey();
       dryRunIdempotencyKeyRef.current = idempotencyKey; submittedKey = idempotencyKey;
       allowClearFreshRequest = !listPending(user.id).some((item) => item.key === idempotencyKey);
-      persistPending(user.id, 'dry-run', idempotencyKey, body, executionSource, target);
+      persistPending(user.id, 'dry-run', idempotencyKey, body, action.source ?? executionSource, action.target ?? executionTarget);
       const data = await requestDryRun(body, idempotencyKey, controller.signal);
       completePending(user.id, idempotencyKey, data.job.id);
       if (
@@ -550,7 +569,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     let allowClearFreshRequest = false;
     try {
       const approvedDryRun = approvedDryRunAvailable && dryRunJob !== null;
-      const action = approvedDryRun ? { sourceId: deploymentSourceId, targetId: targetOrgId } : await prepareActionSources(controller.signal);
+      const action = approvedDryRun ? { key: workflowSelectionKey, sourceId: deploymentSourceId, targetId: targetOrgId, source: dryRunJob.source, target: dryRunJob.target } : await prepareActionSources(controller.signal);
+      if (action === null) return;
       const directIdempotencyKey = approvedDryRun
         ? undefined
         : directDeploymentIdempotencyKeyRef.current ?? createIdempotencyKey();
@@ -565,7 +585,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
         testLevel: testLevel as CreateDirectDeploymentRequest['testLevel'],
         tests: testNames, waitMinutes: 60, strict: false, targetConfirmation: targetAlias, confirmation: '실제 배포',
       };
-      if (directIdempotencyKey !== undefined) { allowClearFreshRequest = !listPending(user.id).some((item) => item.key === directIdempotencyKey); persistPending(user.id, 'direct', directIdempotencyKey, directBody, executionSource, target); }
+      if (directIdempotencyKey !== undefined) { allowClearFreshRequest = !listPending(user.id).some((item) => item.key === directIdempotencyKey); persistPending(user.id, 'direct', directIdempotencyKey, directBody, action.source ?? executionSource, action.target ?? executionTarget); }
       const data = approvedDryRun
         ? await executeApprovedDeployment({
             dryRunJobId: dryRunJob.id,
@@ -645,7 +665,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     const selection = value.selection;
     setSelectionTouched(!saved);
     if (selection === undefined) return;
-    setLoadedPreset(saved ? value : null); actionSourcesRef.current = null;
+    setLoadedPreset(saved ? value : null); actionSourcesRef.current = null; setPresetSourceReview(null);
     if (saved) {
       setApexTestClasses(selection.tests.map((name) => ({ name, matchesConfiguredSuffix: false })));
       setApexTestClassQuery(''); setApexTestClassesError('');
@@ -736,11 +756,24 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     <div className="page-stack deployment-page">
       {source !== undefined && target !== undefined && <DeploymentConfirmation open={confirmationOpen}
         source={approvedDryRunAvailable && dryRunJob !== null ? dryRunJob.source : executionSource ?? source}
-        target={approvedDryRunAvailable && dryRunJob !== null ? dryRunJob.target : target}
+        target={approvedDryRunAvailable && dryRunJob !== null ? dryRunJob.target : executionTarget ?? target}
         components={approvedDryRunAvailable && dryRunJob !== null ? dryRunJob.components ?? [] : deploymentCart.map(({ type, fullName }) => ({ type, fullName }))} testLevel={approvedDryRunAvailable && dryRunJob !== null ? dryRunJob.testPlan?.level ?? testLevel : testLevel} tests={approvedDryRunAvailable && dryRunJob !== null ? dryRunJob.testPlan?.tests ?? testNames : testNames}
         mode={approvedDryRunAvailable && dryRunJob !== null ? 'validated' : 'direct'}
         {...(dryRunJob === null ? {} : { validation: { status: dryRunJob.status, ...(dryRunJob.payloadChecksum === undefined ? {} : { checksum: dryRunJob.payloadChecksum }), ...(dryRunJob.updatedAt === undefined ? {} : { validatedAt: dryRunJob.updatedAt }) } })}
         busy={deploymentSubmitting} onCancel={() => setConfirmationOpen(false)} onConfirm={() => void executeDeployment()} />}
+
+      {presetSourceReview !== null && presetSourceReview.prepared.key === preparedActionKey && <ConnectionDialog
+        title="저장한 Git 소스 변경 확인" busy={false} onClose={() => setPresetSourceReview(null)}>
+        <p>저장한 Git 소스가 변경되어 작업을 중단했습니다. 준비된 커밋을 확인한 뒤 비교·검증·배포를 다시 실행하세요.</p>
+        {presetSourceReview.warnings.map((warning) => <p className="warning-note" key={warning}>{warning}</p>)}
+        {[presetSourceReview.prepared.source, presetSourceReview.prepared.target].map((entry, index) => entry?.provenance && <p key={index}>
+          <strong>{index === 0 ? 'Source' : 'Target'}</strong> · {entry.label} · {entry.provenance.refName}<br /><code>{entry.provenance.commitSha}</code>
+        </p>)}
+        <div className="git-actions"><button type="button" className="button button-secondary" onClick={() => setPresetSourceReview(null)}>취소</button>
+          <button type="button" className="button button-primary" onClick={() => {
+            actionSourcesRef.current = presetSourceReview.prepared; setPresetSourceReview(null);
+          }}>변경된 소스를 확인했습니다</button></div>
+      </ConnectionDialog>}
 
       <WorkflowStatusPanel
         liveStatus={liveStatus}
@@ -801,7 +834,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
               </label>
             </div>
             <p className={`field-hint${metadataTypesInvalid ? ' field-hint-error' : ''}`}><Icon name="check" />{
-              loadedPreset !== null ? `저장한 목록에서 선택한 ${deploymentCart.length}개 항목만 비교합니다.` : metadataTypesStatus === 'idle'
+              savedComponentMode ? `저장한 목록에서 선택한 ${deploymentCart.length}개 항목만 비교합니다.` : metadataTypesStatus === 'idle'
                 ? 'Source와 Target을 확인한 뒤 metadata type을 조회합니다.'
                 : metadataTypesStatus === 'loading'
                   ? 'Salesforce metadata type을 불러오는 중입니다.'
@@ -825,15 +858,15 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
                 onChange={(ids) => setPackageSelection({ sourceIds: packageOrgIds, ids })} />}
             </div>
             <div className="comparison-run-actions">
-              <button className={`button button-primary comparison-run-button${comparing ? ' comparison-run-loading' : ''}`} type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || (loadedPreset !== null ? deploymentCart.length === 0 : metadataTypesStatus !== 'ready' || !scopeValid) || !sourceId || (compareCurrentType && (!targetOrgId || sourceId === targetOrgId))}><Icon name={comparing ? 'refresh' : 'compare'} /><span>{compareCurrentType && !comparisonLimitExceeded
+              <button className={`button button-primary comparison-run-button${comparing ? ' comparison-run-loading' : ''}`} type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || (savedComponentMode ? deploymentCart.length === 0 : metadataTypesStatus !== 'ready' || !scopeValid) || !sourceId || (compareCurrentType && (!targetOrgId || sourceId === targetOrgId))}><Icon name={comparing ? 'refresh' : 'compare'} /><span>{compareCurrentType && !comparisonLimitExceeded
                 ? comparing ? '메타데이터 비교 중……' : '메타데이터 비교'
                 : comparing ? '메타데이터 다운로드 중……' : '메타데이터 다운로드'}</span></button>
             </div>
           </section>
 
-          {loadedPreset !== null && comparisonJob === null && <section className="workflow-panel" aria-label="저장한 배포 항목">
-            <div className="panel-heading"><div><h2>저장한 배포 항목</h2><p>{loadedPreset.selection?.components?.length ?? 0}개 항목</p></div></div>
-            <div className="apex-test-options">{(loadedPreset.selection?.components ?? []).map((component) => {
+          {savedComponentMode && comparisonJob === null && <section className="workflow-panel" aria-label="저장한 배포 항목">
+            <div className="panel-heading"><div><h2>저장한 배포 항목</h2><p>{loadedPreset?.selection?.components?.length ?? 0}개 항목</p></div></div>
+            <div className="apex-test-options">{(loadedPreset?.selection?.components ?? []).map((component) => {
               const key = `${component.type}:${component.fullName}`;
               return <label key={key}><input type="checkbox" aria-label={`${component.fullName} 배포 대상으로 선택`} checked={deploymentCart.some((item) => item.key === key)} disabled={dryRunning || deploying} onChange={(event) => setComponentInCart({ ...component, key, status: 'SOURCE', files: [] }, event.target.checked)} /><span><Icon name="check" />{component.fullName}<small>{component.type}</small></span></label>;
             })}</div>
