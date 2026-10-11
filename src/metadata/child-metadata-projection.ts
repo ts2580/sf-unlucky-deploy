@@ -9,24 +9,37 @@ import { readXmlStream } from './xml-stream.js';
 
 // MDAPI aggregates fields/rules/labels into parent XML files. Project only for
 // comparison; the original snapshot and its deployable payload stay immutable.
-export async function projectChildMetadata(snapshot: MetadataSnapshot, metadataType?: string): Promise<{
+export async function projectChildMetadata(snapshot: MetadataSnapshot, metadataType?: string | readonly string[]): Promise<{
   snapshot: MetadataSnapshot; dispose(): Promise<void>;
 }> {
-  const rule = childMetadataTypes.find((entry) => entry.name === metadataType);
-  if (rule === undefined) return { snapshot, async dispose() {} };
+  const types = new Set(typeof metadataType === 'string' ? [metadataType] : metadataType ?? []);
+  const rules = childMetadataTypes.filter((entry) => types.has(entry.name));
+  if (rules.length === 0) return { snapshot, async dispose() {} };
   const directory = await mkdtemp(path.join(os.tmpdir(), 'sfud-child-compare-'));
   const dispose = () => rm(directory, { recursive: true, force: true });
   try {
-    const output = path.join(directory, rule.name);
-    await mkdir(output, { mode: 0o700 });
     await copyFile(snapshot.manifestPath, path.join(directory, 'package.xml'));
-    for (const file of await listFiles(snapshot.packageRoot)) {
-      if (!file.startsWith(`${rule.directory}/`) || !file.endsWith(`.${rule.suffix}`)) continue;
-      const parentName = file.slice(rule.directory.length + 1, -rule.suffix.length - 1);
-      await projectFile(path.join(snapshot.packageRoot, file), output, parentName, rule);
+    const files = await listFiles(snapshot.packageRoot);
+    const includeParents = [...types].some((type) => !rules.some((rule) => rule.name === type));
+    if (includeParents) {
+      for (const file of files) {
+        if (file === 'package.xml') continue;
+        const output = path.join(directory, file);
+        await mkdir(path.dirname(output), { recursive: true, mode: 0o700 });
+        await link(path.join(snapshot.packageRoot, file), output).catch(() => copyFile(path.join(snapshot.packageRoot, file), output));
+      }
+    }
+    for (const rule of rules) {
+      const output = path.join(directory, rule.name);
+      await mkdir(output, { recursive: true, mode: 0o700 });
+      for (const file of files) {
+        if (!file.startsWith(`${rule.directory}/`) || !file.endsWith(`.${rule.suffix}`)) continue;
+        const parentName = file.slice(rule.directory.length + 1, -rule.suffix.length - 1);
+        await projectFile(path.join(snapshot.packageRoot, file), output, parentName, rule);
+      }
     }
     return { snapshot: { ...snapshot, packageRoot: directory,
-      metadataTypes: [{ xmlName: rule.name, directoryName: rule.name, suffix: 'xml' }] }, dispose };
+      metadataTypes: [...(includeParents ? snapshot.metadataTypes ?? [] : []), ...rules.map((rule) => ({ xmlName: rule.name, directoryName: rule.name, suffix: 'xml' }))] }, dispose };
   } catch (error) { await dispose(); throw error; }
 }
 

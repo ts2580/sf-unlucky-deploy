@@ -52,6 +52,25 @@ function fieldXml(fullName: string, label: string, type = 'Text'): string {
 }
 
 describe('child metadata comparison projection', { timeout: 60_000 }, () => {
+  it('저장한 ApexClass와 여러 하위 메타데이터만 비교하고 retrieve의 추가 항목은 제외한다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-selected-child-')); roots.push(root);
+    const snapshots = [];
+    for (const side of ['left', 'right']) {
+      const snapshot = await mdapiSnapshot(path.join(root, side), objectXml(fieldXml('Saved__c', side) + fieldXml('Other__c', side)),
+        `<CustomLabels><labels><fullName>SavedLabel</fullName><value>${side}</value></labels><labels><fullName>OtherLabel</fullName><value>${side}</value></labels></CustomLabels>`);
+      await mkdir(path.join(snapshot.packageRoot, 'classes'));
+      await writeFile(path.join(snapshot.packageRoot, 'classes', 'SavedClass.cls'), `public class SavedClass { String side = '${side}'; }`);
+      await writeFile(path.join(snapshot.packageRoot, 'classes', 'OtherClass.cls'), `public class OtherClass { String side = '${side}'; }`);
+      snapshots.push(snapshot);
+    }
+    const keys = ['ApexClass:SavedClass', 'CustomField:Account.Saved__c', 'CustomLabel:SavedLabel'];
+    const before = await Promise.all(snapshots.map((snapshot) => sha256Directory(snapshot.packageRoot)));
+    const result = await compareSnapshots(snapshots[0]!, snapshots[1]!, { componentKeys: keys, maximumFiles: 3 });
+    expect(result.components.map((component) => component.key).sort()).toEqual(keys.sort());
+    expect(result.summary).toMatchObject({ total: 3, modified: 3 });
+    expect(result.comparisonLimit?.exceeded).toBe(false);
+    expect(await Promise.all(snapshots.map((snapshot) => sha256Directory(snapshot.packageRoot)))).toEqual(before);
+  });
   it('CustomField를 field component으로 분리해 modified/identical/added/removed를 구분하고 원본을 보존한다', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-child-comparison-'));
     roots.push(root);

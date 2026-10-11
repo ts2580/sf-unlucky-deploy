@@ -27,8 +27,9 @@ test('모바일 화면에서 수평으로 넘치지 않는다', async ({ page })
   await expect(page.getByTestId('summary')).toBeVisible();
 });
 
-test('원문 hash가 다른 semantic 동일 XML을 별도로 표시한다', async ({ page }) => {
+test('정책 안내 없이 표현이 다른 동일 XML과 실제 주의사항을 표시한다', async ({ page }) => {
   const fixture = comparisonFixture();
+  fixture.warnings = ['등록된 XML semantic 정책이 없어 generic 비교를 사용한 metadata type: ApexClass', '상세 diff 일부를 생략했습니다.'];
   fixture.summary = { added: 0, removed: 0, modified: 1, identical: 1, total: 2, different: 1 };
   fixture.components.push({
     key: 'Profile:Admin',
@@ -51,7 +52,10 @@ test('원문 hash가 다른 semantic 동일 XML을 별도로 표시한다', asyn
   await page.setContent(renderHtmlReport(fixture));
 
   await expect(page.getByTestId('semantic-equal')).toContainText('Profile');
-  await expect(page.getByTestId('semantic-equal')).toContainText('metadata type 등록 정책');
+  await expect(page.getByTestId('semantic-equal')).toContainText('표현은 다르지만 비교 결과가 같은 XML');
+  await expect(page.locator('body')).not.toContainText('등록 정책');
+  await expect(page.locator('body')).not.toContainText('generic 비교');
+  await expect(page.getByText('상세 diff 일부를 생략했습니다.', { exact: true })).toBeVisible();
 });
 
 function comparisonFixture(): ComparisonResult {

@@ -76,6 +76,7 @@ export interface CompareOptions {
   maximumFiles?: number;
   strict?: boolean;
   metadataType?: string;
+  componentKeys?: readonly string[];
 }
 
 const COMPONENT_COMPARISON_CONCURRENCY = 8;
@@ -92,9 +93,10 @@ export async function compareSnapshots(
   if (options.maximumFiles !== undefined && (!Number.isSafeInteger(options.maximumFiles) || options.maximumFiles < 1)) {
     throw new SfudError('INVALID_ARGUMENT', '최대 비교 파일 수는 1 이상의 정수여야 합니다.');
   }
-  const leftProjection = await projectChildMetadata(left, options.metadataType);
+  const projectionTypes = options.componentKeys?.map((key) => key.slice(0, key.indexOf(':'))) ?? options.metadataType;
+  const leftProjection = await projectChildMetadata(left, projectionTypes);
   try {
-    const rightProjection = await projectChildMetadata(right, options.metadataType);
+    const rightProjection = await projectChildMetadata(right, projectionTypes);
     try { return await comparePreparedSnapshots(leftProjection.snapshot, rightProjection.snapshot, options); }
     finally { await rightProjection.dispose(); }
   } finally { await leftProjection.dispose(); }
@@ -114,6 +116,12 @@ async function comparePreparedSnapshots(
 
   const leftComponents = await resolveMetadataComponents(left.packageRoot, left.metadataTypes);
   const rightComponents = await resolveMetadataComponents(right.packageRoot, right.metadataTypes);
+  if (options.componentKeys !== undefined) {
+    const selected = new Set(options.componentKeys);
+    for (const components of [leftComponents, rightComponents]) {
+      for (const key of components.keys()) if (!selected.has(key)) components.delete(key);
+    }
+  }
   const excludedKeys = new Set<string>();
   for (const components of [leftComponents, rightComponents]) {
     for (const [key, component] of components) {

@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, mkdir, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -334,6 +334,30 @@ describe('비교 API', () => {
       expect(sourceOnlyCalls.filter((args) =>
         args[0] === 'project' && args[1] === 'retrieve' && args[2] === 'start'))
         .toEqual([expect.arrayContaining(['--target-org', 'right'])]);
+
+      sfClient.includeUnchanged = true;
+      const beforeSelected = sfClient.calls.length;
+      const selected = await server.inject({ method: 'POST', url: '/api/v1/comparisons',
+        headers: { cookie, 'x-sfud-csrf': csrfToken }, payload: { scope: 'selected',
+          leftSourceId: 'org:left', rightSourceId: 'org:right', showIdentical: true,
+          components: [{ type: 'ApexClass', fullName: 'Hello' }] } });
+      expect(selected.statusCode, selected.body).toBe(202);
+      await server.sfudRuntime.comparisonQueue.onIdle();
+      const selectedJob = (await server.inject({ url: `/api/v1/comparisons/${selected.json().job.id}`, headers: { cookie } })).json().job;
+      expect(selectedJob.status, selectedJob.errorMessage).toBe('SUCCEEDED');
+      expect(selectedJob.result.components.map((component: { key: string }) => component.key)).toEqual(['ApexClass:Hello']);
+      const selectedCalls = sfClient.calls.slice(beforeSelected);
+      expect(selectedCalls.some((args) => args.includes('generate'))).toBe(false);
+      const retrieves = selectedCalls.filter((args) => args[1] === 'retrieve');
+      expect(retrieves).toHaveLength(2);
+      for (const args of retrieves) {
+        const xml = await readFile(flagValue(args, '--manifest'), 'utf8');
+        expect(xml).toContain('<members>Hello</members>'); expect(xml).not.toContain('Unchanged'); expect(xml).not.toContain('<members>*</members>');
+      }
+      for (const components of [[], [{ type: 'ApexClass', fullName: '*' }], [{ type: 'ApexClass', fullName: 'Hello', key: 'extra' }]]) {
+        expect((await server.inject({ method: 'POST', url: '/api/v1/comparisons', headers: { cookie, 'x-sfud-csrf': csrfToken },
+          payload: { scope: 'selected', leftSourceId: 'org:left', rightSourceId: 'org:right', components } })).statusCode).toBe(400);
+      }
     } finally {
       await server.close();
       await rm(root, { recursive: true, force: true });

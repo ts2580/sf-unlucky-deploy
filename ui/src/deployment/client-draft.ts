@@ -24,15 +24,3 @@ export function saveClientDraft(owner: string, tabId: string, selection: Deploym
   localStorage.setItem(key, JSON.stringify({ owner, tabId, selection, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() }));
 }
 export function removeClientDraft(owner: string, tabId: string): void { localStorage.removeItem(keyFor(owner, tabId)); }
-export function listClientDrafts(owner: string): { tabId: string; selection: DeploymentSelection }[] {
-  try {
-    const result: { tabId: string; selection: DeploymentSelection }[] = [];
-    const userPrefix = `${prefix}${encodeURIComponent(owner)}:`;
-    for (let index = 0; index < localStorage.length; index++) {
-      const key = localStorage.key(index); if (key === null || !key.startsWith(userPrefix)) continue;
-      const tabId = key.slice(userPrefix.length); const selection = readClientDraft(owner, tabId);
-      if (selection !== undefined) result.push({ tabId, selection });
-    }
-    return result;
-  } catch { return []; }
-}

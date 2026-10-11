@@ -7,7 +7,7 @@ import { DeploymentDrafts } from './DeploymentDrafts';
 import { PendingSubmissions } from './PendingSubmissions';
 import { persistPending, completePending, listPending, settleRejectedPending } from './pending-submissions';
 import { DeploymentPresets } from './DeploymentPresets';
-import type { DeploymentSelection, ResolvedDeploymentPreset } from '../../../src/api/deployment-preset-contracts';
+import { ResolvedDeploymentPresetSchema, type DeploymentSelection, type ResolvedDeploymentPreset } from '../../../src/api/deployment-preset-contracts';
 import { gitMetadataTypes } from '../../../src/api/git-metadata-types';
 import type { WorkspaceSource, WorkspaceResponse } from '../../../src/api/workspace-contracts';
 import type { GitConnection } from '../../../src/api/git-contracts';
@@ -102,6 +102,8 @@ function directDeploymentDescription(testLevel: string, testCount: number): stri
 
 export function DeploymentPage({ user }: { user: ApiUser }) {
   const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null);
+  const [loadedPreset, setLoadedPreset] = useState<ResolvedDeploymentPreset | null>(null);
+  const actionSourcesRef = useRef<{ key: string; sourceId: string; targetId: string } | null>(null);
   const [gitConnections, setGitConnections] = useState<GitConnection[]>([]);
   const [gitConnectionsLoading, setGitConnectionsLoading] = useState(true);
   const [metadataTypes, setMetadataTypes] = useState<MetadataTypeOption[]>([]);
@@ -179,12 +181,14 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     compareCurrentType,
     packageSelectionKey,
   ].join('\u0000');
-  const deploymentSourceId = sourceId.startsWith('git-registered:')
+  const deploymentSourceId = loadedPreset !== null ? sourceId : sourceId.startsWith('git-registered:')
     ? comparisonJob?.status === 'SUCCEEDED' && comparisonJobSelectionKeyRef.current === workflowSelectionKey
       && comparisonJob.right.id.startsWith('git:') ? comparisonJob.right.id : ''
     : sourceId;
   const comparisonLimitExceeded = comparisonJob?.result?.comparisonLimit?.exceeded === true;
   const cartSelectionKey = deploymentCart.map((item) => item.key).sort().join('\u0001');
+  const cartContextKey = [sourceId, targetOrgId, sourceSelectionId, targetSelectionId, packageSelectionKey].join('\u0000');
+  const restoredCartRef = useRef<{ contextKey: string; items: DeploymentCartItem[] } | null>(null);
   const dryRunSelectionKey = [sourceSelectionId, targetSelectionId, deploymentSourceId, targetOrgId, cartSelectionKey, testLevel, tests].join('\u0000');
   const workflowSelectionKeyRef = useRef(workflowSelectionKey);
   const dryRunSelectionKeyRef = useRef(dryRunSelectionKey);
@@ -197,7 +201,6 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     comparisonJobSelectionKeyRef, dryRunJobSelectionKeyRef, setError,
   });
   const canRun = ['OPERATOR', 'DEPLOYER', 'ADMIN'].includes(user.role);
-  const hasApexDeployment = deploymentCart.some((item) => item.type === 'ApexClass');
 
   useEffect(() => {
     const controller = new AbortController();
@@ -237,6 +240,12 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   }, []);
 
   useEffect(() => {
+    if (loadedPreset?.selection !== undefined) {
+      const names = new Set([loadedPreset.selection.metadataType, ...(loadedPreset.selection.components ?? []).map((component) => component.type)].filter((name): name is string => name !== undefined));
+      setMetadataTypes((current) => [...new Map([...current, ...[...names].map((name) => ({ name, directoryName: name }))].map((entry) => [entry.name, entry])).values()]);
+      setMetadataTypesStatus('ready'); setMetadataTypesError('');
+      return;
+    }
     if (sourceId.length === 0 || (compareCurrentType && targetOrgId.length === 0)) {
       setMetadataTypes([]);
       setScopeQuery('');
@@ -263,6 +272,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       signal: controller.signal,
     })
       .then((data) => {
+        if (controller.signal.aborted) return;
         setMetadataTypes(data.metadataTypes);
         setScopeQuery(presetMetadataTypeRef.current?.key === metadataTypeSourceIds ? presetMetadataTypeRef.current.value : defaultMetadataType(data.metadataTypes));
         presetMetadataTypeRef.current = undefined;
@@ -278,7 +288,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
           : 'Salesforce metadata type을 불러오지 못했습니다.');
       });
     return () => controller.abort();
-  }, [compareCurrentType, metadataTypeSourceIds, sourceId, targetOrgId, preparedMetadataType, metadataScopeMismatch]);
+  }, [compareCurrentType, metadataTypeSourceIds, sourceId, targetOrgId, preparedMetadataType, metadataScopeMismatch, loadedPreset]);
 
   useEffect(() => {
     comparisonRequestControllerRef.current?.abort();
@@ -313,10 +323,13 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   }, [deploymentJob]);
 
   useEffect(() => {
-    setDeploymentCart([]);
-  }, [sourceId, targetOrgId, sourceSelectionId, targetSelectionId, packageSelectionKey]);
+    const restored = restoredCartRef.current;
+    restoredCartRef.current = null;
+    setDeploymentCart(restored?.contextKey === cartContextKey ? restored.items : []);
+  }, [cartContextKey]);
 
   useEffect(() => {
+    if (loadedPreset !== null) { setApexTestClassesLoading(false); setApexTestClassesError(''); return; }
     if (deploymentSourceId.length === 0 || comparisonOnly) {
       setApexTestClasses([]);
       setApexTestClassQuery('');
@@ -324,11 +337,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       setApexTestClassesLoading(false);
       return;
     }
-    if (!hasApexDeployment && !testInputFocused) {
-      setApexTestClassesLoading(false);
-      return;
-    }
     const controller = new AbortController();
+    setApexTestClasses([]);
     setApexTestClassQuery('');
     setApexTestClassesLoading(true);
     setApexTestClassesError('');
@@ -337,6 +347,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       signal: controller.signal,
     })
       .then((data) => {
+        if (controller.signal.aborted) return;
         setApexTestClasses(data.testClasses);
       })
       .catch((caught: unknown) => {
@@ -347,7 +358,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       })
       .finally(() => { if (!controller.signal.aborted) setApexTestClassesLoading(false); });
     return () => controller.abort();
-  }, [hasApexDeployment, deploymentSourceId, testInputFocused, comparisonOnly]);
+  }, [deploymentSourceId, comparisonOnly, loadedPreset]);
 
   const source = preparedGitSource?.id === sourceId ? preparedGitSource : workspace?.sources.find((entry) => entry.id === sourceId);
   const executionSource = sourceId.startsWith('git-registered:') && comparisonJob?.status === 'SUCCEEDED' && comparisonJobSelectionKeyRef.current === workflowSelectionKey ? comparisonJob.right : source;
@@ -416,11 +427,25 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     });
   };
 
+  const prepareActionSources = async (signal: AbortSignal) => {
+    if (loadedPreset === null) return { sourceId: deploymentSourceId, targetId: targetOrgId };
+    const key = `${loadedPreset.preset.id}\u0000${workflowSelectionKey}`;
+    if (actionSourcesRef.current?.key === key) return actionSourcesRef.current;
+    const value = await apiRequest<ResolvedDeploymentPreset>(`/api/v1/deployment-presets/${encodeURIComponent(loadedPreset.preset.id)}/prepare`, { method: 'POST', csrf: true, signal, timeoutMs: 120_000, responseSchema: ResolvedDeploymentPresetSchema });
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    if (value.selection === undefined) throw new Error('작업에 사용할 소스를 준비하지 못했습니다.');
+    const prepared = { key, sourceId: value.selection.sourceId, targetId: value.selection.targetId };
+    actionSourcesRef.current = prepared;
+    return prepared;
+  };
+
   const runComparison = async () => {
-    if (selectedMetadataType === undefined || metadataScopeMismatch || !sourceId || (compareCurrentType && !targetOrgId)) return;
+    if ((loadedPreset !== null ? deploymentCart.length === 0 : selectedMetadataType === undefined || metadataScopeMismatch) || !sourceId || (compareCurrentType && !targetOrgId)) return;
     setError('');
     setComparisonJob(null);
-    if (sourceId.startsWith('git-registered:')) setDeploymentCart([]);
+    if (loadedPreset === null && sourceId.startsWith('git-registered:')) {
+      setDeploymentCart((current) => current.filter((component) => component.type === selectedMetadataType!.name));
+    }
     setComparisonSubmitting(true);
     const selectionKey = workflowSelectionKey;
     const controller = new AbortController();
@@ -428,11 +453,13 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     comparisonRequestControllerRef.current = controller;
     comparisonJobSelectionKeyRef.current = selectionKey;
     try {
+      if (loadedPreset !== null) actionSourcesRef.current = null;
+      const action = loadedPreset === null ? { sourceId, targetId: targetOrgId } : await prepareActionSources(controller.signal);
       const data = await startComparison({
-          scope: 'all',
-          metadataType: selectedMetadataType.name,
-          ...(compareCurrentType ? { leftSourceId: targetOrgId } : { sourceOnly: true }),
-          rightSourceId: sourceId,
+          ...(loadedPreset === null ? { scope: 'all' as const, metadataType: selectedMetadataType!.name }
+            : { scope: 'selected' as const, components: deploymentCart.map(({ type, fullName }) => ({ type, fullName })) }),
+          ...(compareCurrentType ? { leftSourceId: action.targetId } : { sourceOnly: true }),
+          rightSourceId: action.sourceId,
           strict: false,
           ...(excludedPackageIds.length > 0 ? { excludedPackageIds } : {}),
           showIdentical: compareCurrentType && showIdentical,
@@ -469,13 +496,14 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     let submittedKey: string | null = null;
     let allowClearFreshRequest = false;
     try {
+      const action = await prepareActionSources(controller.signal);
       const body: CreateDryRunRequest = {
         scope: 'selected',
         components: deploymentCart.map(({ type, fullName }) => ({ type, fullName })),
-        sourceId: deploymentSourceId,
+        sourceId: action.sourceId,
         ...(source?.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.orgIdentityFingerprint }),
         ...(target?.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.orgIdentityFingerprint }),
-        targetOrgId,
+        targetOrgId: action.targetId,
         testLevel: testLevel as CreateDryRunRequest['testLevel'],
         tests: testNames,
         waitMinutes: 60,
@@ -522,6 +550,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     let allowClearFreshRequest = false;
     try {
       const approvedDryRun = approvedDryRunAvailable && dryRunJob !== null;
+      const action = approvedDryRun ? { sourceId: deploymentSourceId, targetId: targetOrgId } : await prepareActionSources(controller.signal);
       const directIdempotencyKey = approvedDryRun
         ? undefined
         : directDeploymentIdempotencyKeyRef.current ?? createIdempotencyKey();
@@ -530,7 +559,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       }
       const directBody: CreateDirectDeploymentRequest = {
         scope: 'selected', components: deploymentCart.map(({ type, fullName }) => ({ type, fullName })),
-        sourceId: deploymentSourceId, targetOrgId,
+        sourceId: action.sourceId, targetOrgId: action.targetId,
         ...(source?.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.orgIdentityFingerprint }),
         ...(target?.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.orgIdentityFingerprint }),
         testLevel: testLevel as CreateDirectDeploymentRequest['testLevel'],
@@ -612,10 +641,15 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     } catch { /* Identity/path failure stays visible during explicit fallback revalidation after return. */ }
     window.location.assign(`${path}?return=${encodeURIComponent(returnPath)}`);
   };
-  const applyPreset = (value: ResolvedDeploymentPreset) => {
+  const applyPreset = (value: ResolvedDeploymentPreset, saved = false) => {
     const selection = value.selection;
-    setSelectionTouched(true);
+    setSelectionTouched(!saved);
     if (selection === undefined) return;
+    setLoadedPreset(saved ? value : null); actionSourcesRef.current = null;
+    if (saved) {
+      setApexTestClasses(selection.tests.map((name) => ({ name, matchesConfiguredSuffix: false })));
+      setApexTestClassQuery(''); setApexTestClassesError('');
+    }
     comparisonRequestControllerRef.current?.abort(); dryRunRequestControllerRef.current?.abort(); deploymentRequestControllerRef.current?.abort();
     comparisonJobSelectionKeyRef.current = null; dryRunJobSelectionKeyRef.current = null;
     const nextMetadataKey = selection.compareCurrentType ? `${selection.sourceId},${selection.targetId}` : selection.sourceId;
@@ -626,9 +660,12 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     setTargetSelectionId(selection.targetId); setTargetOrgId(selection.targetId);
     setPreparedGitSource(value.source); setPreparedGitTarget(value.target);
     setTestLevel(selection.testLevel); setTests(selection.tests.join(', '));
-    setCompareCurrentType(selection.compareCurrentType); setShowIdentical(selection.showIdentical);
+    setCompareCurrentType(selection.compareCurrentType); setShowIdentical(saved && (selection.components?.length ?? 0) > 0 ? true : selection.showIdentical);
     setScopeQuery(selection.metadataType ?? '');
-    setDeploymentCart([]); setComparisonJob(null); setDryRunJob(null); setDeploymentJob(null);
+    const items = (selection.components ?? []).map((component) => ({ ...component, key: `${component.type}:${component.fullName}` }));
+    const nextCartContextKey = [selection.sourceId, selection.targetId, selection.sourceId, selection.targetId, selection.excludedPackageIds.join(',')].join('\u0000');
+    restoredCartRef.current = nextCartContextKey === cartContextKey ? null : { contextKey: nextCartContextKey, items };
+    setDeploymentCart(items); setComparisonJob(null); setDryRunJob(null); setDeploymentJob(null);
     const ids = [...new Set([selection.sourceId, ...(selection.compareCurrentType ? [selection.targetId] : [])].filter((item) => item.startsWith('org:')))].sort().join(',');
     setPackageSelection({ sourceIds: ids, ids: selection.excludedPackageIds });
   };
@@ -678,6 +715,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     }
   }, [workspace, gitConnections, targetSelectionId]);
   const selectDeploymentTarget = (value: string) => {
+    setLoadedPreset(null); actionSourcesRef.current = null;
     presetMetadataTypeRef.current = undefined; presetPackageIdsRef.current = undefined;
     setTargetSelectionId(value);
     setTargetOrgId(value.startsWith(gitConnectionSourcePrefix) ? '' : value);
@@ -687,6 +725,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     }
   };
   const selectDeploymentSource = (value: string) => {
+    setLoadedPreset(null); actionSourcesRef.current = null;
     presetMetadataTypeRef.current = undefined; presetPackageIdsRef.current = undefined;
     setSourceSelectionId(value);
     setSourceId(value.startsWith(gitConnectionSourcePrefix) ? '' : value);
@@ -720,7 +759,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       <PendingSubmissions owner={user.id} canDeploy={canDeploy} canRetry={canRun && !dryRunning && !deploying} onFound={(job) => {
         window.location.assign(`/deploy?job=${encodeURIComponent(job.id)}`);
       }} />
-      <DeploymentDrafts owner={user.id} autoSave={selectionTouched} enabled={workspace !== null && ['ready', 'error'].includes(metadataTypesStatus) && canRun && !comparing && !dryRunning && !deploying} selection={{ sourceId, targetId: targetOrgId,
+      <DeploymentDrafts owner={user.id} autoSave={selectionTouched} enabled={loadedPreset === null && workspace !== null && ['ready', 'error'].includes(metadataTypesStatus) && canRun && !comparing && !dryRunning && !deploying} selection={{ sourceId, targetId: targetOrgId,
         ...(source?.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.orgIdentityFingerprint }),
         ...(target?.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.orgIdentityFingerprint }),
         ...(scopeQuery ? { metadataType: scopeQuery } : {}), compareCurrentType, showIdentical,
@@ -729,7 +768,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
         ...(source?.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.orgIdentityFingerprint }),
         ...(target?.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.orgIdentityFingerprint }),
         ...(scopeQuery ? { metadataType: scopeQuery } : {}), compareCurrentType, showIdentical,
-        excludedPackageIds, testLevel: testLevel as DeploymentSelection['testLevel'], tests: testNames }} onApply={applyPreset} />
+        excludedPackageIds, testLevel: testLevel as DeploymentSelection['testLevel'], tests: testNames,
+        components: deploymentCart.map(({ type, fullName }) => ({ type, fullName })) }} onApply={(value) => applyPreset(value, true)} />
       <div className="deploy-layout" onChangeCapture={() => setSelectionTouched(true)}>
         <div className="page-stack deploy-workspace">
           <section className="workflow-panel deploy-source-panel" aria-labelledby="deploy-source-heading">
@@ -751,14 +791,17 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
             <div className="panel-heading"><span className="step-number">02</span><div><h2 id="deploy-scope-heading">메타데이터 검색</h2></div><span className="panel-state">검색</span></div>
             <div className="compare-scope-grid metadata-scope-grid">
               <label><span className="field-label">Salesforce metadata type</span>
-                <input id="deploy-scope" list="salesforce-deploy-metadata-types" value={scopeQuery} readOnly={preparedMetadataType !== undefined} onChange={(event) => setScopeQuery(event.target.value)} placeholder="metadata type 검색" autoComplete="off" disabled={metadataTypesStatus !== 'ready'} aria-invalid={metadataTypesInvalid ? true : undefined} />
+                <input id="deploy-scope" list="salesforce-deploy-metadata-types" value={scopeQuery} readOnly={preparedMetadataType !== undefined} onChange={(event) => {
+                  if (loadedPreset !== null) presetMetadataTypeRef.current = { key: metadataTypeSourceIds, value: event.target.value };
+                  setLoadedPreset(null); setScopeQuery(event.target.value);
+                }} placeholder="metadata type 검색" autoComplete="off" disabled={metadataTypesStatus !== 'ready'} aria-invalid={metadataTypesInvalid ? true : undefined} />
                 <datalist id="salesforce-deploy-metadata-types">
                   {metadataTypes.map((entry) => <option key={entry.name} value={entry.name}>{entry.directoryName}</option>)}
                 </datalist>
               </label>
             </div>
             <p className={`field-hint${metadataTypesInvalid ? ' field-hint-error' : ''}`}><Icon name="check" />{
-              metadataTypesStatus === 'idle'
+              loadedPreset !== null ? `저장한 목록에서 선택한 ${deploymentCart.length}개 항목만 비교합니다.` : metadataTypesStatus === 'idle'
                 ? 'Source와 Target을 확인한 뒤 metadata type을 조회합니다.'
                 : metadataTypesStatus === 'loading'
                   ? 'Salesforce metadata type을 불러오는 중입니다.'
@@ -778,15 +821,23 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
                 if (!checked) setShowIdentical(false);
               }} />
               <OptionToggle title="동일 항목 표시" description="IDENTICAL 컴포넌트도 결과에 포함" checked={showIdentical} onChange={setShowIdentical} disabled={!compareCurrentType || comparisonLimitExceeded} />
-              <PackageExclusions key={packageOrgIds} sourceIds={packageOrgIds} selectedIds={excludedPackageIds}
-                onChange={(ids) => setPackageSelection({ sourceIds: packageOrgIds, ids })} />
+              {loadedPreset === null && <PackageExclusions key={packageOrgIds} sourceIds={packageOrgIds} selectedIds={excludedPackageIds}
+                onChange={(ids) => setPackageSelection({ sourceIds: packageOrgIds, ids })} />}
             </div>
             <div className="comparison-run-actions">
-              <button className={`button button-primary comparison-run-button${comparing ? ' comparison-run-loading' : ''}`} type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || metadataTypesStatus !== 'ready' || !scopeValid || !sourceId || (compareCurrentType && (!targetOrgId || sourceId === targetOrgId))}><Icon name={comparing ? 'refresh' : 'compare'} /><span>{compareCurrentType && !comparisonLimitExceeded
+              <button className={`button button-primary comparison-run-button${comparing ? ' comparison-run-loading' : ''}`} type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || (loadedPreset !== null ? deploymentCart.length === 0 : metadataTypesStatus !== 'ready' || !scopeValid) || !sourceId || (compareCurrentType && (!targetOrgId || sourceId === targetOrgId))}><Icon name={comparing ? 'refresh' : 'compare'} /><span>{compareCurrentType && !comparisonLimitExceeded
                 ? comparing ? '메타데이터 비교 중……' : '메타데이터 비교'
                 : comparing ? '메타데이터 다운로드 중……' : '메타데이터 다운로드'}</span></button>
             </div>
           </section>
+
+          {loadedPreset !== null && comparisonJob === null && <section className="workflow-panel" aria-label="저장한 배포 항목">
+            <div className="panel-heading"><div><h2>저장한 배포 항목</h2><p>{loadedPreset.selection?.components?.length ?? 0}개 항목</p></div></div>
+            <div className="apex-test-options">{(loadedPreset.selection?.components ?? []).map((component) => {
+              const key = `${component.type}:${component.fullName}`;
+              return <label key={key}><input type="checkbox" aria-label={`${component.fullName} 배포 대상으로 선택`} checked={deploymentCart.some((item) => item.key === key)} disabled={dryRunning || deploying} onChange={(event) => setComponentInCart({ ...component, key, status: 'SOURCE', files: [] }, event.target.checked)} /><span><Icon name="check" />{component.fullName}<small>{component.type}</small></span></label>;
+            })}</div>
+          </section>}
 
           {comparisonJob !== null && !['QUEUED', 'RUNNING'].includes(comparisonJob.status) && <ComparisonResultPanel
             job={comparisonJob}
@@ -831,10 +882,11 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
                 </div>}
               </div>
             </div>
-            {hasApexDeployment
-              ? <section className="apex-test-picker" aria-label="Apex 테스트 클래스 선택">
-                <div className="apex-test-picker-head"><div><strong>Apex 테스트 클래스</strong><p>명명 규칙과 무관하게 desired source의 모든 Apex Class를 표시합니다. 실제 테스트 클래스만 선택하세요.</p></div><span>{testNames.length}개 선택</span></div>
-                {apexTestClassesLoading
+            <section className="apex-test-picker" aria-label="Apex 테스트 클래스 선택">
+                <div className="apex-test-picker-head"><div><strong>Apex 테스트 클래스</strong><p>{loadedPreset !== null ? '저장한 테스트 클래스 목록입니다.' : '명명 규칙과 무관하게 desired source의 모든 Apex Class를 표시합니다. 실제 테스트 클래스만 선택하세요.'}</p></div><span>{testNames.length}개 선택</span></div>
+                {!deploymentSourceId
+                  ? <p className="apex-test-message">소스를 선택하고 준비하면 테스트 클래스 목록을 불러옵니다.</p>
+                  : apexTestClassesLoading
                   ? <p className="apex-test-message"><Icon name="refresh" />테스트 클래스 조회 중……</p>
                   : apexTestClassesError
                     ? <p className="apex-test-message apex-test-error">{apexTestClassesError} 직접 입력은 계속 사용할 수 있습니다.</p>
@@ -846,8 +898,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
                           ? <p className="apex-test-message">검색 조건과 일치하는 Apex Class가 없습니다.</p>
                           : <div className="apex-test-options">{filteredApexTestClasses.map((testClass) => <label key={testClass.name}><input type="checkbox" checked={selectedTestNames.has(testClass.name)} disabled={dryRunning || deploying || !['auto', 'RunSpecifiedTests'].includes(testLevel)} onChange={(event) => setApexTestSelected(testClass.name, event.target.checked)} /><span><Icon name="check" />{testClass.name}{testClass.matchesConfiguredSuffix && <small>접미사 일치</small>}</span></label>)}</div>}
                       </>}
-              </section>
-              : <p className="apex-test-empty"><Icon name="code" />Apex Class를 배포 대상에 추가하면 테스트 클래스 선택 목록을 불러옵니다.</p>}
+            </section>
             {!testSelectionValid && <p className="apex-test-validation" role="alert">RunSpecifiedTests는 테스트 클래스를 하나 이상 선택하거나 입력해야 합니다.</p>}
           </section>}
 

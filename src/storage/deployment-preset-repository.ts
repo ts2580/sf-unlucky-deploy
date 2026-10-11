@@ -21,7 +21,7 @@ export class DeploymentPresetRepository {
   public async save(owner: string, name: string, settings: SavedDeploymentSelection, existingId?: string): Promise<DeploymentPresetSummary> {
     if (!name.trim() || name.length > 80) throw new Error('설정 이름은 1~80자로 입력하세요.');
     const json = JSON.stringify(settings);
-    if (Buffer.byteLength(json) > 32_768) throw new Error('저장 설정이 너무 큽니다.');
+    if (Buffer.byteLength(json) > 1_048_576) throw new Error('저장 설정이 너무 큽니다.');
     const id = existingId ?? randomUUID(); const now = this.now();
     await this.database.transaction(async (db) => {
       if (existingId === undefined) {
