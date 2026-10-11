@@ -1,8 +1,10 @@
 import type { ComparisonResult, FileDifference } from '../metadata/comparator.js';
 import type { XmlChange } from '../metadata/xml-diff.js';
+import { comparisonDisplayWarnings } from './comparison-display.js';
 
 export function renderHtmlReport(result: ComparisonResult): string {
   const skipped = result.comparisonLimit?.exceeded === true;
+  const warnings = comparisonDisplayWarnings(result.warnings);
   const title = skipped ? 'Salesforce Source 목록 · 비교하지 않음' : 'Salesforce 메타데이터 비교 결과';
   const changed = result.components.filter((component) => component.status !== 'IDENTICAL');
   const components = changed.length === 0
@@ -28,7 +30,7 @@ export function renderHtmlReport(result: ComparisonResult): string {
   const semanticEqualFiles = result.components.flatMap((component) =>
     component.files.flatMap((file) =>
       file.rawContentChanged === true && file.xmlSemanticStatus === 'EQUAL'
-        ? [`<li><strong>${escapeHtml(component.type)}</strong> · <code>${escapeHtml(component.fullName)}</code> · <code>${escapeHtml(file.path)}</code> · ${xmlPolicyLabel(file)}</li>`]
+        ? [`<li><strong>${escapeHtml(component.type)}</strong> · <code>${escapeHtml(component.fullName)}</code> · <code>${escapeHtml(file.path)}</code></li>`]
         : []));
 
   return `<!doctype html>
@@ -89,12 +91,12 @@ export function renderHtmlReport(result: ComparisonResult): string {
       ${skipped ? '' : [summaryCard('추가', result.summary.added), summaryCard('삭제', result.summary.removed), summaryCard('변경', result.summary.modified), summaryCard('동일', result.summary.identical)].join('')}
     </section>
     ${
-      result.warnings.length > 0
-        ? `<aside class="warnings"><strong>주의</strong><ul>${result.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}</ul></aside>`
+      warnings.length > 0
+        ? `<aside class="warnings"><strong>주의</strong><ul>${warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}</ul></aside>`
         : ''
     }
     ${semanticEqualFiles.length > 0
-      ? `<aside class="semantic-equal" data-testid="semantic-equal"><strong>원문이 다른 semantic 동일 XML</strong><ul>${semanticEqualFiles.join('')}</ul></aside>`
+      ? `<aside class="semantic-equal" data-testid="semantic-equal"><strong>표현은 다르지만 비교 결과가 같은 XML</strong><ul>${semanticEqualFiles.join('')}</ul></aside>`
       : ''}
     <section aria-label="변경된 컴포넌트">
       ${components}
@@ -114,13 +116,9 @@ function renderFile(file: FileDifference): string {
     ? `<p class="hash">LEFT ${escapeHtml(file.leftSha256 ?? '없음')} (${file.leftSize ?? 0} bytes)<br>RIGHT ${escapeHtml(file.rightSha256 ?? '없음')} (${file.rightSize ?? 0} bytes)</p>`
     : '';
   const semantic = file.rawContentChanged === true && file.xmlSemanticStatus !== undefined
-    ? `<p>XML 의미 ${file.xmlSemanticStatus === 'EQUAL' ? '동일' : '변경'} · ${xmlPolicyLabel(file)} · 원문 SHA-256 다름</p>`
+    ? `<p>${file.xmlSemanticStatus === 'EQUAL' ? '파일 표현은 다르지만 비교 결과는 동일합니다.' : '파일 내용이 변경되었습니다.'}</p>`
     : '';
   return `<article class="file" data-testid="changed-file"><h3>${file.status} · ${escapeHtml(file.path)}</h3>${semantic}${xml}${diff}${binary}</article>`;
-}
-
-function xmlPolicyLabel(file: FileDifference): string {
-  return file.xmlComparisonPolicy === 'REGISTERED' ? 'metadata type 등록 정책' : 'generic 정책';
 }
 
 function renderXmlChange(change: XmlChange): string {

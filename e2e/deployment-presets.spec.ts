@@ -31,7 +31,7 @@ for (const width of [1440, 768, 390]) {
         if (route.request().method() === 'GET') return route.fulfill({ json: { presets: saved === undefined ? [] : [preset] } });
         const body = route.request().postDataJSON(); expect(Value.Check(SaveDeploymentPresetSchema, body)).toBe(true);
         saved = body.selection as Record<string, unknown>;
-        expect(saved).not.toHaveProperty('components'); expect(saved).not.toHaveProperty('payloadChecksum');
+        expect(saved.components).toEqual([]); expect(saved).not.toHaveProperty('payloadChecksum');
         return route.fulfill({ status: 201, json: preset });
       });
       await page.route('**/api/v1/deployment-presets/preset-fixture/resolve', async (route) => {

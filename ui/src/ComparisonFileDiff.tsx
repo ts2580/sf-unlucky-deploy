@@ -1,3 +1,5 @@
+import { downloadMarkdown, renderFileDiffMarkdown } from './comparison/markdown-download';
+
 export interface XmlComparisonChange {
   kind?: 'ADDED' | 'REMOVED' | 'MODIFIED' | 'REORDERED';
   path: string;
@@ -18,6 +20,7 @@ export interface ComparisonFileDifference {
   rightSha256?: string;
   leftSize?: number;
   rightSize?: number;
+  diffTruncated?: boolean;
 }
 
 interface ComparisonFileDiffProps {
@@ -38,6 +41,9 @@ export function ComparisonFileDiff({ file, sourceLabel, targetLabel, sourceSide 
 
   return (
     <section className="file-diff-panel" aria-label={`${file.path} Source와 Target 차이`}>
+      <div className="file-diff-toolbar"><button type="button" className="button button-secondary" onClick={() => downloadMarkdown(
+        renderFileDiffMarkdown(file, { sourceLabel, targetLabel, sourceSide }), `sfud-${file.path.split(/[\\/]/u).at(-1) ?? 'file'}-diff`,
+      )}>이 파일 MD 다운로드</button></div>
       <div className="file-diff-sides">
         <DiffSideHeader side="source" label={sourceLabel} changeKind={sideChangeKind(sourceSide)} />
         <DiffSideHeader side="target" label={targetLabel} changeKind={sideChangeKind(targetSide)} />
@@ -45,8 +51,7 @@ export function ComparisonFileDiff({ file, sourceLabel, targetLabel, sourceSide 
       {hasTextDiff && <UnifiedDiff diff={file.unifiedDiff!} />}
       {hasXmlDiff && <XmlDiff changes={file.xmlChanges!} sourceSide={sourceSide} />}
       {hasSemanticNote && <p className={`xml-semantic-note xml-semantic-${file.xmlSemanticStatus!.toLowerCase()}`}>
-        원문 SHA-256은 다릅니다. XML 의미 비교는 {file.xmlSemanticStatus === 'EQUAL' ? '동일' : '변경'}이며,
-        {' '}{file.xmlComparisonPolicy === 'REGISTERED' ? 'metadata type 등록 정책' : 'generic 정책'}을 사용했습니다.
+        {file.xmlSemanticStatus === 'EQUAL' ? '파일 표현은 다르지만 비교 결과는 동일합니다.' : '파일 내용이 변경되었습니다.'}
       </p>}
       {hasBinaryDiff && <BinaryDiff file={file} sourceSide={sourceSide} />}
     </section>

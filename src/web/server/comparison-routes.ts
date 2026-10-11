@@ -1,5 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { Type } from '@sinclair/typebox';
+import { Value } from '@sinclair/typebox/value';
+import { SavedDeploymentComponentSchema } from '../../api/deployment-preset-contracts.js';
+import type { SelectedMetadataComponent } from '../../deploy/selected-manifest.js';
 import { WorkspaceResponseSchema } from '../../api/workspace-contracts.js';
 import { orgIdentityFingerprint } from '../../deploy/org-identity.js';
 import { SfudError } from '../../core/errors.js';
@@ -15,7 +18,8 @@ interface CreateComparisonBody {
   excludedPackageIds?: string[];
   excludePackageMetadata?: boolean;
   projectId?: string;
-  scope?: 'manifest' | 'all';
+  scope?: 'manifest' | 'all' | 'selected';
+  components?: SelectedMetadataComponent[];
   manifest?: string;
   leftSourceId?: string;
   rightSourceId?: string;
@@ -165,6 +169,9 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
     try {
       const scope = comparisonScope(request.body?.scope);
       const sourceOnly = request.body?.sourceOnly === true;
+      if (scope === 'selected' ? !Value.Check(Type.Array(SavedDeploymentComponentSchema, { minItems: 1, maxItems: 2_000 }), request.body?.components) : request.body?.components !== undefined) {
+        throw new Error('선택 항목 비교에는 올바른 메타데이터 목록이 필요합니다.');
+      }
       if (request.body?.excludePackageMetadata !== undefined && typeof request.body.excludePackageMetadata !== 'boolean') {
         throw new Error('설치 패키지 제외 여부는 boolean이어야 합니다.');
       }
@@ -176,6 +183,7 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
           ? { projectId: requiredString(request.body?.projectId, 'manifest 프로젝트') }
           : {}),
         scope,
+        ...(scope === 'selected' ? { components: request.body.components } : {}),
         ...(request.body?.manifest === undefined ? {} : { manifest: request.body.manifest }),
         ...(request.body?.metadataType === undefined
           ? {}
@@ -307,9 +315,10 @@ function requiredString(value: unknown, label: string): string {
   return value;
 }
 
-function comparisonScope(value: unknown): 'manifest' | 'all' {
+function comparisonScope(value: unknown): 'manifest' | 'all' | 'selected' {
   if (value === undefined || value === 'manifest') return 'manifest';
   if (value === 'all') return 'all';
+  if (value === 'selected') return 'selected';
   throw new Error('지원하지 않는 비교 범위입니다.');
 }
 

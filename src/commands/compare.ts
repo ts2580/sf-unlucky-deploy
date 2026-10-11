@@ -25,6 +25,7 @@ export interface CompareCommandOptions {
   manifest?: string;
   allMetadata?: boolean;
   metadataType?: string;
+  componentKeys?: readonly string[];
   wait?: number;
   reportDir?: string;
   detail?: boolean;
@@ -126,6 +127,7 @@ export async function runCompareCommand(
     ]);
 
     const comparison = await compareSnapshots(leftSnapshot, rightSnapshot, { strict: options.strict ?? false,
+      ...(options.componentKeys === undefined ? {} : { componentKeys: options.componentKeys }),
       ...(packageExclusion === undefined ? {} : { packageExclusion }),
       ...(options.maximumComparisonFiles === undefined || options.sourceOnly === true
         ? {} : { maximumFiles: options.maximumComparisonFiles }),
