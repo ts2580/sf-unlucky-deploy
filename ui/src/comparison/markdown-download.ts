@@ -1,7 +1,7 @@
 import type { ComparisonFileDifference } from '../ComparisonFileDiff';
 import type { ComparisonComponent, ComparisonJobResponse } from './api';
 
-interface DiffContext { sourceLabel: string; targetLabel: string; sourceSide: 'before' | 'after' }
+export interface DiffContext { sourceLabel: string; targetLabel: string; sourceSide: 'before' | 'after' }
 
 export function renderComparisonMarkdown(job: ComparisonJobResponse, components: ComparisonComponent[], sourceSide: DiffContext['sourceSide']): string {
   const source = sourceSide === 'after' ? job.right : job.left;
@@ -84,13 +84,4 @@ function codeFence(value: string, minimum: number): string {
   let length = minimum;
   for (const match of value.matchAll(/`+/gu)) length = Math.max(length, match[0].length + 1);
   return '`'.repeat(length);
-}
-
-export function downloadMarkdown(markdown: string, name: string): void {
-  const safeName = name.replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/gu, '-').replace(/[.\s]+$/gu, '').slice(0, 180) || 'diff';
-  const url = URL.createObjectURL(new Blob([markdown], { type: 'text/markdown;charset=utf-8' }));
-  const link = document.createElement('a');
-  link.href = url; link.download = `${safeName}.md`;
-  document.body.append(link);
-  try { link.click(); } finally { link.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1000); }
 }

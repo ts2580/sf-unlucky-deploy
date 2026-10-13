@@ -3,15 +3,18 @@ import { readFile } from 'node:fs/promises';
 import { createWebServer } from '../src/web/server/app.js';
 import type { ComponentDifference } from '../src/metadata/comparator.js';
 
-async function download(page: Page, button: ReturnType<Page['getByRole']>) {
+async function download(page: Page, dropdown: ReturnType<Page['getByRole']>, format = 'md') {
+  await dropdown.click();
   const pending = page.waitForEvent('download');
-  await button.click();
+  await dropdown.selectOption(format);
+  await dropdown.press('Escape');
+  await expect(dropdown).toHaveValue('');
   const file = await pending;
   return { name: file.suggestedFilename(), text: await readFile((await file.path())!, 'utf8') };
 }
 
 for (const width of [1440, 390]) {
-  test(`현재 필터의 모든 페이지와 개별 파일 diff를 Markdown으로 다운로드한다 (${width}px)`, async ({ page }) => {
+  test(`현재 필터의 모든 페이지와 개별 파일 diff를 CSV·MD·JSON으로 다운로드한다 (${width}px)`, async ({ page }) => {
     const app = await createWebServer({ host: '127.0.0.1', port: 0, localMode: true, accessPassword: 'markdown-test-password', databasePath: ':memory:', sfClient: { async runJson() { return { result: { nonScratchOrgs: [] } }; } } });
     const source = { id: 'project:fixture', kind: 'local' as const, label: '개발 Source' };
     const target = { id: 'org:target', kind: 'org' as const, label: '운영 Target', orgIdentityFingerprint: 'b'.repeat(64) };
@@ -44,12 +47,12 @@ for (const width of [1440, 390]) {
       await page.getByLabel('접속 비밀번호').fill('markdown-test-password');
       await page.getByRole('button', { name: '접속', exact: true }).click();
       await page.getByRole('button', { name: '메타데이터 비교', exact: true }).click();
-      const exportButton = page.getByRole('button', { name: 'Diff MD 다운로드', exact: true });
-      await expect(exportButton).toBeVisible();
+      const exportDropdown = page.getByRole('combobox', { name: 'Diff 다운로드', exact: true });
+      await expect(exportDropdown).toBeVisible();
       await expect(page.locator('.comparison-result')).not.toContainText('generic 비교');
       await expect(page.getByText('상세 diff 일부를 생략했습니다.', { exact: true })).toBeVisible();
       await expect(page.locator('.component-result')).toHaveCount(20);
-      const all = await download(page, exportButton);
+      const all = await download(page, exportDropdown);
       expect(all.name).toBe('sfud-comparison-markdown-fixture-diff.md');
       expect(all.text).toContain('SOURCE: ` 개발 Source `');
       expect(all.text).toContain('TARGET: ` 운영 Target `');
@@ -57,31 +60,55 @@ for (const width of [1440, 390]) {
       expect(all.text).toContain('컴포넌트 23개 · 모든 페이지');
       expect(all.text).toContain('+변경 Last');
       await page.getByRole('searchbox', { name: '메타데이터 검색', exact: true }).fill('Last');
-      const filtered = await download(page, exportButton);
+      const filtered = await download(page, exportDropdown);
       expect(filtered.text).toContain('+변경 Last'); expect(filtered.text).not.toContain('+변경 First');
       expect(filtered.text).toContain('컴포넌트 1개 · 모든 페이지');
+      for (const format of ['csv', 'json']) {
+        const exported = await download(page, exportDropdown, format);
+        expect(exported.name).toBe(`sfud-comparison-markdown-fixture-diff.${format}`);
+        expect(exported.text).toContain('+변경 Last');
+        expect(exported.text).not.toContain('+변경 First');
+        if (format === 'json') expect(JSON.parse(exported.text).components).toHaveLength(1);
+      }
+      await page.getByRole('searchbox', { name: '메타데이터 검색', exact: true }).fill('missing-component');
+      await expect(exportDropdown).toBeDisabled();
       await page.getByRole('searchbox', { name: '메타데이터 검색', exact: true }).fill('');
+      for (const format of ['csv', 'json']) {
+        const exported = await download(page, exportDropdown, format);
+        expect(exported.text).toContain('+변경 Last');
+        expect(exported.text).toContain('+변경 First');
+        if (format === 'json') expect(JSON.parse(exported.text).components).toHaveLength(23);
+      }
       await page.locator('.component-result').first().locator('summary').click();
       const textPanel = page.getByRole('region', { name: 'classes/First.cls Source와 Target 차이' });
-      const single = await download(page, textPanel.getByRole('button', { name: '이 파일 MD 다운로드', exact: true }));
+      const single = await download(page, textPanel.getByRole('combobox', { name: '이 파일 다운로드', exact: true }));
       expect(single.name).toBe('sfud-First.cls-diff.md');
       expect(single.text).toContain('+변경 First'); expect(single.text).not.toContain('+변경 Last');
       const xmlPanel = page.getByRole('region', { name: 'classes/First.cls-meta.xml Source와 Target 차이' });
       await expect(xmlPanel).toContainText('파일 내용이 변경되었습니다.');
       await expect(xmlPanel).not.toContainText('generic 정책');
-      const xml = await download(page, xmlPanel.getByRole('button', { name: '이 파일 MD 다운로드', exact: true }));
+      const xml = await download(page, xmlPanel.getByRole('combobox', { name: '이 파일 다운로드', exact: true }));
       expect(xml.text).toContain('SOURCE:\n\n```text\nActive\n```');
       expect(xml.text).toContain('TARGET:\n\n```text\nInactive\n```');
       expect(xml.text).toContain('diff 일부가 생략');
       const binaryPanel = page.getByRole('region', { name: 'staticresources/logo.png Source와 Target 차이' });
-      const binary = await download(page, binaryPanel.getByRole('button', { name: '이 파일 MD 다운로드', exact: true }));
+      const binary = await download(page, binaryPanel.getByRole('combobox', { name: '이 파일 다운로드', exact: true }));
       expect(binary.text).toContain('SOURCE SHA-256: ` source-sha ` · 34 bytes');
+      for (const [panel, filename] of [[textPanel, 'First.cls'], [xmlPanel, 'First.cls-meta.xml'], [binaryPanel, 'logo.png']] as const) {
+        for (const format of ['csv', 'json']) {
+          const exported = await download(page, panel.getByRole('combobox', { name: '이 파일 다운로드', exact: true }), format);
+          expect(exported.name).toBe(`sfud-${filename}-diff.${format}`);
+          expect(exported.text).toContain(filename);
+          expect(exported.text).not.toContain('+변경 Last');
+          if (format === 'json') expect(JSON.parse(exported.text).sourceSide).toBe('after');
+        }
+      }
       await textPanel.screenshot({ path: test.info().outputPath(`diff-download-${width}.png`) });
       expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
       await page.getByRole('checkbox', { name: /현재 타입 비교 실행/u }).uncheck();
       await page.getByRole('button', { name: '메타데이터 다운로드', exact: true }).click();
       await expect(page.getByText('받아오기 완료', { exact: true })).toBeVisible();
-      await expect(exportButton).toHaveCount(0);
+      await expect(exportDropdown).toHaveCount(0);
       expect(errors).toEqual([]); expect(submissions).toEqual([]);
     } finally { await page.context().close(); await app.close(); }
   });

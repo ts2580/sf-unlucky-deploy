@@ -1,4 +1,5 @@
-import { downloadMarkdown, renderFileDiffMarkdown } from './comparison/markdown-download';
+import { DiffDownload } from './comparison/DiffDownload';
+import { renderFileDiffDownload } from './comparison/diff-download';
 
 export interface XmlComparisonChange {
   kind?: 'ADDED' | 'REMOVED' | 'MODIFIED' | 'REORDERED';
@@ -41,9 +42,8 @@ export function ComparisonFileDiff({ file, sourceLabel, targetLabel, sourceSide 
 
   return (
     <section className="file-diff-panel" aria-label={`${file.path} Source와 Target 차이`}>
-      <div className="file-diff-toolbar"><button type="button" className="button button-secondary" onClick={() => downloadMarkdown(
-        renderFileDiffMarkdown(file, { sourceLabel, targetLabel, sourceSide }), `sfud-${file.path.split(/[\\/]/u).at(-1) ?? 'file'}-diff`,
-      )}>이 파일 MD 다운로드</button></div>
+      <div className="file-diff-toolbar"><DiffDownload label="이 파일 다운로드" name={`sfud-${file.path.split(/[\\/]/u).at(-1) ?? 'file'}-diff`}
+        render={(format) => renderFileDiffDownload(file, { sourceLabel, targetLabel, sourceSide }, format)} /></div>
       <div className="file-diff-sides">
         <DiffSideHeader side="source" label={sourceLabel} changeKind={sideChangeKind(sourceSide)} />
         <DiffSideHeader side="target" label={targetLabel} changeKind={sideChangeKind(targetSide)} />
