@@ -374,9 +374,14 @@ test('metadata type 조회 전 상태를 오류로 표시하지 않는다', asyn
 
   await login(page, '/deploy');
   const scopeCombobox = page.getByRole('combobox', { name: 'Salesforce metadata type' });
-  const loadingHint = page.getByText('Salesforce metadata type을 불러오는 중입니다.');
+  const loadingHint = page.getByRole('status').filter({ hasText: 'Salesforce metadata type을 불러오는 중입니다…' });
   await expect(loadingHint).toBeVisible();
+  await expect(loadingHint).toHaveClass(/metadata-type-loading/u);
   await expect(loadingHint).not.toHaveClass(/field-hint-error/u);
+  const compareButton = page.locator('.comparison-run-button');
+  await expect(compareButton).toHaveText('타입 불러오는 중…');
+  await expect(compareButton).toBeDisabled();
+  await expect(compareButton).toHaveAttribute('aria-busy', 'true');
   await expect(scopeCombobox).toBeDisabled();
   await expect(scopeCombobox).not.toHaveAttribute('aria-invalid', 'true');
 
@@ -385,9 +390,14 @@ test('metadata type 조회 전 상태를 오류로 표시하지 않는다', asyn
   await expect(scopeCombobox).toBeEnabled();
   await expect(scopeCombobox).not.toHaveAttribute('aria-invalid', 'true');
 
+  await expect(loadingHint).toHaveCount(0);
+  await expect(compareButton).toHaveText('메타데이터 비교');
+  await expect(compareButton).toBeEnabled();
+  await expect(compareButton).toHaveAttribute('aria-busy', 'false');
+
   await scopeCombobox.fill('UnknownType');
   await expect(scopeCombobox).toHaveAttribute('aria-invalid', 'true');
-  await expect(page.getByText('목록에 있는 Salesforce metadata type을 선택하세요.'))
+  await expect(page.getByRole('status').filter({ hasText: '목록에 있는 Salesforce metadata type을 선택하세요.' }))
     .toHaveClass(/field-hint-error/u);
 });
 
