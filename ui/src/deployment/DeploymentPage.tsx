@@ -403,6 +403,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const selectedMetadataType = metadataTypes.find((entry) =>
     entry.name.toLowerCase() === scopeQuery.trim().toLowerCase());
   const scopeValid = selectedMetadataType !== undefined;
+  const metadataTypesLoading = !savedComponentMode && metadataTypesStatus === 'loading';
   const metadataTypesInvalid = metadataTypesStatus === 'error'
     || (metadataTypesStatus === 'ready' && !scopeValid);
   const canDeploy = ['DEPLOYER', 'ADMIN'].includes(user.role);
@@ -827,17 +828,17 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
                 <input id="deploy-scope" list="salesforce-deploy-metadata-types" value={scopeQuery} readOnly={preparedMetadataType !== undefined} onChange={(event) => {
                   if (loadedPreset !== null) presetMetadataTypeRef.current = { key: metadataTypeSourceIds, value: event.target.value };
                   setLoadedPreset(null); setScopeQuery(event.target.value);
-                }} placeholder="metadata type 검색" autoComplete="off" disabled={metadataTypesStatus !== 'ready'} aria-invalid={metadataTypesInvalid ? true : undefined} />
+                }} placeholder={metadataTypesLoading ? 'metadata type 불러오는 중…' : 'metadata type 검색'} autoComplete="off" disabled={metadataTypesStatus !== 'ready'} aria-invalid={metadataTypesInvalid ? true : undefined} aria-describedby="metadata-type-hint" />
                 <datalist id="salesforce-deploy-metadata-types">
                   {metadataTypes.map((entry) => <option key={entry.name} value={entry.name}>{entry.directoryName}</option>)}
                 </datalist>
               </label>
             </div>
-            <p className={`field-hint${metadataTypesInvalid ? ' field-hint-error' : ''}`}><Icon name="check" />{
+            <p id="metadata-type-hint" role="status" aria-live="polite" className={`field-hint${metadataTypesLoading ? ' metadata-type-loading' : metadataTypesInvalid ? ' field-hint-error' : ''}`}><Icon name={metadataTypesLoading ? 'refresh' : 'check'} /><span>{
               savedComponentMode ? `저장한 목록에서 선택한 ${deploymentCart.length}개 항목만 비교합니다.` : metadataTypesStatus === 'idle'
                 ? 'Source와 Target을 확인한 뒤 metadata type을 조회합니다.'
                 : metadataTypesStatus === 'loading'
-                  ? 'Salesforce metadata type을 불러오는 중입니다.'
+                  ? 'Salesforce metadata type을 불러오는 중입니다…'
                   : metadataTypesStatus === 'error'
                     ? metadataTypesError
                     : scopeValid
@@ -847,7 +848,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
                       : metadataTypes.length === 0
                         ? '사용 가능한 Salesforce metadata type이 없습니다.'
                         : '목록에 있는 Salesforce metadata type을 선택하세요.'
-            }</p>
+            }</span></p>
             <div className="comparison-controls-row">
               <OptionToggle title="현재 타입 비교 실행" description={comparisonLimitExceeded ? "파일 수 상한 초과로 비교를 생략합니다." : comparisonOnly ? "Git 타겟은 양쪽 비교만 지원합니다." : "끄면 Source 메타데이터만 받아옵니다."} disabled={comparisonOnly || comparisonLimitExceeded} checked={compareCurrentType && !comparisonLimitExceeded} onChange={(checked) => {
                 setCompareCurrentType(checked);
@@ -858,7 +859,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
                 onChange={(ids) => setPackageSelection({ sourceIds: packageOrgIds, ids })} />}
             </div>
             <div className="comparison-run-actions">
-              <button className={`button button-primary comparison-run-button${comparing ? ' comparison-run-loading' : ''}`} type="button" onClick={() => void runComparison()} disabled={!canRun || comparing || workspace === null || (savedComponentMode ? deploymentCart.length === 0 : metadataTypesStatus !== 'ready' || !scopeValid) || !sourceId || (compareCurrentType && (!targetOrgId || sourceId === targetOrgId))}><Icon name={comparing ? 'refresh' : 'compare'} /><span>{compareCurrentType && !comparisonLimitExceeded
+              <button className={`button button-primary comparison-run-button${comparing || metadataTypesLoading ? ' comparison-run-loading' : ''}`} type="button" onClick={() => void runComparison()} aria-busy={comparing || metadataTypesLoading} aria-describedby={metadataTypesLoading ? 'metadata-type-hint' : undefined} disabled={!canRun || comparing || workspace === null || (savedComponentMode ? deploymentCart.length === 0 : metadataTypesStatus !== 'ready' || !scopeValid) || !sourceId || (compareCurrentType && (!targetOrgId || sourceId === targetOrgId))}><Icon name={comparing || metadataTypesLoading ? 'refresh' : 'compare'} /><span>{metadataTypesLoading && !comparing ? '타입 불러오는 중…' : compareCurrentType && !comparisonLimitExceeded
                 ? comparing ? '메타데이터 비교 중……' : '메타데이터 비교'
                 : comparing ? '메타데이터 다운로드 중……' : '메타데이터 다운로드'}</span></button>
             </div>

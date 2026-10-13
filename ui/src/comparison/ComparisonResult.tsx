@@ -6,7 +6,8 @@ import { ComparisonFileDiff } from '../ComparisonFileDiff';
 import { Icon } from '../components/Icon';
 import type { ComparisonComponent, ComparisonJobResponse } from './api';
 import { getComparisonJob } from './api';
-import { downloadMarkdown, renderComparisonMarkdown } from './markdown-download';
+import { DiffDownload } from './DiffDownload';
+import { renderComparisonDownload } from './diff-download';
 
 const METADATA_RESULTS_PER_PAGE = 20;
 const VISIBLE_RESULT_PAGES = 5;
@@ -117,10 +118,10 @@ export function ComparisonResultPanel({
       <div className="comparison-result-head">
         <div><p className="eyebrow">{sourceOnly ? 'SOURCE METADATA' : 'COMPARISON COMPLETE'}</p><h2 id="comparison-result-title">{sourceOnly ? displaySource.label : `${displaySource.label} → ${displayTarget.label}`}</h2><small>{job.manifest}</small></div>
         <div className="comparison-result-actions">
-          {!sourceOnly && <button type="button" className="button button-secondary" disabled={identicalLoading || Boolean(filterError) || filteredComponents.length === 0}
-            title="현재 검색·상태 필터에 맞는 모든 페이지의 diff를 Markdown으로 다운로드" onClick={() => downloadMarkdown(
-              renderComparisonMarkdown(job, filteredComponents, deploymentView ? 'after' : 'before'), `sfud-comparison-${job.id}-diff`,
-            )}>Diff MD 다운로드</button>}
+          {!sourceOnly && <DiffDownload label="Diff 다운로드" name={`sfud-comparison-${job.id}-diff`}
+            disabled={identicalLoading || Boolean(filterError) || filteredComponents.length === 0}
+            title="현재 검색·상태 필터에 맞는 모든 페이지의 diff를 선택한 형식으로 다운로드"
+            render={(format) => renderComparisonDownload(job, filteredComponents, deploymentView ? 'after' : 'before', format)} />}
           <span className="result-success"><Icon name="check" />{job.result.comparisonLimit?.exceeded === true ? '비교 제한 초과 · 배포 목록 준비 완료' : sourceOnly ? '받아오기 완료' : '비교 완료'}</span>
         </div>
       </div>
