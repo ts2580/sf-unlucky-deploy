@@ -8,6 +8,7 @@ on:
       - scripts/windows-bundle-policy.mjs
       - scripts/package-windows-bundle.mjs
       - scripts/package-smoke.mjs
+      - scripts/npm-tar.mjs
   workflow_dispatch:
 
 permissions:

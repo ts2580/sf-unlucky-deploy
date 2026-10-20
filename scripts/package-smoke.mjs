@@ -7,11 +7,13 @@ import { spawn } from 'node:child_process';
 import { assertPackedMetadataMatches, assertSafeArchive, verifyUiAssetPaths } from './package-archive-policy.mjs';
 import { WINDOWS_BUNDLE, assertWindowsBundleArchive } from './windows-bundle-policy.mjs';
 import { packageSmokeCapabilities } from './package-smoke-policy.mjs';
+import { readNpmTarball } from './npm-tar.mjs';
 
 const root = process.cwd();
 const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'sfud-package-smoke-'));
 let ui;
 let successMessage;
+let archiveNpmCli;
 
 try {
   const arguments_ = process.argv.slice(2);
@@ -23,6 +25,7 @@ try {
   if (windowsBundle && (!suppliedTarball || process.platform !== 'win32' || process.arch !== 'x64' || !process.env.SFUD_SMOKE_NPM_CLI)) {
     throw new Error('Windows bundle 검사는 Windows x64, tarball 경로 및 고정 npm CLI 경로가 필요합니다.');
   }
+  if (windowsBundle) archiveNpmCli = process.env.SFUD_SMOKE_NPM_CLI;
   const tarball = suppliedTarball === undefined
     ? await createTarball(temporaryDirectory, useExistingBuild)
     : path.resolve(root, suppliedTarball);
@@ -157,6 +160,11 @@ async function verifySourceMaps(tarball, entries) {
 }
 
 async function readTarball(tarball, operation, ...entries) {
+  if (archiveNpmCli !== undefined) {
+    if (operation === '-tf') return (await readNpmTarball(archiveNpmCli, tarball)).join('\n');
+    if (operation === '-xOf' && entries.length === 1) return (await readNpmTarball(archiveNpmCli, tarball, entries[0])).toString('utf8');
+    throw new Error(`지원하지 않는 아카이브 읽기 작업: ${operation}`);
+  }
   // Git Bash의 GNU tar는 D:\\...의 콜론을 원격 호스트 구분자로 해석한다.
   // archive가 있는 디렉터리에서 파일명만 전달하면 GNU/BSD tar 모두 동작한다.
   return await run('tar', [operation, path.basename(tarball), ...entries], path.dirname(tarball));
