@@ -869,7 +869,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
                   setLoadedPreset(null); setScopeQuery(event.target.value);
                   if (selectedGitConnection !== undefined) { setPreparedGitSource(undefined); setSourceId(''); }
                   if (selectedTargetGitConnection !== undefined) { setPreparedGitTarget(undefined); setTargetOrgId(''); }
-                }} placeholder={metadataTypesLoading ? 'metadata type 불러오는 중…' : 'metadata type 검색'} autoComplete="off" disabled={metadataTypesStatus !== 'ready'} aria-invalid={metadataTypesInvalid ? true : undefined} aria-describedby="metadata-type-hint" />
+                }} placeholder={metadataTypesLoading ? 'metadata type 불러오는 중…' : 'metadata type 검색'} autoComplete="off" disabled={comparing || metadataTypesStatus !== 'ready'} aria-invalid={metadataTypesInvalid ? true : undefined} aria-describedby="metadata-type-hint" />
                 <datalist id="salesforce-deploy-metadata-types">
                   {metadataTypes.map((entry) => <option key={entry.name} value={entry.name}>{entry.directoryName}</option>)}
                 </datalist>

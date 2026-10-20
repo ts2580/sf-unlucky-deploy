@@ -839,6 +839,33 @@ test('지원하지 않는 metadata type은 Git source 준비를 비활성화한�
   await expect(prepareButton).toBeEnabled();
 });
 
+test('복수 프로젝트 루트 선택 중 타입을 잠그고 선택 후 비교와 다음 타입 준비를 이어간다', async ({ page }) => {
+  const fixture = await mockGitApis(page, {
+    initialConnections: [connection({ repositoryPath: 'acme/multi-project-type-lock' })],
+  });
+  const cancellations: string[] = [];
+  page.on('request', (request) => { if (request.url().endsWith('/cancel')) cancellations.push(request.url()); });
+  await page.goto('http://127.0.0.1:27546/deploy');
+  await page.getByLabel('DESIRED SOURCE 비교 소스').selectOption(`git-connection:${connectionId}`);
+  const metadataTypeInput = page.locator('#deploy-scope');
+  for (const [index, type] of ['ApexClass', 'CustomField', 'CustomObject'].entries()) {
+    await metadataTypeInput.fill(type);
+    await page.getByRole('button', { name: '메타데이터 비교', exact: true }).click();
+    const root = page.getByRole('button', { name: 'force-app 선택', exact: true });
+    await expect(root).toBeVisible();
+    await expect(root).toBeEnabled();
+    await expect(metadataTypeInput).toBeDisabled();
+    await expect(metadataTypeInput).toHaveValue(type);
+    expect(fixture.importRequests).toHaveLength(index + 1);
+    await root.click();
+    await expect.poll(() => fixture.comparisonRequests.length).toBe(index + 1);
+    await expect(metadataTypeInput).toBeEnabled();
+  }
+  const inventory = await page.evaluate(async () => (await fetch('/api/v1/git/imports')).json()) as GitImportListResponse;
+  expect(inventory.imports.map((item) => item.status)).toEqual(['READY', 'READY', 'READY']);
+  expect(cancellations).toHaveLength(0);
+});
+
 test('metadata type 변경은 READY source를 무효화하고 다음 import에 새 타입을 사용한다', async ({ page }) => {
   const registeredPath = 'acme/metadata-type-race';
   const fixture = await mockGitApis(page, {
