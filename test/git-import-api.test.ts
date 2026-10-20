@@ -1,10 +1,11 @@
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
 import { GitImportService } from '../src/git/git-import-service.js';
+import { GitError } from '../src/git/git-errors.js';
 import type { GitFetchOptions } from '../src/git/git-client.js';
 import type { GitObjectReader } from '../src/git/git-object-store.js';
 import { GitRepositoryAccess } from '../src/git/git-repository-access.js';
@@ -19,6 +20,40 @@ const password = 'git import api password';
 const sha = '1'.repeat(40);
 
 describe('Git private API route boundary', { timeout: 30_000 }, () => {
+  it('테스트 서버 종료 전에 교체한 가져오기 서비스를 중단하고 작업 저장소를 정리한다', async () => {
+    let started!: () => void;
+    const waiting = new Promise<void>((resolve) => { started = resolve; });
+    let cancelled = false;
+    let directory = '';
+    const fixture = await createFixture(async (options) => {
+      directory = options.directory;
+      started();
+      return new Promise<never>((_resolve, reject) => {
+        const abort = () => { cancelled = true; reject(new GitError('IMPORT_CANCELLED')); };
+        expect(options.signal).toBeDefined();
+        options.signal!.addEventListener('abort', abort, { once: true });
+        if (options.signal!.aborted) abort();
+      });
+    });
+    try {
+      const owner = await bootstrap(fixture.server);
+      const connection = await fixture.server.sfudRuntime.gitConnections.save({
+        ownerUserId: owner.userId, provider: 'gitlab', providerHost: 'gitlab.com', providerAccountId: 'shutdown-owner',
+        displayName: 'Shutdown GitLab', grantedPermissions: ['read_api', 'read_repository'], tokens: { accessToken: 'fixture-token' },
+      });
+      const response = await fixture.server.inject({ method: 'POST', url: '/api/v1/git/imports',
+        headers: { cookie: owner.cookie, 'x-sfud-csrf': owner.csrfToken, origin }, payload: {
+          provider: 'gitlab', repositoryPath: 'group/private-project', connectionId: connection.id,
+          ref: { kind: 'branch', name: 'main' }, expectedCommitSha: sha,
+        },
+      });
+      expect(response.statusCode).toBe(202);
+      await waiting;
+      await fixture.close();
+      expect(cancelled).toBe(true);
+      await expect(access(directory)).rejects.toThrow();
+    } finally { await fixture.importService.close(); await fixture.close(); }
+  });
   it('owner 세션은 private inspect/refs를 실제 token으로 수행하고 public connection 없는 요청을 거부한다', async () => {
     const fixture = await createFixture();
     try {
@@ -132,7 +167,7 @@ describe('Git private API route boundary', { timeout: 30_000 }, () => {
   });
 });
 
-async function createFixture() {
+async function createFixture(fetchOverride?: (options: GitFetchOptions) => Promise<GitObjectReader>) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-git-import-api-'));
   const keyPath = path.join(root, 'git-token.key');
   await writeFile(keyPath, Buffer.alloc(32, 29), { mode: 0o600 });
@@ -163,13 +198,15 @@ async function createFixture() {
   const access = new GitRepositoryAccess(server.sfudRuntime.gitConnections, server.sfudRuntime.gitConnectionService, true);
   const service = new GitImportService(history, server.sfudRuntime.workspace.managedProjects, {
     providers: { github: provider, gitlab: provider, bitbucket: provider }, access,
-    client: { fetch: async (options: GitFetchOptions) => { options.onDiskUsage(100); return objects(); } },
+    client: { fetch: fetchOverride ?? (async (options: GitFetchOptions) => { options.onDiskUsage(100); return objects(); }) },
   });
   server.sfudRuntime.gitImports = service;
   server.sfudRuntime.workspace.gitImports = service;
   return {
-    server, repository, providerCalls,
-    close: async () => { await server.close(); await rm(root, { recursive: true, force: true }); },
+    server, repository, providerCalls, importService: service,
+    // Runtime shutdown owns its original service; this fixture replaced it.
+    // Drain the replacement before workspace.close can remove its active files.
+    close: async () => { await service.close(); await server.close(); await rm(root, { recursive: true, force: true }); },
   };
 }
 
