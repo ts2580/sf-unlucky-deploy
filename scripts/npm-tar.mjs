@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { Buffer } from 'node:buffer';
 import path from 'node:path';
 
 /** Use the fixed npm installer's parser: Windows native tar may reject UTF-8 PAX paths. */
