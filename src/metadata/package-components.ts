@@ -13,6 +13,7 @@ import { readXmlStream } from './xml-stream.js';
 export async function retrievePackageComponents(
   name: string, alias: string, sfClient: SfClient, cwd: string, signal?: AbortSignal,
 ): Promise<PackageComponent[]> {
+  signal?.throwIfAborted();
   return withRequestWorkspace(cwd, async (workspace) => {
     const output = path.join(workspace, 'package-inspect');
     await mkdir(output, { mode: 0o700 });
@@ -20,6 +21,7 @@ export async function retrievePackageComponents(
       '--package-name', name, '--target-metadata-dir', output, '--unzip', '--wait', '10'], {
       cwd: workspace, timeoutMs: 660_000, ...(signal === undefined ? {} : { signal }),
     });
+    signal?.throwIfAborted();
     const result = raw as { result?: { success?: unknown; done?: unknown; status?: unknown; messages?: unknown } };
     if (result?.result?.success !== true || result.result.done === false
       || (Array.isArray(result.result.messages) ? result.result.messages.length > 0 : result.result.messages != null)) {
@@ -51,6 +53,7 @@ export async function retrievePackageComponents(
     // MDAPI embeds fields, rules and labels in parent XML. Include their exact
     // returned identities so a CustomField/CustomLabel comparison uses the same scope.
     for (const file of await listFiles(root)) {
+      signal?.throwIfAborted();
       const rules = childMetadataTypes.filter((rule) => file.startsWith(`${rule.directory}/`) && file.endsWith(`.${rule.suffix}`));
       if (rules.length === 0) continue;
       const parentName = file.slice(rules[0]!.directory.length + 1, -rules[0]!.suffix.length - 1);

@@ -181,15 +181,17 @@ export class WorkspaceService {
     };
   }
 
-  public async listPackages(sourceIds: readonly string[], ownerUserId: string): Promise<InstalledPackage[]> {
+  public async listPackages(sourceIds: readonly string[], ownerUserId: string, signal?: AbortSignal): Promise<InstalledPackage[]> {
+    signal?.throwIfAborted();
     if (sourceIds.length === 0 || sourceIds.length > 2 || sourceIds.some((id) => !id.startsWith('org:'))) {
       throw new Error('설치 패키지 목록은 Salesforce Org 1~2개를 선택해야 합니다.');
     }
     const sources = await Promise.all(sourceIds.map((id) => this.resolveSource(id, ownerUserId)));
     const packages = await withRequestWorkspace(this.defaultProject().realPath, async (cwd) => listInstalledPackages(
       sources.map((source) => ({ kind: 'org' as const, alias: source.slice(4), displayName: source.slice(4) })),
-      this.sfClient, cwd,
+      this.sfClient, cwd, signal,
     ));
+    signal?.throwIfAborted();
     return packages.map((entry) => {
       const components = this.cachedPackageComponents(entry, ownerUserId);
       if (components === undefined) return entry;
@@ -198,8 +200,8 @@ export class WorkspaceService {
     });
   }
 
-  public async loadPackageComponents(sourceIds: readonly string[], packageId: string, ownerUserId: string): Promise<LoadedPackage> {
-    const packages = await this.listPackages(sourceIds, ownerUserId);
+  public async loadPackageComponents(sourceIds: readonly string[], packageId: string, ownerUserId: string, signal?: AbortSignal): Promise<LoadedPackage> {
+    const packages = await this.listPackages(sourceIds, ownerUserId, signal);
     const entry = packages.find((candidate) => candidate.id === packageId);
     if (entry === undefined) throw new SfudError('INVALID_ARGUMENT', '선택한 패키지가 현재 Org에 설치되어 있지 않습니다.');
     if (packages.some((other) => other.id !== entry.id && other.name === entry.name
@@ -208,7 +210,7 @@ export class WorkspaceService {
     }
     const components = new Map<string, PackageComponent>();
     for (const alias of entry.orgAliases) {
-      for (const member of (await this.resolvePackageComponents(entry, alias, this.defaultProject().realPath, undefined, true, ownerUserId))!) {
+      for (const member of (await this.resolvePackageComponents(entry, alias, this.defaultProject().realPath, signal, true, ownerUserId))!) {
         components.set(`${member.type}:${member.fullName}`, member);
       }
     }
@@ -221,11 +223,13 @@ export class WorkspaceService {
   ): Promise<PackageComponent[] | undefined> {
     // Reauthorize even for a cache hit, and pin the current connection generation.
     await this.resolveSource(`org:${alias}`, ownerUserId);
+    signal?.throwIfAborted();
     const key = this.packageComponentKey(entry, alias, ownerUserId);
     const cached = key === undefined ? undefined : this.packageComponents.get(key);
     if (cached !== undefined) return cached;
     if (!required) return undefined;
     const components = await retrievePackageComponents(entry.name, alias, this.sfClient, cwd, signal);
+    signal?.throwIfAborted();
     if (key !== undefined) {
       if (this.packageComponents.size >= 200) this.packageComponents.delete(this.packageComponents.keys().next().value!);
       this.packageComponents.set(key, components);

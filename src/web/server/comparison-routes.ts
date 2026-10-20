@@ -124,16 +124,25 @@ export async function registerComparisonRoutes(app: FastifyInstance): Promise<vo
   app.post<{ Params: { id: string }; Body: { sourceIds?: unknown } }>('/api/v1/installed-packages/:id/components', async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply, { csrf: true, roles: ['OPERATOR', 'DEPLOYER', 'ADMIN'] });
     if (session === undefined) return;
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const disconnect = () => { if (!reply.raw.writableEnded) abort(); };
+    request.raw.once('aborted', abort);
+    reply.raw.once('close', disconnect);
+    if (request.raw.aborted || reply.raw.destroyed) abort();
     try {
       validateExcludedPackageIds([request.params.id]);
       const sourceIds = request.body?.sourceIds;
       if (!Array.isArray(sourceIds) || !sourceIds.every((id): id is string => typeof id === 'string')) {
         throw new SfudError('INVALID_ARGUMENT', 'Salesforce Org 소스 목록이 필요합니다.');
       }
-      return reply.send(await app.sfudRuntime.workspace.loadPackageComponents(sourceIds, request.params.id, session.user.id));
+      return reply.send(await app.sfudRuntime.workspace.loadPackageComponents(sourceIds, request.params.id, session.user.id, controller.signal));
     } catch (error) {
       return reply.code(400).send({ error: { code: 'PACKAGE_COMPONENTS_LOAD_FAILED',
         message: redactSensitiveText(error instanceof Error ? error.message : String(error)) } });
+    } finally {
+      request.raw.removeListener('aborted', abort);
+      reply.raw.removeListener('close', disconnect);
     }
   });
 
