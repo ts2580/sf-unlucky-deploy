@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createConnection, createServer } from 'node:net';
 import os from 'node:os';
@@ -10,7 +10,7 @@ import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { initializeHomeConfiguration } from '../src/config/user-config.js';
+import { createPrivateHomeFile, initializeHomeConfiguration } from '../src/config/user-config.js';
 import { startUiControl, stopWebUi } from '../src/web/server/ui-control.js';
 
 const directories: string[] = [];
@@ -103,7 +103,9 @@ describe('sfud UI 정상 종료', { timeout }, () => {
     const bytes = await readFile(path.join(directory, file));
     await control.dispose();
     // Reuse the current test PID deliberately: it must never receive a signal.
-    await writeFile(path.join(directory, file), bytes, { mode: 0o600 });
+    // Recreate a valid private record before exercising stale-instance handling.
+    // POSIX mode alone does not set the Windows owner and protected ACL.
+    await createPrivateHomeFile(path.join(directory, file), bytes.toString('utf8'));
     expect(await stopWebUi({}, environment)).toEqual({ stopped: false });
     expect(await readFile(path.join(directory, file))).toEqual(bytes);
   });
