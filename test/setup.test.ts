@@ -75,6 +75,8 @@ describe('개인용 최초 설정', () => {
   }, timeout);
   it('기존 비어 있지 않은 데이터 경로에는 새 키를 생성하지 않는다', async () => {
     const { environment, snapshot } = await fixture();
+    // Reproduce an older installation that has data but no saved encryption key.
+    await writeFile(snapshot.paths.secretsFile, '# existing installation without a key\n');
     const data = path.join(snapshot.paths.directory, 'data', 'local');
     await mkdir(data, { recursive: true }); await writeFile(path.join(data, 'existing-state'), 'present');
     const terminal = prompt(['1', '', '', '', 'n', 'y']);
@@ -104,7 +106,7 @@ describe('설정 파일 교체와 복구', () => {
   it('dotenv로 표현할 수 없는 값은 쓰기 전에 거부한다', async () => {
     const { snapshot } = await fixture();
     const original = await readFile(snapshot.paths.secretsFile);
-    await expect(saveHomeConfiguration(snapshot, snapshot.configuration, { SFUD_ACCESS_PASSWORD: "a'\"`#bcdefghijklmnop" })).rejects.toThrow(/손실/u);
+    await expect(saveHomeConfiguration(snapshot, snapshot.configuration, { ...snapshot.secrets, SFUD_ACCESS_PASSWORD: "a'\"`#bcdefghijklmnop" })).rejects.toThrow(/손실/u);
     expect(await readFile(snapshot.paths.secretsFile)).toEqual(original);
   }, timeout);
   it('같은 내용의 다른 파일로 교체된 snapshot과 기존 잠금 파일은 거부한다', async () => {
@@ -130,7 +132,8 @@ describe('설정 파일 교체와 복구', () => {
       if (String(target) === failTarget) { failTarget = undefined; throw new Error('injected post-rename failure'); }
       return actual.lstat(target, ...args);
     });
-    await expect(saveHomeConfiguration(snapshot, { ...snapshot.configuration, SFUD_UI_PORT: '28001' }, { SFUD_ACCESS_PASSWORD: 'new-password-1234' })).rejects.toThrow();
+    await expect(saveHomeConfiguration(snapshot, { ...snapshot.configuration, SFUD_UI_PORT: '28001' }, { ...snapshot.secrets, SFUD_ACCESS_PASSWORD: 'new-password-1234' })).rejects.toThrow();
+    expect(replaced).toBeGreaterThanOrEqual(failureAt);
     expect(await readFile(snapshot.paths.configFile)).toEqual(originals.config);
     expect(await readFile(snapshot.paths.secretsFile)).toEqual(originals.secrets);
     expect((await readHomeConfigurationSnapshot(environment)).secrets.SFUD_ACCESS_PASSWORD).toBeUndefined();

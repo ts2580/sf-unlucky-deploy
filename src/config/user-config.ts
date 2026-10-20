@@ -355,7 +355,9 @@ export async function initializeHomeConfiguration(
     } finally {
       await handle.close();
     }
-    await createSecretsTemplateIfMissing(paths, directoryIdentity);
+    const hasTokenKey = ['SFUD_TOKEN_SECRET', 'SFUD_GIT_TOKEN_SECRET', 'SFUD_SF_TOKEN_SECRET', 'SFUD_GIT_TOKEN_KEY_FILE']
+      .some((key) => environment[key] !== undefined);
+    await createSecretsTemplateIfMissing(paths, directoryIdentity, mode === 'personal' && !hasTokenKey);
     return paths;
   } catch (error) {
     if (createdFile !== undefined) {
@@ -382,6 +384,7 @@ export async function initializeHomeConfiguration(
 async function createSecretsTemplateIfMissing(
   paths: HomeConfigPaths,
   directoryIdentity: { dev: number; ino: number },
+  generateTokenSecret = false,
 ): Promise<void> {
   let handle;
   try {
@@ -395,7 +398,10 @@ async function createSecretsTemplateIfMissing(
     const stat = await handle.stat();
     createdIdentity = { dev: stat.dev, ino: stat.ino };
     await assertSecureStat(stat, false);
-    await handle.writeFile(SECRETS_TEMPLATE, 'utf8');
+    const contents = generateTokenSecret
+      ? SECRETS_TEMPLATE.replace('# SFUD_TOKEN_SECRET=', `SFUD_TOKEN_SECRET=${randomUUID()}`)
+      : SECRETS_TEMPLATE;
+    await handle.writeFile(contents, 'utf8');
     await handle.sync();
     await verifySamePath(paths.secretsFile, stat);
     await verifyWindowsAcl(paths.secretsFile, 'set');
