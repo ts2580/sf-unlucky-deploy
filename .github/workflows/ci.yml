@@ -61,6 +61,10 @@ jobs:
       - name: npm 패키징·발행 정책 회귀 검사
         run: npm run test:npm-policy
 
+      - name: npm 11.4의 tar 6 호환성 회귀 검사
+        timeout-minutes: 2
+        run: npx --yes --ignore-scripts --package=npm@11.4.2 npm run test:npm-policy
+
       - name: 타입·단위 테스트·빌드
         run: npm run check
 

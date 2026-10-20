@@ -14,7 +14,7 @@ import { assertWindowsBundleArchive, assertWindowsX64Binary } from './windows-bu
 import { packageSmokeCapabilities } from './package-smoke-policy.mjs';
 import { readNpmTarball } from './npm-tar.mjs';
 
-test('npm 파서는 Windows 번들의 빈 유니코드 PAX 항목을 보존하고 없는 항목과 손상 파일을 거부한다', async () => {
+test('npm 파서는 Windows 번들의 빈 유니코드 PAX 항목을 보존하고 없는 항목과 손상 파일을 거부한다', { timeout: 5000 }, async () => {
   // Independent Python tarfile PAX fixture reproducing @fastify/send's snowman path.
   const fixture = Buffer.from('H4sIAAAAAAACA+3VwUrEMBAG4Jx9ipKzZJLY7oIg7tGjbyDBTt2626Q0qVbEky/h8/kkVl1UCoLIrqD+32WGucxhmJnWna/cBVP7GtVlDF5smR7N8vwljqZR67x4z5/rxsxsITItfkAfk+vG9uJ/upXeNSwPZVUPqe9Y7ssr7mId/FgzSist7/YE/FWKFC1O3XDCruRuNz0+2fu3nTdmuv/aGiuyAfu/c/N51rq0PNrcf/Kh5LMmlP2aIy0qF1Nd3VBkX1LimGhzJiJFH66zx4d7qn3Jg1qmZo078ft8b+7HH6a+hf8/za3NiwP8fwAAAAAAAAAAAAAAAAAAgK96Au7zWS4AKAAA', 'base64');
   const directory = await mkdtemp(path.join(tmpdir(), 'sfud-pax-'));
