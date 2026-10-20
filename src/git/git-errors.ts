@@ -1,6 +1,7 @@
 export type GitErrorCode =
   | 'INVALID_GIT_ALIAS'
   | 'GIT_REPOSITORY_URL_REQUIRED'
+  | 'GIT_REPOSITORY_PATH_REQUIRED' | 'GIT_HOST_IP_NOT_ALLOWED'
   | 'APEX_PATH_COLLISION'
   | 'INVALID_REPOSITORY' | 'REPOSITORY_UNAVAILABLE' | 'REPOSITORY_PERMISSION_DENIED'
   | 'PROVIDER_NOT_CONFIGURED' | 'GIT_CONNECTION_REQUIRED' | 'GIT_REAUTH_REQUIRED'
@@ -13,6 +14,8 @@ export type GitErrorCode =
 const messages: Record<GitErrorCode, string> = {
   INVALID_GIT_ALIAS: '별칭은 줄바꿈 없이 80자 이내로 입력하세요.',
   GIT_REPOSITORY_URL_REQUIRED: '이전 기록의 저장소 호스트를 확인할 수 없습니다. 전체 HTTPS 저장소 URL로 다시 등록하세요.',
+  GIT_REPOSITORY_PATH_REQUIRED: '그룹/저장소 경로까지 포함한 전체 HTTPS clone URL을 입력하세요. 예: https://gitlab.example.com/group/project.git',
+  GIT_HOST_IP_NOT_ALLOWED: 'Git 서버가 허용되지 않은 사설·예약 IP로 해석됩니다. 설정의 사설 IP 검사와 허용 IP 목록을 확인하세요.',
   APEX_PATH_COLLISION: '여러 폴더에 같은 이름의 Apex 클래스가 있습니다. 클래스와 메타데이터 파일을 같은 폴더에 두고 중복 이름을 정리하세요.',
   INVALID_REPOSITORY: '지원하는 제공자의 올바른 HTTPS 저장소 주소가 필요합니다.',
   REPOSITORY_UNAVAILABLE: '저장소가 없거나 접근 권한이 필요합니다.',

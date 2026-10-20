@@ -1395,7 +1395,7 @@ for (const [errorCode, destination, fact] of [
       '/api/v1/git/registrations': { registrations: [] }, '/api/v1/git/imports': { imports: [] },
       '/api/v1/deployment-jobs': { jobs: [] }, '/api/v1/settings': { settings: { testClassSuffix: '_Test' } },
       '/api/v1/salesforce/connections': { localMode: false, storageStatus: 'ready', connections: [] },
-      '/api/v1/admin/git-allowed-ips': { allowedIps: [] },
+      '/api/v1/admin/git-allowed-ips': { allowedIps: [], checkPrivateIps: false },
     };
     for (const [path, body] of Object.entries(reads)) await page.route(`**${path}`, (route) => route.fulfill({ json: body }));
     await page.route('**/api/v1/workflow/events', (route) => route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': connected\n\n' }));

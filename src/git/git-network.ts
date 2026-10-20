@@ -29,24 +29,26 @@ export function isPublicGitAddress(address: string): boolean {
  * the resolver must still pin the actual DNS answer before Git connects.
  */
 export interface GitHostPolicy {
+  readonly checkPrivateIps: boolean;
   readonly allowedAddresses: readonly string[];
   allows(address: string, family: 'ipv4' | 'ipv6'): boolean;
 }
 
-export function gitHostPolicyFromAddresses(addresses: readonly string[] = []): GitHostPolicy {
+export function gitHostPolicyFromAddresses(addresses: readonly string[] = [], checkPrivateIps = false): GitHostPolicy {
   const normalized = [...new Set(addresses.map(normalizeGitHostIpAddress))];
   const allowedAddresses = new BlockList();
   for (const address of normalized) {
     allowedAddresses.addAddress(address, isIP(address) === 4 ? 'ipv4' : 'ipv6');
   }
-  return { allowedAddresses: normalized, allows: (address, family) => allowedAddresses.check(address, family) };
+  return { checkPrivateIps, allowedAddresses: normalized, allows: (address, family) => allowedAddresses.check(address, family) };
 }
 
 export class MutableGitHostPolicy implements GitHostPolicy {
   private current = gitHostPolicyFromAddresses();
+  public get checkPrivateIps(): boolean { return this.current.checkPrivateIps; }
   public get allowedAddresses(): readonly string[] { return this.current.allowedAddresses; }
   public allows(address: string, family: 'ipv4' | 'ipv6'): boolean { return this.current.allows(address, family); }
-  public replaceAddresses(addresses: readonly string[]): void { this.current = gitHostPolicyFromAddresses(addresses); }
+  public replace(addresses: readonly string[], checkPrivateIps: boolean): void { this.current = gitHostPolicyFromAddresses(addresses, checkPrivateIps); }
 }
 
 export function normalizeGitHostIpAddress(value: string): string {
@@ -72,14 +74,15 @@ export function validateProviderUrl(value: string, expectedHost?: string): URL {
   return url;
 }
 
-export async function resolveGitHost(host: string, policy: GitHostPolicy = gitHostPolicyFromAddresses()): Promise<{ address: string; family: 4 | 6 }> {
+export async function resolveGitHost(host: string, policy: GitHostPolicy = gitHostPolicyFromAddresses([], true)): Promise<{ address: string; family: 4 | 6 }> {
   let addresses;
   try { addresses = await lookup(host, { all: true, verbatim: true }); }
   catch { throw new GitError('REPOSITORY_UNAVAILABLE'); }
-  if (addresses.length === 0 || addresses.some((entry) => {
+  if (addresses.length === 0) throw new GitError('REPOSITORY_UNAVAILABLE');
+  if (policy.checkPrivateIps && addresses.some((entry) => {
     const family = entry.family === 4 ? 'ipv4' : 'ipv6';
     return !isPublicGitAddress(entry.address) && !policy.allows(entry.address, family);
-  })) throw new GitError('INVALID_REPOSITORY');
+  })) throw new GitError('GIT_HOST_IP_NOT_ALLOWED');
   const selected = addresses.find((entry) => entry.family === 4) ?? addresses[0]!;
   return { address: selected.address, family: selected.family as 4 | 6 };
 }

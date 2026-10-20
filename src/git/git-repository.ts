@@ -35,7 +35,8 @@ export function normalizeRepository(input: string, provider?: GitProviderId): Gi
     || url.search !== '' || url.hash !== '' || isIP(url.hostname) !== 0) throw new GitError('INVALID_REPOSITORY');
   const repositoryPath = decodeURIComponent(url.pathname).replace(/^\//u, '').replace(/\/$/u, '').replace(/\.git$/iu, '');
   const parts = repositoryPath.split('/');
-  if (parts.length < 2 || (knownProvider !== undefined && selected !== 'gitlab' && parts.length !== 2)
+  if (parts.length < 2) throw new GitError('GIT_REPOSITORY_PATH_REQUIRED');
+  if ((knownProvider !== undefined && selected !== 'gitlab' && parts.length !== 2)
     || parts.some((part) => !/^[\p{L}\p{N}_~][\p{L}\p{N}_.~-]*$/u.test(part) || part.endsWith('.lock') || part.length > 255)) {
     throw new GitError('INVALID_REPOSITORY');
   }
