@@ -94,10 +94,12 @@ export async function compareSnapshots(
     throw new SfudError('INVALID_ARGUMENT', '최대 비교 파일 수는 1 이상의 정수여야 합니다.');
   }
   const projectionTypes = options.componentKeys?.map((key) => key.slice(0, key.indexOf(':'))) ?? options.metadataType;
-  const leftProjection = await projectChildMetadata(left, projectionTypes);
+  const projectionOptions = { excludedKeys: options.packageExclusion?.componentKeys, selectedKeys: options.componentKeys };
+  const leftProjection = await projectChildMetadata(left, projectionTypes, projectionOptions);
   try {
-    const rightProjection = await projectChildMetadata(right, projectionTypes);
-    try { return await comparePreparedSnapshots(leftProjection.snapshot, rightProjection.snapshot, options); }
+    const rightProjection = await projectChildMetadata(right, projectionTypes, projectionOptions);
+    try { return await comparePreparedSnapshots(leftProjection.snapshot, rightProjection.snapshot, options,
+      [...leftProjection.excludedKeys, ...rightProjection.excludedKeys]); }
     finally { await rightProjection.dispose(); }
   } finally { await leftProjection.dispose(); }
 }
@@ -106,6 +108,7 @@ async function comparePreparedSnapshots(
   left: MetadataSnapshot,
   right: MetadataSnapshot,
   options: CompareOptions,
+  filteredChildKeys: readonly string[],
 ): Promise<ComparisonResult> {
   if (left.manifestSha256 !== right.manifestSha256) {
     throw new SfudError(
@@ -122,7 +125,7 @@ async function comparePreparedSnapshots(
       for (const key of components.keys()) if (!selected.has(key)) components.delete(key);
     }
   }
-  const excludedKeys = new Set<string>();
+  const excludedKeys = new Set(filteredChildKeys);
   const packageComponentKeys = new Set(options.packageExclusion?.componentKeys ?? []);
   for (const components of [leftComponents, rightComponents]) {
     for (const [key, component] of components) {
