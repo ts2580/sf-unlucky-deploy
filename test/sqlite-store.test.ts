@@ -46,12 +46,14 @@ describe('SQLite 저장소', () => {
     expect(await store.database.get('PRAGMA journal_mode')).toEqual({ journal_mode: 'wal' });
     expect(await store.database.get('PRAGMA busy_timeout')).toEqual({ timeout: 5_000 });
     expect(await store.database.get('SELECT COUNT(*) count FROM schema_migrations'))
-      .toEqual({ count: 48 });
+      .toEqual({ count: 49 });
     expect(await store.database.get<{ dflt_value: string }>(
       "SELECT dflt_value FROM pragma_table_info('salesforce_connections') WHERE name = 'generation'"))
       .toEqual({ dflt_value: '1' });
     expect(await store.database.all('SELECT id, salt FROM git_token_key_parameters'))
       .toEqual([]);
+    expect(await store.database.get('SELECT check_private_ips FROM git_network_settings WHERE id = 1'))
+      .toEqual({ check_private_ips: 0 });
     if (process.platform !== 'win32') {
       expect((await stat(path.dirname(databasePath))).mode & 0o777).toBe(0o700);
       expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
@@ -195,7 +197,7 @@ describe('SQLite 저장소', () => {
     await expect(comparisonJobs.getRequired(comparison.id)).rejects.toThrow();
   });
 
-  it.each([{ from: 8, to: 9 }, { from: 28, to: 29 }, { from: 29, to: 30 }, { from: 30, to: 31 }, { from: 31, to: 32 }, { from: 32, to: 33 }, { from: 33, to: 34 }, { from: 34, to: 35 }, { from: 35, to: 36 }, { from: 36, to: 37 }, { from: 37, to: 38 }, { from: 38, to: 39 }, { from: 39, to: 40 }, { from: 40, to: 41 }])('v$from 작업·승인 이력을 보존하면서 v$to로 이관한다', async ({ from, to }) => {
+  it.each([{ from: 8, to: 9 }, { from: 28, to: 29 }, { from: 29, to: 30 }, { from: 30, to: 31 }, { from: 31, to: 32 }, { from: 32, to: 33 }, { from: 33, to: 34 }, { from: 34, to: 35 }, { from: 35, to: 36 }, { from: 36, to: 37 }, { from: 37, to: 38 }, { from: 38, to: 39 }, { from: 39, to: 40 }, { from: 40, to: 41 }, { from: 48, to: 49 }])('v$from 작업·승인 이력을 보존하면서 v$to로 이관한다', async ({ from, to }) => {
     const database = await open({ filename: ':memory:', driver: sqlite3.Database });
     try {
       await database.exec('PRAGMA foreign_keys = ON');
@@ -232,9 +234,14 @@ describe('SQLite 저장소', () => {
         JSON.stringify({ phase: 'DRY_RUN', deploymentId: 'validation-id' }),
         JSON.stringify({ source: 'fixture' }), JSON.stringify({ exceeded: true }), '/fixture/dry-run.json.gz');
       }
+      if (from === 48) await database.run("INSERT INTO git_allowed_ips(address, created_by, created_at) VALUES ('192.168.10.25', 'migration-user', ?)", fixedNow());
       const originalJobs = await database.all<Array<Record<string, unknown>>>('SELECT * FROM deployment_jobs ORDER BY id');
       const originalApprovals = await database.all('SELECT * FROM deployment_approvals ORDER BY id');
       await applyMigrations(database, fixedNow, to);
+      if (to === 49) {
+        expect(await database.get('SELECT check_private_ips FROM git_network_settings WHERE id = 1')).toEqual({ check_private_ips: 0 });
+        expect(await database.all('SELECT address FROM git_allowed_ips')).toEqual([{ address: '192.168.10.25' }]);
+      }
       for (const original of originalJobs) {
         expect(await database.get('SELECT * FROM deployment_jobs WHERE id = ?', original.id)).toMatchObject(original);
       }

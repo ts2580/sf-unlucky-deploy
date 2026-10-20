@@ -343,7 +343,9 @@ button:focus-visible, a:focus-visible { outline: 3px solid #60a5fa; outline-offs
 .git-load-state, .git-load-refresh { margin: 12px 0 0; padding: 13px 14px; border: 1px solid #dce9f4; border-radius: 10px; color: #617b91; background: #f7fbff; }
 .git-load-error { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin: 12px 0 0; padding: 12px 14px; border: 1px solid #fecaca; border-radius: 10px; color: #a4312a; background: #fff4f2; font-size: .72rem; line-height: 1.55; overflow-wrap: anywhere; }
 .git-panel label { display: grid; gap: 7px; color: #53687f; font-size: .75rem; font-weight: 650; }
-.git-panel input, .git-panel select { width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid #d9e3ed; border-radius: 9px; background: #fbfdff; color: #30475f; font: inherit; }
+.git-panel input:not([type="checkbox"]), .git-panel select { width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid #d9e3ed; border-radius: 9px; background: #fbfdff; color: #30475f; font: inherit; }
+.git-panel .option-toggle{position:relative;min-width:0}.git-panel .option-toggle>span{min-width:0;overflow-wrap:anywhere}.git-panel .option-toggle input{width:1px;height:1px;min-height:0;padding:0}
+.git-branch-loading{display:flex;align-items:center;gap:8px}.git-branch-loading .icon{flex:0 0 auto;animation:spin 1.05s linear infinite}
 .git-panel input:focus, .git-panel select:focus { outline: 2px solid #55a7e7; outline-offset: 2px; }
 .git-panel button:disabled { opacity: .5; cursor: not-allowed; }
 .git-panel .small-button { height: auto; min-height: 36px; white-space: normal; overflow-wrap: anywhere; font-size: .7rem; }
@@ -492,6 +494,13 @@ button:focus-visible, a:focus-visible { outline: 3px solid #60a5fa; outline-offs
 .package-exclusions-content p { margin: 0 0 10px; font-size: var(--ui-font-small); color: #61768a; overflow-wrap: anywhere; }
 .package-exclusions-list { display: grid; gap: 8px; max-height: 240px; overflow: auto; padding: 4px; }
 .package-exclusion-item { position: relative; }
+.package-loading-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+.package-loading-actions .button { flex: 0 0 auto; }
+.package-loading-actions p { flex: 1 1 200px; margin: 0; }
+.package-members { padding: 8px; font-size: var(--ui-font-small); overflow-wrap: anywhere; }
+.package-members summary { cursor: pointer; }
+.package-members input { box-sizing: border-box; width: 100%; margin-top: 8px; }
+.package-members ul { padding-left: 18px; max-height: 180px; overflow: auto; }
 .comparison-run-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
 .comparison-run-actions .comparison-run-button { grid-column: 3; padding: 8px 14px; }
 @media (max-width: 700px) {
@@ -517,7 +526,7 @@ button:focus-visible, a:focus-visible { outline: 3px solid #60a5fa; outline-offs
 .settings-form > p { font-size: var(--ui-font-body); }
 .settings-grid .panel-heading h2, .admin-users-head h2 { font-size: .91rem; }
 .git-panel label { font-size: var(--ui-font-body); }
-.git-panel input, .git-panel select { min-height: var(--ui-control-height); font-size: var(--ui-font-body); }
+.git-panel input:not([type="checkbox"]), .git-panel select { min-height: var(--ui-control-height); font-size: var(--ui-font-body); }
 .git-panel .small-button { min-height: var(--ui-small-button-height); font-size: var(--ui-font-small); }
 .connection-dialog { border-radius: 18px; }
 .connection-dialog-heading > .small-button { min-height: var(--ui-small-button-height); font-size: var(--ui-font-small); }

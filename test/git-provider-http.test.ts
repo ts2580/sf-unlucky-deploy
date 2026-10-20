@@ -43,7 +43,7 @@ describe('제공자 HTTP 접근 경계', () => {
   });
   it('DNS 응답 중 하나라도 사설 주소이면 연결 전에 거절한다', async () => {
     vi.mocked(lookup).mockResolvedValue([{ address: '140.82.114.3', family: 4 }, { address: '127.0.0.1', family: 4 }] as never);
-    await expect(resolveGitHost('github.com')).rejects.toMatchObject({ code: 'INVALID_REPOSITORY' });
+    await expect(resolveGitHost('github.com')).rejects.toMatchObject({ code: 'GIT_HOST_IP_NOT_ALLOWED' });
     expect(request).not.toHaveBeenCalled();
   });
   it('셀프호스팅 Git 주소도 공개 IP로만 해석한다', async () => {
@@ -51,13 +51,32 @@ describe('제공자 HTTP 접근 경계', () => {
     await expect(resolveGitHost('git.example.test')).resolves.toEqual({ address: '8.8.8.8', family: 4 });
   });
   it('운영자가 명시한 사설 IP만 셀프호스팅 Git FQDN에 허용한다', async () => {
-    const policy = gitHostPolicyFromAddresses(['192.168.10.25', 'fd00:1234::25']);
+    const policy = gitHostPolicyFromAddresses(['192.168.10.25', 'fd00:1234::25'], true);
     vi.mocked(lookup).mockResolvedValue([{ address: '192.168.10.25', family: 4 }] as never);
     await expect(resolveGitHost('git.internal.example', policy)).resolves.toEqual({ address: '192.168.10.25', family: 4 });
     vi.mocked(lookup).mockResolvedValue([{ address: '192.168.10.25', family: 4 }, { address: '192.168.10.26', family: 4 }] as never);
-    await expect(resolveGitHost('git.internal.example', policy)).rejects.toMatchObject({ code: 'INVALID_REPOSITORY' });
+    await expect(resolveGitHost('git.internal.example', policy)).rejects.toMatchObject({ code: 'GIT_HOST_IP_NOT_ALLOWED' });
     expect(() => gitHostPolicyFromAddresses(['192.168.10.0/24'])).toThrow(/IPv4 또는 IPv6/u);
     expect(() => gitHostPolicyFromEnvironment({ SFUD_GIT_ALLOWED_IPS: 'git.internal.example' })).toThrow(/IPv4 또는 IPv6/u);
+  });
+  it.each(['192.168.10.25', '10.0.0.25', '127.0.0.1', 'fd00:1234::25'])(
+    'Git 기본 설정은 사설 IP 검사를 끄고 %s를 DNS 결과 그대로 사용한다', async (address) => {
+      const family = address.includes(':') ? 6 : 4;
+      vi.mocked(lookup).mockResolvedValue([{ address, family }] as never);
+      const policy = gitHostPolicyFromEnvironment({});
+      expect(policy.checkPrivateIps).toBe(false);
+      await expect(resolveGitHost('git.internal.example', policy)).resolves.toEqual({ address, family });
+      // Cloud API transport keeps its own public-address policy.
+      await expect(resolveGitHost('api.github.com')).rejects.toMatchObject({ code: 'GIT_HOST_IP_NOT_ALLOWED' });
+      expect(request).not.toHaveBeenCalled();
+    },
+  );
+  it('검사를 꺼도 DNS 조회 실패와 빈 응답은 연결하지 않는다', async () => {
+    const policy = gitHostPolicyFromAddresses();
+    vi.mocked(lookup).mockResolvedValue([] as never);
+    await expect(resolveGitHost('git.internal.example', policy)).rejects.toMatchObject({ code: 'REPOSITORY_UNAVAILABLE' });
+    vi.mocked(lookup).mockRejectedValue(new Error('fixture DNS failure'));
+    await expect(resolveGitHost('git.internal.example', policy)).rejects.toMatchObject({ code: 'REPOSITORY_UNAVAILABLE' });
   });
   it('검증한 IP로 연결하면서 TLS servername과 Host를 고정한다', async () => {
     mockResponse(200, '{"id":123}');

@@ -3,6 +3,13 @@ import { connectionRepositoryPath, normalizeRepository, validateGitRef } from '.
 import { repositoryIdentity } from '../src/git/git-remote-provider.js';
 
 describe('Git 저장소 주소와 ref', () => {
+  it.each(['https://gitlab.hmc.co.kr', 'https://gitlab.hmc.co.kr/', 'https://gitlab.hmc.co.kr/group'])(
+    '저장소 경로가 빠진 %s에는 전체 clone URL 입력을 안내한다', (url) => {
+      expect(() => normalizeRepository(url, 'gitlab')).toThrow(expect.objectContaining({
+        code: 'GIT_REPOSITORY_PATH_REQUIRED', message: expect.stringContaining('그룹/저장소'),
+      }));
+    },
+  );
   it.each([
     ['github', 'https://git.example.test:8443/platform/acme/project.git'],
     ['gitlab', 'https://gitlab.example.test:9443/gitlab/group/sub/project.git'],

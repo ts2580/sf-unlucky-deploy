@@ -41,5 +41,7 @@ export const GitEnvironmentResponseSchema = Type.Object({ results: Type.Array(Ty
 }, { additionalProperties: false })) }, { additionalProperties: false });
 const GitAllowedIpSchema = Type.Object({ address: Type.String({ minLength: 1, maxLength: 45 }), createdAt: Type.String() }, { additionalProperties: false });
 export const GitAllowedIpInputSchema = Type.Object({ address: Type.String({ minLength: 1, maxLength: 45 }) }, { additionalProperties: false });
-export const GitAllowedIpListResponseSchema = Type.Object({ allowedIps: Type.Array(GitAllowedIpSchema) }, { additionalProperties: false });
+export const GitPrivateIpCheckInputSchema = Type.Object({ checkPrivateIps: Type.Boolean() }, { additionalProperties: false });
+export const GitAllowedIpListResponseSchema = Type.Object({ allowedIps: Type.Array(GitAllowedIpSchema), checkPrivateIps: Type.Boolean() }, { additionalProperties: false });
+export type GitNetworkSettings = Static<typeof GitAllowedIpListResponseSchema>;
 export type GitAllowedIp = Static<typeof GitAllowedIpSchema>;

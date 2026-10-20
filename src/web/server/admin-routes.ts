@@ -4,7 +4,7 @@ import { UserAdministrationError } from '../../auth/auth-service.js';
 import type { UserRole } from '../../storage/user-repository.js';
 import { redactSensitiveText } from '../../salesforce/sf-client.js';
 import { requireAuthenticatedSession } from './auth-routes.js';
-import { GitAllowedIpInputSchema, GitAllowedIpListResponseSchema } from '../../api/git-contracts.js';
+import { GitAllowedIpInputSchema, GitAllowedIpListResponseSchema, GitPrivateIpCheckInputSchema } from '../../api/git-contracts.js';
 
 interface CreateUserBody {
   email?: string;
@@ -34,7 +34,16 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/v1/admin/git-allowed-ips', { schema: { response: { 200: GitAllowedIpListResponseSchema } } }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply, { roles: ['ADMIN'] });
     if (session === undefined) return;
-    return reply.send({ allowedIps: await app.sfudRuntime.gitAllowedIps.list() });
+    return reply.send(await app.sfudRuntime.gitAllowedIps.settings());
+  });
+
+  app.patch<{ Body: { checkPrivateIps: boolean } }>('/api/v1/admin/git-allowed-ips', {
+    schema: { body: GitPrivateIpCheckInputSchema, response: { 200: GitAllowedIpListResponseSchema } },
+  }, async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply, { csrf: true, roles: ['ADMIN'] });
+    if (session === undefined) return;
+    await app.sfudRuntime.gitAllowedIps.setPrivateIpCheck(session.user.id, request.body.checkPrivateIps);
+    return reply.send(await app.sfudRuntime.gitAllowedIps.settings());
   });
 
   app.post<{ Body: { address: string } }>('/api/v1/admin/git-allowed-ips', {
@@ -42,7 +51,10 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
   }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply, { csrf: true, roles: ['ADMIN'] });
     if (session === undefined) return;
-    try { return reply.code(201).send({ allowedIps: await app.sfudRuntime.gitAllowedIps.add(session.user.id, request.body.address) }); }
+    try {
+      await app.sfudRuntime.gitAllowedIps.add(session.user.id, request.body.address);
+      return reply.code(201).send(await app.sfudRuntime.gitAllowedIps.settings());
+    }
     catch (error) { return sendGitAllowedIpError(reply, error); }
   });
 
@@ -51,7 +63,10 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
   }, async (request, reply) => {
     const session = await requireAuthenticatedSession(app, request, reply, { csrf: true, roles: ['ADMIN'] });
     if (session === undefined) return;
-    try { return reply.send({ allowedIps: await app.sfudRuntime.gitAllowedIps.remove(session.user.id, request.body.address) }); }
+    try {
+      await app.sfudRuntime.gitAllowedIps.remove(session.user.id, request.body.address);
+      return reply.send(await app.sfudRuntime.gitAllowedIps.settings());
+    }
     catch (error) { return sendGitAllowedIpError(reply, error); }
   });
 

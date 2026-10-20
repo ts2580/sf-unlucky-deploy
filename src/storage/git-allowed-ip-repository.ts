@@ -11,6 +11,22 @@ export class GitAllowedIpRepository {
     return await this.database.all<GitAllowedIp[]>(`SELECT address, created_at createdAt FROM git_allowed_ips ORDER BY address`);
   }
 
+  public async privateIpCheckEnabled(): Promise<boolean> {
+    const row = await this.database.get<{ enabled: number }>('SELECT check_private_ips enabled FROM git_network_settings WHERE id = 1');
+    return row?.enabled === 1;
+  }
+
+  public async setPrivateIpCheck(actorUserId: string, enabled: boolean): Promise<void> {
+    const createdAt = this.now();
+    await runInImmediateTransaction(this.database, async (transaction) => {
+      const result = await transaction.run(`UPDATE git_network_settings SET check_private_ips = ?, updated_by = ?, updated_at = ?
+        WHERE id = 1 AND check_private_ips <> ?`, Number(enabled), actorUserId, createdAt, Number(enabled));
+      if (result.changes === 0) return;
+      await transaction.run(`INSERT INTO audit_events (actor_user_id, event_type, entity_type, entity_id, detail_json, created_at)
+        VALUES (?, 'GIT_PRIVATE_IP_CHECK_CHANGED', 'GIT_NETWORK_SETTINGS', '1', ?, ?)`, actorUserId, JSON.stringify({ checkPrivateIps: enabled }), createdAt);
+    });
+  }
+
   public async add(actorUserId: string, value: string): Promise<void> {
     const address = normalizeGitHostIpAddress(value);
     const createdAt = this.now();

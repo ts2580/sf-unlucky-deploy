@@ -1,17 +1,26 @@
 import { spawnSync } from 'node:child_process';
-import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GitMaterializer } from '../src/git/git-materializer.js';
+import { GitError } from '../src/git/git-errors.js';
 import { GitObjectStore } from '../src/git/git-object-store.js';
 import { runIsolatedGit } from '../src/git/git-process.js';
 import { safeGitPath, selectedGitEntries } from '../src/git/git-project-validator.js';
 import type { GitTreeEntry } from '../src/git/git-object-store.js';
 
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, rename: vi.fn(actual.rename), rm: vi.fn(actual.rm) };
+});
+
 const roots: string[] = [];
 afterEach(async () => {
   vi.unstubAllEnvs();
+  vi.mocked(rename).mockReset();
+  vi.mocked(rm).mockReset();
+  vi.restoreAllMocks();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 const config = JSON.stringify({ packageDirectories: [{ path: 'force-app' }, { path: 'extra' }], sourceApiVersion: '64.0' });
@@ -71,6 +80,53 @@ function project(prefix = ''): Entry[] {
 }
 
 describe('Git 원시 파일 추출', { timeout: 30_000 }, () => {
+  it.each(['restore', 'validation'])('부분 복원 후 최종 폴더 정리가 잠겨도 원래 %s 오류를 보존한다', async (stage) => {
+    const f = await fixture(project());
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    const target = path.join(f.root, 'partial-final-project');
+    const original = new GitError('GIT_PROCESS_FAILED');
+    const restore = f.objects.restoreFiles.bind(f.objects);
+    vi.spyOn(f.objects, 'restoreFiles').mockImplementation(async (...args) => {
+      await restore(...args);
+      if (stage === 'restore') throw original;
+      await writeFile(path.join(target, 'force-app/main/default/classes/Hello.cls'), 'corrupted');
+    });
+    vi.mocked(rm).mockImplementation(async (directory, options) => {
+      if (directory === target) throw Object.assign(new Error('fixture Windows final directory lock'), { code: 'EPERM' });
+      return actual.rm(directory, options);
+    });
+    const warning = vi.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    const result = f.materializer.materialize(f.commit, '.', target);
+    if (stage === 'restore') await expect(result).rejects.toBe(original);
+    else await expect(result).rejects.toMatchObject({ code: 'INVALID_GIT_OBJECT' });
+    expect(rm).toHaveBeenCalledWith(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining(target), { code: 'SFUD_GIT_MATERIALIZATION_CLEANUP_FAILED' });
+    expect(await readdir(target)).toContain('sfdx-project.json');
+  });
+  it.each(['.', 'salesforce'])('디렉터리 rename이 EPERM인 환경에서도 %s 프로젝트를 원본 바이트로 복원한다', async (projectRoot) => {
+    const prefix = projectRoot === '.' ? '' : `${projectRoot}/`;
+    const f = await fixture(project(prefix));
+    vi.mocked(rename).mockRejectedValue(Object.assign(new Error('fixture Windows directory lock'), { code: 'EPERM' }));
+    const target = path.join(f.root, 'final-project');
+    const result = await f.materializer.materialize(f.commit, projectRoot, target, { metadataType: 'ApexClass' });
+    expect(await readFile(path.join(target, 'force-app/main/default/classes/Hello.cls'), 'utf8')).toBe('public class Hello {}\r\n');
+    expect(JSON.parse(await readFile(path.join(target, 'sfdx-project.json'), 'utf8'))).toEqual(JSON.parse(config));
+    expect(result.fileCount).toBeGreaterThan(0);
+    expect((await readdir(f.root)).some((name) => name.startsWith('.restore-'))).toBe(false);
+  });
+  it('복원 임시 폴더의 잠금은 경고로 남기고 완성된 프로젝트를 보존한다', async () => {
+    const f = await fixture(project());
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    vi.mocked(rm).mockImplementation(async (target, options) => {
+      if (path.basename(String(target)).startsWith('.restore-')) throw Object.assign(new Error('fixture Windows cleanup lock'), { code: 'EPERM' });
+      return actual.rm(target, options);
+    });
+    const warning = vi.spyOn(process, 'emitWarning').mockImplementation(() => undefined);
+    const target = path.join(f.root, 'final-project');
+    await expect(f.materializer.materialize(f.commit, '.', target)).resolves.toMatchObject({ fileCount: 5 });
+    expect(await readFile(path.join(target, 'force-app/main/default/classes/Hello.cls'), 'utf8')).toBe('public class Hello {}\r\n');
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('Git 복원용 임시 폴더'), { code: 'SFUD_GIT_RESTORE_CLEANUP_FAILED' });
+  });
   it('긴 Windows 작업 경로에서도 Apex 파일과 companion을 복원한다', async () => {
     const className = 'AladinHomePageComponentController_Test';
     const relative = `force-app/main/default/classes/${className}.cls`;

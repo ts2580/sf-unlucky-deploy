@@ -6,27 +6,40 @@ import { listFiles } from '../core/files.js';
 import type { MetadataSnapshot } from '../sources/snapshot.js';
 import { childMetadataTypes } from './child-metadata-types.js';
 import { readXmlStream } from './xml-stream.js';
+import { filterPackageChildren } from './package-child-filter.js';
 
 // MDAPI aggregates fields/rules/labels into parent XML files. Project only for
 // comparison; the original snapshot and its deployable payload stay immutable.
-export async function projectChildMetadata(snapshot: MetadataSnapshot, metadataType?: string | readonly string[]): Promise<{
-  snapshot: MetadataSnapshot; dispose(): Promise<void>;
+export async function projectChildMetadata(snapshot: MetadataSnapshot, metadataType?: string | readonly string[], options: {
+  excludedKeys?: readonly string[] | undefined; selectedKeys?: readonly string[] | undefined;
+} = {}): Promise<{
+  snapshot: MetadataSnapshot; excludedKeys: string[]; dispose(): Promise<void>;
 }> {
   const types = new Set(typeof metadataType === 'string' ? [metadataType] : metadataType ?? []);
   const rules = childMetadataTypes.filter((entry) => types.has(entry.name));
-  if (rules.length === 0) return { snapshot, async dispose() {} };
+  const excluded = new Set(options.excludedKeys);
+  const excludedTypes = new Set([...excluded].map((key) => key.slice(0, key.indexOf(':'))));
+  const exclusionRules = childMetadataTypes.filter((entry) => excludedTypes.has(entry.name));
+  if (rules.length === 0 && exclusionRules.length === 0) return { snapshot, excludedKeys: [], async dispose() {} };
   const directory = await mkdtemp(path.join(os.tmpdir(), 'sfud-child-compare-'));
   const dispose = () => rm(directory, { recursive: true, force: true });
   try {
     await copyFile(snapshot.manifestPath, path.join(directory, 'package.xml'));
     const files = await listFiles(snapshot.packageRoot);
-    const includeParents = [...types].some((type) => !rules.some((rule) => rule.name === type));
+    const includeParents = rules.length === 0 || [...types].some((type) => !rules.some((rule) => rule.name === type));
+    const filteredKeys: string[] = [];
     if (includeParents) {
       for (const file of files) {
         if (file === 'package.xml') continue;
         const output = path.join(directory, file);
         await mkdir(path.dirname(output), { recursive: true, mode: 0o700 });
-        await link(path.join(snapshot.packageRoot, file), output).catch(() => copyFile(path.join(snapshot.packageRoot, file), output));
+        const matchingRules = exclusionRules.filter((rule) => file.startsWith(`${rule.directory}/`) && file.endsWith(`.${rule.suffix}`));
+        if (matchingRules.length > 0) {
+          const parentName = file.slice(matchingRules[0]!.directory.length + 1, -matchingRules[0]!.suffix.length - 1);
+          const parentSelected = options.selectedKeys === undefined || options.selectedKeys.includes(`${matchingRules[0]!.parent}:${parentName}`);
+          const memberKeys = parentSelected ? excluded : new Set([...excluded].filter((key) => options.selectedKeys!.includes(key)));
+          filteredKeys.push(...await filterPackageChildren(path.join(snapshot.packageRoot, file), output, parentName, matchingRules, memberKeys));
+        } else await link(path.join(snapshot.packageRoot, file), output).catch(() => copyFile(path.join(snapshot.packageRoot, file), output));
       }
     }
     for (const rule of rules) {
@@ -38,7 +51,7 @@ export async function projectChildMetadata(snapshot: MetadataSnapshot, metadataT
         await projectFile(path.join(snapshot.packageRoot, file), output, parentName, rule);
       }
     }
-    return { snapshot: { ...snapshot, packageRoot: directory,
+    return { excludedKeys: filteredKeys, snapshot: { ...snapshot, packageRoot: directory,
       metadataTypes: [...(includeParents ? snapshot.metadataTypes ?? [] : []), ...rules.map((rule) => ({ xmlName: rule.name, directoryName: rule.name, suffix: 'xml' }))] }, dispose };
   } catch (error) { await dispose(); throw error; }
 }

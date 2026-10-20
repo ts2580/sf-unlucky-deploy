@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rename, rm, writeFile, rmdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { GitError } from './git-errors.js';
 import { assertCommitSha } from './git-repository.js';
@@ -86,18 +86,25 @@ export class GitObjectStore implements GitObjectReader {
       if (!Number.isSafeInteger(size) || size > maximumFileBytes || total > maximumProjectBytes) throw new GitError('GIT_QUOTA_EXCEEDED');
     }
     const scratch = await mkdtemp(path.join(path.dirname(destination), '.restore-'));
-    const workTree = path.join(scratch, 'tree');
     try {
-      await mkdir(workTree, { mode: 0o700 });
-      const paths = entries.map((entry) => root === '.' ? entry.path : `${root}/${entry.path}`);
-      await runIsolatedGit(['--literal-pathspecs', 'restore', `--source=${commit}`, '--staged', '--worktree',
+      // Restore a project subtree directly into the caller's exclusive destination.
+      // Renaming the freshly written tree can fail with Windows EPERM even after
+      // Git closes, while transient filesystem scanners still hold directory handles.
+      const sourceTree = root === '.' ? commit : `${commit}:${root}`;
+      const paths = entries.map((entry) => entry.path);
+      await runIsolatedGit(['--literal-pathspecs', 'restore', `--source=${sourceTree}`, '--staged', '--worktree',
         '--no-overlay', '--pathspec-from-file=-', '--pathspec-file-nul'], {
-        cwd: scratch, gitDirectory: this.gitDirectory, workTree, indexFile: path.join(scratch, 'index'),
+        cwd: scratch, gitDirectory: this.gitDirectory, workTree: destination, indexFile: path.join(scratch, 'index'),
         input: Buffer.from(`${paths.join('\0')}\0`), ...(signal === undefined ? {} : { signal }),
       });
-      await rmdir(destination); // Caller exclusively created this empty destination.
-      await rename(root === '.' ? workTree : path.join(workTree, root), destination);
-    } finally { await rm(scratch, { recursive: true, force: true }); }
+    } finally {
+      try { await rm(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
+      catch {
+        process.emitWarning(`Git 복원용 임시 폴더를 정리하지 못했습니다. 작업 종료 후 삭제해 주세요: ${scratch}`, {
+          code: 'SFUD_GIT_RESTORE_CLEANUP_FAILED',
+        });
+      }
+    }
   }
 
   public async readBlob(objectId: string, maximumBytes: number, signal?: AbortSignal): Promise<Buffer> {

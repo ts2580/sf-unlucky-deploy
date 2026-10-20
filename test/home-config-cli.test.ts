@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { parseEnv } from 'node:util';
 import { lstat, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
@@ -90,12 +91,18 @@ describe('홈 설정 CLI 실행 경계', () => {
   it('다른 작업 디렉터리에서 init/path를 실행하고 기존 설정을 보존한다', async () => {
     const { cwd, environment, configFile } = await fixture();
     expect(await run(['config', 'path'], cwd, environment)).toMatchObject({ code: 0, stdout: `${configFile}\n` });
-    expect(await run(['config', 'init'], cwd, environment)).toMatchObject({ code: 0, stderr: '' });
+    const initialized = await run(['config', 'init'], cwd, environment);
+    expect(initialized).toMatchObject({ code: 0, stderr: '' });
     const original = await readFile(configFile, 'utf8');
-    expect(await readFile(path.join(path.dirname(configFile), 'secrets.env'), 'utf8')).toContain('# SFUD_TOKEN_SECRET=');
+    const secretsFile = path.join(path.dirname(configFile), 'secrets.env');
+    const originalSecrets = await readFile(secretsFile, 'utf8');
+    const secret = parseEnv(originalSecrets).SFUD_TOKEN_SECRET;
+    expect(secret).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(initialized.stdout + initialized.stderr).not.toContain(secret!);
     expect(JSON.parse(original)).toMatchObject({ version: 1, env: { LOCAL: 'true', SFUD_DATA_DIR: 'data/local' } });
     expect((await run(['config', 'init'], cwd, environment)).code).toBe(2);
     expect(await readFile(configFile, 'utf8')).toBe(original);
+    expect(await readFile(secretsFile, 'utf8')).toBe(originalSecrets);
   }, CLI_TEST_TIMEOUT_MS);
 
   it('옵션 값으로 받은 --help/-h가 설정 검사를 우회하지 않고 실제 도움말은 비밀 파일을 읽지 않는다', async () => {

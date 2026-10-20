@@ -14,12 +14,12 @@ export const inspect = (body: GitRepositoryRequest, signal?: AbortSignal) => api
   { method: 'POST', csrf: true, body, signal, requestSchema: GitRepositoryRequestSchema, responseSchema: GitRepositoryResponseSchema });
 export const refs = (body: GitRefsRequest, signal?: AbortSignal) => apiRequest<GitRefsResponse, GitRefsRequest>('/api/v1/git/repositories/refs',
   { method: 'POST', csrf: true, body, signal, requestSchema: GitRefsRequestSchema, responseSchema: GitRefsResponseSchema });
-export const createImport = (body: GitImportRequestBody) => apiRequest<GitImportResponse, GitImportRequestBody>('/api/v1/git/imports',
-  { method: 'POST', csrf: true, body, requestSchema: GitImportRequestSchema, responseSchema: GitImportResponseSchema });
+export const createImport = (body: GitImportRequestBody, signal?: AbortSignal) => apiRequest<GitImportResponse, GitImportRequestBody>('/api/v1/git/imports',
+  { method: 'POST', csrf: true, body, signal, requestSchema: GitImportRequestSchema, responseSchema: GitImportResponseSchema });
 export const importById = (id: string, signal?: AbortSignal) => apiRequest<GitImportResponse>(`/api/v1/git/imports/${encodeURIComponent(id)}`,
   { signal, responseSchema: GitImportResponseSchema });
-export const selectImportProject = (id: string, projectRoot: string) => apiRequest<{ accepted: true }, { projectRoot: string }>(
-  `/api/v1/git/imports/${encodeURIComponent(id)}/select-project`, { method: 'POST', csrf: true, body: { projectRoot } });
+export const selectImportProject = (id: string, projectRoot: string, signal?: AbortSignal) => apiRequest<{ accepted: true }, { projectRoot: string }>(
+  `/api/v1/git/imports/${encodeURIComponent(id)}/select-project`, { method: 'POST', csrf: true, body: { projectRoot }, signal });
 export function catalog(id: string, query: GitCatalogQuery, signal?: AbortSignal) {
   const search = new URLSearchParams(Object.entries(query).filter((entry): entry is [string, string] => entry[1] !== undefined));
   return apiRequest<GitCatalogPage>(`/api/v1/git/connections/${encodeURIComponent(id)}/repositories?${search}`,
