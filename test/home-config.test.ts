@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runWindowsPowerShell } from '../src/config/windows-powershell.js';
+import { TokenVault } from '../src/git/token-vault.js';
 
 import {
   getHomeConfigPaths,
@@ -38,6 +39,40 @@ async function writeConfig(directory: string, env: Record<string, unknown>): Pro
 }
 
 describe('사용자 홈 설정 보안', { timeout: process.platform === 'win32' ? 120_000 : 5_000 }, () => {
+  it('동시 첫 실행은 하나의 개인용 암호화 키가 완성될 때까지 기다린다', async () => {
+    const { directory } = await configHome();
+    await rm(path.join(directory, 'config.json'), { force: true });
+    await rm(path.join(directory, 'secrets.env'), { force: true });
+    const environments: NodeJS.ProcessEnv[] = Array.from({ length: 4 }, () => ({ SFUD_CONFIG_DIR: directory }));
+    await Promise.all(environments.map((environment) => loadHomeConfiguration(environment)));
+    const key = environments[0]!.SFUD_TOKEN_SECRET;
+    expect(key).toMatch(/^[0-9a-f-]{36}$/u);
+    for (const environment of environments) {
+      expect(environment.LOCAL).toBe('true');
+      expect(environment.SFUD_TOKEN_SECRET).toBe(key);
+    }
+    expect(await readFile(path.join(directory, 'secrets.env'), 'utf8')).toContain(`SFUD_TOKEN_SECRET=${key}`);
+    await expect(lstat(path.join(directory, '.setup.lock'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('새 자동 설정도 init과 같은 개인용 기본값·고정 데이터 경로·UUID 키를 생성한다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-personal-auto-'));
+    roots.push(root);
+    const environment: NodeJS.ProcessEnv = { SFUD_CONFIG_DIR: path.join(root, '.sfud') };
+    await loadHomeConfiguration(environment);
+    const paths = getHomeConfigPaths(environment);
+    expect(JSON.parse(await readFile(paths.configFile, 'utf8'))).toEqual({ version: 1, env: { LOCAL: 'true', SFUD_DATA_DIR: 'data/local' } });
+    expect(environment.LOCAL).toBe('true');
+    expect(environment.SFUD_DATA_DIR).toBe(path.join(paths.directory, 'data', 'local'));
+    expect(environment.SFUD_TOKEN_SECRET).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+    const secretBytes = await readFile(paths.secretsFile);
+    const restarted: NodeJS.ProcessEnv = { SFUD_CONFIG_DIR: paths.directory };
+    await loadHomeConfiguration(restarted);
+    expect(restarted.LOCAL).toBe('true');
+    expect(restarted.SFUD_DATA_DIR).toBe(environment.SFUD_DATA_DIR);
+    expect(restarted.SFUD_TOKEN_SECRET).toBe(environment.SFUD_TOKEN_SECRET);
+    expect(await readFile(paths.secretsFile)).toEqual(secretBytes);
+  });
   it.skipIf(process.platform !== 'win32')('Windows PowerShell은 제한된 환경에서 설정 경로 없이 시작하고 종료한다', async () => {
     await runWindowsPowerShell('exit 0', {});
   });
@@ -197,6 +232,53 @@ describe('사용자 홈 설정 보안', { timeout: process.platform === 'win32' 
     }
     expect(() => getHomeConfigPaths({ SFUD_CONFIG_DIR: 'relative' })).toThrow(/절대 경로/u);
     expect(() => getHomeConfigPaths({ SFUD_CONFIG_DIR: '' })).toThrow(/절대 경로/u);
+  });
+
+  it('init은 UUID 암호화 키를 저장하고 다시 로드한 키로 기존 토큰을 복호화한다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-init-token-'));
+    roots.push(root);
+    const environment: NodeJS.ProcessEnv = { SFUD_CONFIG_DIR: path.join(root, '.sfud') };
+    const paths = await initializeHomeConfiguration(environment);
+    const originalSecrets = await readFile(paths.secretsFile, 'utf8');
+    await loadHomeConfiguration(environment);
+    const secret = environment.SFUD_TOKEN_SECRET;
+    expect(secret).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+    const salt = Buffer.alloc(32, 1);
+    const context = { ownerUserId: 'owner', resourceId: 'connection', provider: 'github', host: 'github.com', purpose: 'access-token' } as const;
+    const vault = await TokenVault.fromSecret(secret!, salt);
+    const encrypted = vault.encrypt('fixture-git-token', context);
+    const restarted: NodeJS.ProcessEnv = { SFUD_CONFIG_DIR: paths.directory };
+    await loadHomeConfiguration(restarted);
+    const reloadedVault = await TokenVault.fromSecret(restarted.SFUD_TOKEN_SECRET!, salt);
+    expect(reloadedVault.decrypt(encrypted, context)).toBe('fixture-git-token');
+    await expect(initializeHomeConfiguration(restarted)).rejects.toThrow(/이미/u);
+    expect(await readFile(paths.secretsFile, 'utf8')).toBe(originalSecrets);
+    if (process.platform !== 'win32') expect((await lstat(paths.secretsFile)).mode & 0o777).toBe(0o600);
+  });
+
+  it.each(['SFUD_TOKEN_SECRET', 'SFUD_GIT_TOKEN_SECRET', 'SFUD_SF_TOKEN_SECRET', 'SFUD_GIT_TOKEN_KEY_FILE'])(
+    'init은 기존 환경변수 %s가 있으면 새 공통 키를 생성하지 않는다', async (key) => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-init-existing-key-'));
+      roots.push(root);
+      const paths = await initializeHomeConfiguration({ SFUD_CONFIG_DIR: path.join(root, '.sfud'), [key]: 'existing-key-setting' });
+      const contents = await readFile(paths.secretsFile, 'utf8');
+      expect(contents.trim().split('\n').every((line) => line.startsWith('#'))).toBe(true);
+      expect(contents).not.toContain('existing-key-setting');
+    },
+  );
+
+  it('init은 기존 secrets.env의 암호화 키와 다른 비밀값을 그대로 보존한다', async () => {
+    const { directory, environment } = await configHome();
+    await rm(path.join(directory, 'config.json'), { force: true });
+    const secretsFile = path.join(directory, 'secrets.env');
+    const contents = '# existing secrets\nSFUD_GIT_TOKEN_SECRET=existing-legacy-key-with-at-least-32-characters\nSFUD_ACCESS_PASSWORD=existing-personal-password\n';
+    await writeFile(secretsFile, contents, { mode: 0o600 });
+    await initializeHomeConfiguration(environment);
+    expect(await readFile(secretsFile, 'utf8')).toBe(contents);
+    const loaded: NodeJS.ProcessEnv = { SFUD_CONFIG_DIR: directory };
+    await loadHomeConfiguration(loaded);
+    expect(loaded.SFUD_TOKEN_SECRET).toBeUndefined();
+    expect(loaded.SFUD_GIT_TOKEN_SECRET).toBe('existing-legacy-key-with-at-least-32-characters');
   });
 
   it('init은 LOCAL/data 경로를 안전하게 한 번만 만들고 재실행과 동시 실행에서 덮어쓰지 않는다', async () => {

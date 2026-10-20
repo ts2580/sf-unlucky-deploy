@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import path from 'node:path';
 
 import { runCompareCommand, type CommandDependencies } from './commands/compare.js';
 import {
@@ -16,8 +17,9 @@ import { gitHostPolicyFromAddresses, gitHostPolicyFromEnvironment } from './git/
 import { getHomeConfigPaths, initializeHomeConfiguration } from './config/user-config.js';
 import { runSetup } from './config/setup.js';
 import { formatDoctorReport, runDoctor } from './config/doctor.js';
+import { stopWebUi } from './web/server/ui-control.js';
 
-export const CLI_VERSION = '0.6.0';
+export const CLI_VERSION = '0.7.0';
 
 export interface ProgramDependencies extends CommandDependencies, DeployCommandDependencies {}
 
@@ -38,6 +40,23 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
     .showHelpAfterError();
 
   const config = program.command('config').description('사용자 홈 설정을 관리합니다.');
+  const initialize = async () => {
+    const paths = await initializeHomeConfiguration();
+    process.stdout.write(`설정을 생성했습니다: ${paths.configFile}\n기본 모드: LOCAL=true (개인용)\n데이터 경로: ${path.join(paths.directory, 'data', 'local')}\n`);
+  };
+  program.command('init')
+    .description('개인 LOCAL 모드의 사용자 설정을 처음 생성합니다. (config init과 동일)')
+    .action(initialize);
+  program.command('stop')
+    .description('이 사용자 설정으로 시작한 웹 UI를 정상 종료합니다.')
+    .option('--port <port>', '여러 UI 중 종료할 포트', parsePort)
+    .option('--host <host>', '같은 포트에서 실행 중인 UI의 bind 주소')
+    .action(async (options: { port?: number; host?: string }) => {
+      const result = await stopWebUi(options);
+      process.stdout.write(result.stopped
+        ? `sfud UI를 종료했습니다: ${result.host}:${result.port}\n`
+        : '실행 중인 sfud UI를 찾지 못했습니다. 이전 버전으로 시작한 서버는 실행 터미널에서 Ctrl+C로 종료하세요.\n');
+    });
   program.command('setup')
     .description('서버 터미널에서 개인용 설정을 안내하고 안전하게 저장합니다.')
     .action(async () => { process.exitCode = await runSetup(); });
@@ -57,10 +76,7 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
     });
   config.command('init')
     .description('개인 LOCAL 모드의 사용자 설정을 처음 생성합니다.')
-    .action(async () => {
-      const paths = await initializeHomeConfiguration();
-      process.stdout.write(`설정을 생성했습니다: ${paths.configFile}\n`);
-    });
+    .action(initialize);
 
   program
     .command('compare')
@@ -153,6 +169,7 @@ export function createProgram(dependencies: ProgramDependencies = {}): Command {
         port: port ?? parsePort(process.env.SFUD_UI_PORT ?? String(DEFAULT_UI_PORT)),
         allowRemote: options.allowRemote === true,
         localMode: localValue === 'true',
+        controlDirectory: getHomeConfigPaths().directory,
         ...(process.env.SFUD_ACCESS_PASSWORD === undefined ? {} : { accessPassword: process.env.SFUD_ACCESS_PASSWORD }),
         open: options.open !== false,
         logger: false,

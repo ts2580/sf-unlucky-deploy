@@ -97,16 +97,17 @@ sfud --version
 
 일반판과 같은 패키지 이름·실행 명령을 사용하므로 기존 전역 설치를 대체합니다. 같은 설치 명령을 다시 실행하면 해당 채널의 버전으로 갱신됩니다. Windows 번들 버전은 정식 `0.4.0-win32-x64.1`, 시험판 `0.4.0-rc.4.win32-x64.1`처럼 원본 버전·플랫폼·번들 차수로 구분하고, `sfud --version`은 원본 앱 버전(정식 번들의 경우 `0.4.0`)을 표시합니다. Windows ARM64용이 아니며, Git과 Salesforce CLI는 별도로 설치해야 합니다.
 
-Salesforce CLI v2(`sf`)와 Git은 별도로 설치하고, 필요한 Org를 미리 로그인해야 합니다. 설치된 `sfud`는 현재 디렉터리의 `.env`를 자동으로 읽지 않습니다. `0.4.0-rc.2`부터 `sfud ui`, `sfud compare`, `sfud deploy`를 처음 실행하면 사용자 홈에 `.sfud/config.json`과 `.sfud/secrets.env`를 자동으로 생성합니다. Linux의 기본 경로는 `~/.sfud/config.json`, Windows는 `%USERPROFILE%\.sfud\config.json`입니다. npm 설치 시에는 생성하지 않으므로 설치 스크립트를 끈 환경에서도 첫 실행 시 동작합니다. `--help`, `--version`, `config path` 조회는 파일을 만들지 않습니다. 이전 시험판 `0.4.0-rc.1`은 자동 생성을 지원하지 않으므로 아래 초기화 명령이 필요합니다.
+Salesforce CLI v2(`sf`)와 Git은 별도로 설치하고, 필요한 Org를 미리 로그인해야 합니다. 설치된 `sfud`는 현재 디렉터리의 `.env`를 자동으로 읽지 않습니다. `0.4.0-rc.2`부터 `sfud ui`, `sfud compare`, `sfud deploy`를 처음 실행하면 사용자 홈에 `.sfud/config.json`과 `.sfud/secrets.env`를 자동으로 생성합니다. Linux의 기본 경로는 `~/.sfud/config.json`, Windows는 `%USERPROFILE%\.sfud\config.json`입니다. npm 설치 시에는 생성하지 않으므로 설치 스크립트를 끈 환경에서도 첫 실행 시 동작합니다. `--help`, `--version`, `config path`, `stop`은 파일을 만들지 않습니다. 이전 시험판 `0.4.0-rc.1`은 자동 생성을 지원하지 않으므로 아래 초기화 명령이 필요합니다.
 
-자동 생성 파일은 `{ "version": 1, "env": {} }`로 시작하여 현재 실행 모드와 데이터 경로를 유지합니다. 기존 설정은 덮어쓰거나 권한을 자동 변경하지 않습니다. 설정이 없을 때 개인 LOCAL 모드를 명시적으로 초기화하려면 다음 명령을 사용합니다.
+새 환경에서는 자동 설정과 명시적인 초기화가 모두 개인용 `LOCAL=true`, 설정 디렉터리 기준 `data/local`, UUID 암호화 키를 준비합니다. npm 설치 시점이 아닌 설치 후 첫 실행 시 생성하므로 `--ignore-scripts` 설치에서도 동작합니다. 기존 설정은 덮어쓰거나 권한을 자동 변경하지 않습니다. 프로세스 환경변수에 `LOCAL=false`를 명시한 자동 실행은 기존 팀 서버 기본값을 유지합니다. 먼저 설정만 만들려면 다음 명령을 사용합니다.
 
 ```bash
 sfud config path
-sfud config init
+sfud init
+# sfud config init도 동일합니다.
 ```
 
-`sfud config init`으로 만든 개인 설정은 `LOCAL=true`와 설정 디렉터리 기준 `data/local`을 사용합니다. 자동 생성된 빈 설정이 이미 있다면 `config path`가 표시한 파일의 `env`에 이 값을 직접 설정하세요. 실행 옵션이 가장 우선하고, 그 다음 현재 프로세스 환경변수, 홈 설정, 기본값 순서로 적용됩니다. `SFUD_CONFIG_DIR`에는 설정 디렉터리의 절대 경로를 지정할 수 있습니다. 자동 생성 설정이 비어 있으면 기존 기본 동작을 유지합니다.
+기본 DB는 `~/.sfud/data/local/sfud.db`(Windows: `%USERPROFILE%\.sfud\data\local\sfud.db`)이며 실행 폴더를 바꾸거나 npm을 재설치해도 같은 설정·키·DB를 사용합니다. `SFUD_CONFIG_DIR`나 데이터 경로를 변경하면 다른 DB를 엽니다. 기존에 자동 생성된 빈 설정도 보존하므로, 개인용 전환이 필요하면 `sfud setup`에서 별도 데이터 경로를 선택하세요. 기존 팀 서버 DB와 개인용 DB를 혼용하지 마세요. 실행 옵션이 가장 우선하고, 그 다음 현재 프로세스 환경변수, 홈 설정, 기본값 순서로 적용됩니다. `SFUD_CONFIG_DIR`에는 설정 디렉터리의 절대 경로를 지정할 수 있습니다. 기존 빈 설정은 이전 기본 동작을 유지합니다.
 
 일반 설정 파일은 버전 1의 제한된 환경 변수만 받습니다. 예를 들면 다음과 같습니다.
 
@@ -123,7 +124,7 @@ sfud config init
 
 `LOCAL=true`에서는 OS 사용자의 Salesforce CLI 인증을 사용하므로 Salesforce 인증에 암호화 키가 필요하지 않습니다. Git 토큰을 저장하려면 로컬 모드에서도 `SFUD_TOKEN_SECRET`이 필요합니다. `LOCAL=false`에서 사용자별 Salesforce 연결을 저장하려면 이 암호화 키를 설정해야 합니다. 빈 값은 유효하지 않은 키로 처리되며, 프로세스에 빈 환경변수가 있으면 비밀 설정 파일의 값보다 우선합니다.
 
-비밀값은 `config.json`에 넣지 마세요. `~/.sfud/secrets.env`는 첫 실행과 `config init`에서 사용자 전용 권한으로 자동 생성합니다. 기존 config.json만 있는 경우에도 누락된 secrets.env를 만들며, 기존 비밀값 파일은 덮어쓰지 않습니다. 자동 생성 내용은 항목 안내 주석뿐이고 비밀값을 생성하거나 빈 환경변수를 활성화하지 않습니다. 사용할 항목의 주석을 풀고 실제 값을 넣으세요. `secrets.env`에는 `SFUD_TOKEN_SECRET`, `SFUD_SF_OAUTH_CLIENT_ID`, `SFUD_SF_OAUTH_CLIENT_SECRET`을 사용합니다. 이전 두 개별 암호화 키 이름도 호환용으로 허용합니다. POSIX에서는 새 파일을 `umask 077` 상태에서 만들고 `chmod 600 ~/.sfud/secrets.env`인지 확인한 뒤 편집하세요. 기존 설정의 권한이 안전하지 않으면 `sfud`가 읽기를 거부하므로 권한을 직접 점검하세요. UI 호스트를 루프백 밖으로 설정해도 원격 bind에는 계속 `--allow-remote`가 필요하며 비밀번호 없는 `LOCAL=true`는 루프백에서만 사용할 수 있습니다. 원격 개인용은 `SFUD_ACCESS_PASSWORD`를 설정하세요.
+비밀값은 `config.json`에 넣지 마세요. `~/.sfud/secrets.env`는 첫 실행과 `config init`에서 사용자 전용 권한으로 자동 생성합니다. 기존 config.json만 있는 경우에도 누락된 secrets.env를 만들며, 기존 비밀값 파일은 덮어쓰지 않습니다. 새 환경의 `init` 또는 개인용 첫 자동 실행은 UUID v4를 생성해 `SFUD_TOKEN_SECRET`에 저장합니다. 환경변수에 공통 키·호환 키·Git 키 파일 설정이 있으면 새 키를 만들지 않습니다. 명시한 `LOCAL=false`로 만드는 자동 설정과 기존 설정의 누락된 비밀값 파일은 항목 안내 주석만 저장하며, 기존 DB의 키를 임의로 생성하거나 교체하지 않습니다. 나머지 사용할 항목은 주석을 풀고 실제 값을 넣으세요. `secrets.env`에는 `SFUD_TOKEN_SECRET`, `SFUD_SF_OAUTH_CLIENT_ID`, `SFUD_SF_OAUTH_CLIENT_SECRET`을 사용합니다. 이전 두 개별 암호화 키 이름도 호환용으로 허용합니다. POSIX에서는 새 파일을 `umask 077` 상태에서 만들고 `chmod 600 ~/.sfud/secrets.env`인지 확인한 뒤 편집하세요. 기존 설정의 권한이 안전하지 않으면 `sfud`가 읽기를 거부하므로 권한을 직접 점검하세요. UI 호스트를 루프백 밖으로 설정해도 원격 bind에는 계속 `--allow-remote`가 필요하며 비밀번호 없는 `LOCAL=true`는 루프백에서만 사용할 수 있습니다. 원격 개인용은 `SFUD_ACCESS_PASSWORD`를 설정하세요.
 
 개인 로컬 웹 UI는 설정에 저장되므로 매번 `LOCAL=true`를 명시하지 않아도 됩니다. 셸에서 직접 환경변수로 덮어쓸 수도 있습니다.
 

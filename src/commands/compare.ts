@@ -14,6 +14,7 @@ import { createRunContext, writeRunMetadata } from './run-context.js';
 import { settledSnapshots } from './settled-snapshots.js';
 import { salesforceWaitCommandTimeoutMs } from '../core/deadline.js';
 import { resolvePackageExclusion, validateExcludedPackageIds } from '../metadata/package-exclusion.js';
+import type { PackageComponentResolver } from '../metadata/package-exclusion.js';
 
 export interface CompareCommandOptions {
   excludedPackageIds?: string[];
@@ -37,6 +38,7 @@ export interface CompareCommandOptions {
 }
 
 export interface CommandDependencies {
+  packageComponentResolver?: PackageComponentResolver;
   sourceSnapshot?: JobSourceSnapshot;
   cwd?: string;
   sfClient?: SfClient;
@@ -66,7 +68,8 @@ export async function runCompareCommand(
   return await withRequestWorkspace(cwd, async (commandProjectPath) => {
     const packageExclusion = options.excludePackageMetadata === true || excludedPackageIds.length > 0
       ? await resolvePackageExclusion(options.sourceOnly === true ? [rightSource] : [leftSource, rightSource],
-        sfClient, commandProjectPath, dependencies.signal, excludedPackageIds.length > 0 ? excludedPackageIds : undefined)
+        sfClient, commandProjectPath, dependencies.signal, excludedPackageIds.length > 0 ? excludedPackageIds : undefined,
+        dependencies.packageComponentResolver)
       : undefined;
     const context = await createRunContext(cwd, options.reportDir, 'compare');
     const generatedManifest = options.allMetadata === true || options.metadataType !== undefined

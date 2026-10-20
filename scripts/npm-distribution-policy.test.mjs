@@ -11,6 +11,17 @@ import { assertPackedMetadataMatches, assertSafeArchive, verifyUiAssetPaths } fr
 import { assertPublicationAllowed, assertSamePublishedArtifact, classifyRegistryLookup } from './npm-publish-policy.mjs';
 import { getReleasePolicy } from './release-policy.mjs';
 import { assertWindowsBundleArchive, assertWindowsX64Binary } from './windows-bundle-policy.mjs';
+import { packageSmokeCapabilities } from './package-smoke-policy.mjs';
+
+test('고정된 이전 번들은 지원 명령으로 검사하고 현재 원본의 init·stop 누락은 거부한다', () => {
+  const legacy = 'Salesforce\nCommands:\n  config\n  ui [options]\n';
+  const current = `${legacy}  init\n  stop [options]\n`;
+  assert.deepEqual(packageSmokeCapabilities(legacy, false), { automaticPersonalConfig: false, stop: false });
+  assert.deepEqual(packageSmokeCapabilities(current, true), { automaticPersonalConfig: true, stop: true });
+  assert.deepEqual(packageSmokeCapabilities(current, false), { automaticPersonalConfig: true, stop: true });
+  assert.throws(() => packageSmokeCapabilities(legacy, true), /init·stop/u);
+  assert.throws(() => packageSmokeCapabilities(`${legacy}  init\n`, true), /init·stop/u);
+});
 
 test('Windows bundle은 SQLite DLL과 고지를 요구하고 credential·탈출 경로를 거부한다', () => {
   const entries = ['package/package.json', 'package/node_modules/sqlite3/LICENSE',

@@ -151,7 +151,7 @@ async function mockGitApis(page: Page, options: {
   extraSources?: WorkspaceResponse['sources']; comparisonComponents?: Array<Record<string, unknown>>;
 } = {}) {
   await mockAuth(page, options.user ?? admin);
-  await page.route('**/api/v1/admin/git-allowed-ips', (route) => json(route, { allowedIps: [] }));
+  await page.route('**/api/v1/admin/git-allowed-ips', (route) => json(route, { allowedIps: [], checkPrivateIps: false }));
   await page.route('**/api/v1/workflow/events', (route) => route.fulfill({
     status: 200, contentType: 'text/event-stream', body: ': connected\n\n',
   }));
@@ -631,9 +631,12 @@ test('비교 소스의 브랜치 조회 중 안내와 입력 비활성 상태를
   await page.route('**/api/v1/git/repositories/refs', async (route) => { await gate; return json(route, refs('branch')); });
   await page.goto('http://127.0.0.1:27546/deploy');
   await page.getByLabel('DESIRED SOURCE 비교 소스').selectOption(`git-connection:${connectionId}`);
-  const status = page.getByRole('status').filter({ hasText: '브랜치 불러오는 중…' });
+  const status = page.getByRole('status').filter({ hasText: '브랜치 검색 중……' });
   try {
     await expect(status).toBeVisible();
+    const spinner = status.locator('.icon');
+    await expect(spinner).toBeVisible();
+    expect(await spinner.evaluate((element) => getComputedStyle(element).animationName)).toBe('spin');
     await expect(page.getByLabel('브랜치 검색 및 선택')).toBeDisabled();
   } finally { release(); }
   await expect(status).toHaveCount(0);
@@ -757,7 +760,7 @@ test('등록된 Git 저장소를 소스로 선택하고 브랜치를 검색해 R
 
   const branchInput = page.getByLabel('브랜치 검색 및 선택');
   await expect(branchInput).toHaveValue('main');
-  const metadataTypeInput = page.getByLabel('가져올 메타데이터 타입');
+  const metadataTypeInput = page.locator('#deploy-scope');
   await expect(metadataTypeInput).toHaveValue('ApexClass');
   await expect(page.locator('#git-branch-options option')).toHaveCount(1);
   await branchInput.fill('');
@@ -771,7 +774,11 @@ test('등록된 Git 저장소를 소스로 선택하고 브랜치를 검색해 R
   await expect(page.locator('#git-branch-options option')).toHaveAttribute('value', 'release');
   await branchInput.fill('release');
   await expect(page.getByText(`현재 선택: release · 고정할 커밋 ${releaseSha}`, { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '이 브랜치로 소스 준비' }).click();
+  expect(fixture.importRequests).toHaveLength(0);
+  expect(fixture.comparisonRequests).toHaveLength(0);
+  await expect(page.locator('.git-branch-source').getByLabel('가져올 메타데이터 타입')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '이 브랜치로 소스 준비' })).toHaveCount(0);
+  await page.getByRole('button', { name: '메타데이터 비교' }).click();
   await expect.poll(() => fixture.importRequests.length).toBe(1);
   expect(fixture.importRequests[0]).toMatchObject({
     provider: 'github', repositoryPath: registeredPath, connectionId,
@@ -786,7 +793,7 @@ test('등록된 Git 저장소를 소스로 선택하고 브랜치를 검색해 R
   await expect(desiredSource.locator('option')).toHaveCount(2);
 });
 
-test('CustomField를 선택해 준비하면 import 요청과 deploy scope가 같은 타입으로 고정된다', async ({ page }) => {
+test('2번에서 CustomField를 선택해 비교하면 그 타입으로 Git 코드를 가져온다', async ({ page }) => {
   const registeredPath = 'acme/custom-field-project';
   const fixture = await mockGitApis(page, {
     initialConnections: [connection({ repositoryPath: registeredPath, displayName: '등록 저장소 연결' })],
@@ -795,13 +802,13 @@ test('CustomField를 선택해 준비하면 import 요청과 deploy scope가 같
   await page.goto('http://127.0.0.1:27546/deploy');
   const desiredSource = page.getByLabel('DESIRED SOURCE 비교 소스');
   await desiredSource.selectOption(`git-connection:${connectionId}`);
-  const metadataTypeInput = page.getByLabel('가져올 메타데이터 타입');
+  const metadataTypeInput = page.locator('#deploy-scope');
   await expect(metadataTypeInput).toHaveValue('ApexClass');
   await metadataTypeInput.fill('CustomField');
   await expect(metadataTypeInput).toHaveValue('CustomField');
   await page.getByLabel('브랜치 검색 및 선택').fill('release');
   await page.screenshot({ path: 'working/git-deploy-metadata-type.png', fullPage: true });
-  await page.getByRole('button', { name: '이 브랜치로 소스 준비' }).click();
+  await page.getByRole('button', { name: '메타데이터 비교' }).click();
   await expect.poll(() => fixture.importRequests.length).toBe(1);
   expect(fixture.importRequests[0]).toMatchObject({
     provider: 'github', repositoryPath: registeredPath, connectionId,
@@ -811,7 +818,7 @@ test('CustomField를 선택해 준비하면 import 요청과 deploy scope가 같
 
   await page.getByRole('button', { name: 'force-app 선택' }).click();
   await expect(page.locator('#deploy-scope')).toHaveValue('CustomField');
-  await expect(page.locator('#deploy-scope')).toHaveAttribute('readonly', '');
+  await expect(page.locator('#deploy-scope')).toBeEditable();
   await expect(metadataTypeInput).toHaveValue('CustomField');
   await expect(desiredSource.locator(`option[value="git-connection:${connectionId}"]`)).toHaveCount(1);
   await expect(desiredSource.locator('option')).toHaveCount(2);
@@ -822,14 +829,41 @@ test('지원하지 않는 metadata type은 Git source 준비를 비활성화한�
 
   await page.goto('http://127.0.0.1:27546/deploy');
   await page.getByLabel('DESIRED SOURCE 비교 소스').selectOption(`git-connection:${connectionId}`);
-  const metadataTypeInput = page.getByLabel('가져올 메타데이터 타입');
-  const prepareButton = page.getByRole('button', { name: '이 브랜치로 소스 준비' });
+  const metadataTypeInput = page.locator('#deploy-scope');
+  const prepareButton = page.getByRole('button', { name: '메타데이터 비교' });
   await page.getByLabel('브랜치 검색 및 선택').fill('release');
   await metadataTypeInput.fill('DefinitelyNotSalesforceMetadata');
   await expect(metadataTypeInput).toHaveValue('DefinitelyNotSalesforceMetadata');
   await expect(prepareButton).toBeDisabled();
   await metadataTypeInput.fill('ApexClass');
   await expect(prepareButton).toBeEnabled();
+});
+
+test('복수 프로젝트 루트 선택 중 타입을 잠그고 선택 후 비교와 다음 타입 준비를 이어간다', async ({ page }) => {
+  const fixture = await mockGitApis(page, {
+    initialConnections: [connection({ repositoryPath: 'acme/multi-project-type-lock' })],
+  });
+  const cancellations: string[] = [];
+  page.on('request', (request) => { if (request.url().endsWith('/cancel')) cancellations.push(request.url()); });
+  await page.goto('http://127.0.0.1:27546/deploy');
+  await page.getByLabel('DESIRED SOURCE 비교 소스').selectOption(`git-connection:${connectionId}`);
+  const metadataTypeInput = page.locator('#deploy-scope');
+  for (const [index, type] of ['ApexClass', 'CustomField', 'CustomObject'].entries()) {
+    await metadataTypeInput.fill(type);
+    await page.getByRole('button', { name: '메타데이터 비교', exact: true }).click();
+    const root = page.getByRole('button', { name: 'force-app 선택', exact: true });
+    await expect(root).toBeVisible();
+    await expect(root).toBeEnabled();
+    await expect(metadataTypeInput).toBeDisabled();
+    await expect(metadataTypeInput).toHaveValue(type);
+    expect(fixture.importRequests).toHaveLength(index + 1);
+    await root.click();
+    await expect.poll(() => fixture.comparisonRequests.length).toBe(index + 1);
+    await expect(metadataTypeInput).toBeEnabled();
+  }
+  const inventory = await page.evaluate(async () => (await fetch('/api/v1/git/imports')).json()) as GitImportListResponse;
+  expect(inventory.imports.map((item) => item.status)).toEqual(['READY', 'READY', 'READY']);
+  expect(cancellations).toHaveLength(0);
 });
 
 test('metadata type 변경은 READY source를 무효화하고 다음 import에 새 타입을 사용한다', async ({ page }) => {
@@ -841,22 +875,22 @@ test('metadata type 변경은 READY source를 무효화하고 다음 import에 �
   await page.goto('http://127.0.0.1:27546/deploy');
   const desiredSource = page.getByLabel('DESIRED SOURCE 비교 소스');
   await desiredSource.selectOption(`git-connection:${connectionId}`);
-  const metadataTypeInput = page.getByLabel('가져올 메타데이터 타입');
+  const metadataTypeInput = page.locator('#deploy-scope');
   const branchInput = page.getByLabel('브랜치 검색 및 선택');
   await metadataTypeInput.fill('CustomField');
   await branchInput.fill('release');
-  const prepareButton = page.getByRole('button', { name: '이 브랜치로 소스 준비' });
+  const prepareButton = page.getByRole('button', { name: '메타데이터 비교' });
   await prepareButton.click();
   await expect.poll(() => fixture.importRequests.length).toBe(1);
   expect(fixture.importRequests[0]).toMatchObject({ metadataType: 'CustomField' });
   await page.getByRole('button', { name: 'force-app 선택' }).click();
   await expect(page.locator('#deploy-scope')).toHaveValue('CustomField');
-  await expect(page.locator('#deploy-scope')).toHaveAttribute('readonly', '');
+  await expect(page.locator('#deploy-scope')).toBeEditable();
 
   await metadataTypeInput.fill('ApexClass');
   await expect(metadataTypeInput).toHaveValue('ApexClass');
   await expect(page.getByRole('button', { name: 'force-app 선택' })).toHaveCount(0);
-  await expect(page.locator('#deploy-scope')).toBeDisabled();
+  await expect(page.locator('#deploy-scope')).toBeEditable();
   await expect(prepareButton).toBeEnabled();
   await prepareButton.click();
   await expect.poll(() => fixture.importRequests.length).toBe(2);
@@ -885,7 +919,7 @@ test('READY 준비를 반복해도 virtual source 하나를 유지하고 reload 
   await desiredSource.selectOption(virtualSourceId);
   await expect(page.getByLabel('브랜치 검색 및 선택')).toHaveValue('main');
   await page.getByLabel('브랜치 검색 및 선택').fill('release');
-  await page.getByRole('button', { name: '이 브랜치로 소스 준비' }).click();
+  await page.getByRole('button', { name: '메타데이터 비교' }).click();
   await expect(page.getByRole('button', { name: 'force-app 선택' })).toBeVisible();
   await page.getByRole('button', { name: 'force-app 선택' }).click();
   await expect(desiredSource).toHaveValue(virtualSourceId);
@@ -893,7 +927,7 @@ test('READY 준비를 반복해도 virtual source 하나를 유지하고 reload 
   await expect(desiredSource.locator('option[value^="git:"]')).toHaveCount(0);
   await expect(desiredSource.locator('option')).toHaveCount(2);
 
-  await page.getByRole('button', { name: '이 브랜치로 소스 준비' }).click();
+  await page.getByRole('button', { name: '메타데이터 비교' }).click();
   await expect(page.getByRole('button', { name: 'force-app 선택' })).toBeVisible();
   await page.getByRole('button', { name: 'force-app 선택' }).click();
   await expect.poll(() => fixture.importRequests.length).toBe(2);
@@ -908,29 +942,22 @@ test('READY 준비를 반복해도 virtual source 하나를 유지하고 reload 
   await expect(page.getByLabel('DESIRED SOURCE 비교 소스').locator('option[value^="git:"]')).toHaveCount(0);
 });
 
-test('READY Git source는 metadata와 source-only comparison에 내부 source id를 사용한다', async ({ page }) => {
-  const registeredPath = 'acme/registered-project';
+test('Git source-only 다운로드는 클릭할 때 가져오고 내부 source id로 이어진다', async ({ page }) => {
   const fixture = await mockGitApis(page, {
-    initialConnections: [connection({ repositoryPath: registeredPath, displayName: '등록 저장소 연결' })],
+    initialConnections: [connection({ repositoryPath: 'acme/registered-project' })],
   });
-
   await page.goto('http://127.0.0.1:27546/deploy');
-  const desiredSource = page.getByLabel('DESIRED SOURCE 비교 소스');
-  const virtualSourceId = `git-connection:${connectionId}`;
-  await desiredSource.selectOption(virtualSourceId);
+  await page.getByLabel('DESIRED SOURCE 비교 소스').selectOption(`git-connection:${connectionId}`);
   await page.getByLabel('브랜치 검색 및 선택').fill('release');
-  await page.getByRole('button', { name: '이 브랜치로 소스 준비' }).click();
-  await page.getByRole('button', { name: 'force-app 선택' }).click();
-  await expect(desiredSource).toHaveValue(virtualSourceId);
-  const internalSourceId = `git:${importId}`;
   await expect(page.locator('#deploy-scope')).toHaveValue('ApexClass');
-  await expect(page.locator('#deploy-scope')).toHaveAttribute('readonly', '');
-
+  expect(fixture.importRequests).toHaveLength(0);
   await page.getByRole('checkbox', { name: '현재 타입 비교 실행' }).uncheck();
   await page.getByRole('button', { name: '메타데이터 다운로드' }).click();
+  await page.getByRole('button', { name: 'force-app 선택' }).click();
   await expect.poll(() => fixture.comparisonRequests.length).toBe(1);
-  expect(fixture.comparisonRequests[0]).toMatchObject({ rightSourceId: internalSourceId, sourceOnly: true });
+  expect(fixture.comparisonRequests[0]).toMatchObject({ rightSourceId: `git:${importId}`, sourceOnly: true });
   expect(fixture.comparisonRequests[0]).not.toHaveProperty('leftSourceId');
+  expect(fixture.importRequests).toHaveLength(1);
 });
 
 test('Git import 실패 alert 뒤 같은 branch를 재시도할 수 있다', async ({ page }) => {
@@ -943,15 +970,36 @@ test('Git import 실패 alert 뒤 같은 branch를 재시도할 수 있다', asy
   await page.goto('http://127.0.0.1:27546/deploy');
   await page.getByLabel('DESIRED SOURCE 비교 소스').selectOption(`git-connection:${connectionId}`);
   await page.getByLabel('브랜치 검색 및 선택').fill('release');
-  await page.getByRole('button', { name: '이 브랜치로 소스 준비' }).click();
+  await page.getByRole('button', { name: '메타데이터 비교' }).click();
   await expect(page.getByRole('alert')).toContainText('기준 커밋이 변경되었습니다');
   expect(fixture.importRequests).toHaveLength(0);
 
   fixture.setCreateError(undefined);
-  await page.getByRole('button', { name: '이 브랜치로 소스 준비' }).click();
+  await page.getByRole('button', { name: '메타데이터 비교' }).click();
   await expect(page.getByRole('button', { name: 'force-app 선택' })).toBeVisible();
   expect(fixture.importRequests).toHaveLength(1);
   expect(fixture.importRequests[0]).toMatchObject({ metadataType: 'ApexClass' });
+});
+
+test('Git을 다시 가져오는 동안 이전 비교의 배포 선택을 비운다', async ({ page }) => {
+  const fixture = await mockGitApis(page, {
+    initialConnections: [connection({ repositoryPath: 'acme/registered-project' })],
+    comparisonComponents: [{ key: 'ApexClass:Hello', type: 'ApexClass', fullName: 'Hello', status: 'ADDED', files: [] }],
+  });
+  await page.goto('http://127.0.0.1:27546/deploy');
+  await page.getByLabel('DESIRED SOURCE 비교 소스').selectOption(`git-connection:${connectionId}`);
+  await page.getByRole('button', { name: '메타데이터 비교', exact: true }).click();
+  await page.getByRole('button', { name: 'force-app 선택' }).click();
+  await page.getByRole('checkbox', { name: 'Hello 배포 대상으로 선택' }).check();
+  await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeEnabled();
+  fixture.setImportDelay(250);
+  await page.getByRole('button', { name: '메타데이터 비교', exact: true }).click();
+  await expect.poll(() => fixture.importRequests.length).toBe(2);
+  await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '배포 대상 실제 배포' })).toBeDisabled();
+  await page.getByRole('button', { name: 'force-app 선택' }).click();
+  await expect.poll(() => fixture.comparisonRequests.length).toBe(2);
+  await expect(page.getByRole('checkbox', { name: 'Hello 배포 대상으로 선택' })).not.toBeChecked();
 });
 
 test('source를 바꾼 뒤 늦게 끝난 import 응답을 버리고 중복 준비를 잠근다', async ({ page }) => {
@@ -969,9 +1017,9 @@ test('source를 바꾼 뒤 늦게 끝난 import 응답을 버리고 중복 준�
   const desiredSource = page.getByLabel('DESIRED SOURCE 비교 소스');
   await desiredSource.selectOption(`git-connection:${connectionId}`);
   await page.getByLabel('브랜치 검색 및 선택').fill('release');
-  const prepareButton = page.getByRole('button', { name: '이 브랜치로 소스 준비' });
+  const prepareButton = page.getByRole('button', { name: '메타데이터 비교' });
   await prepareButton.click();
-  await expect(page.getByRole('button', { name: '브랜치 소스 준비 중……' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '메타데이터 비교 중……' })).toBeDisabled();
   await expect.poll(() => fixture.importRequests.length).toBe(1);
   expect(fixture.importRequests[0]).toMatchObject({ metadataType: 'ApexClass' });
   await desiredSource.selectOption(`git:${historicalImportId}`);
@@ -1295,12 +1343,12 @@ test('Org→Git target은 비교 전용으로 제한하고 org로 바꾸면 배�
   await target.selectOption(`git-connection:${targetConnectionId}`);
 
   const targetBranch = page.getByLabel('타겟 브랜치 검색 및 선택');
-  const targetMetadata = page.getByLabel('타겟 메타데이터 타입');
+  const targetMetadata = page.locator('#deploy-scope');
   await expect(targetBranch).toBeVisible();
   await expect(targetBranch).toHaveValue('main');
   await targetBranch.fill('release');
   await expect(targetMetadata).toHaveValue('ApexClass');
-  await page.getByRole('button', { name: '이 브랜치로 타겟 준비' }).click();
+  await page.getByRole('button', { name: '메타데이터 비교' }).click();
   await expect(page.getByRole('button', { name: /force-app 선택/u })).toBeVisible();
   await page.getByRole('button', { name: /force-app 선택/u }).click();
   await expect(target).toHaveValue(`git-connection:${targetConnectionId}`);
@@ -1308,7 +1356,6 @@ test('Org→Git target은 비교 전용으로 제한하고 org로 바꾸면 배�
   await expect(page.locator('p[role="status"]').filter({ hasText: 'Git 타겟은 비교 전용입니다' })).toBeVisible();
   const compare = page.getByRole('button', { name: '메타데이터 비교' });
   await expect(compare).toBeEnabled();
-  await compare.click();
   await expect(page.getByRole('heading', { name: /owner\/project → source|source → owner\/project/u })).toBeVisible();
   expect(fixture.comparisonRequests[0]).toMatchObject({ leftSourceId: `git:${importId}`, rightSourceId: sourceOrg.id });
   const componentCheckbox = page.getByRole('checkbox', { name: 'Hello 배포 대상으로 선택' });
@@ -1350,8 +1397,8 @@ test('Git→Git source와 target은 브랜치·metadata type을 각각 준비하
   await target.selectOption(`git-connection:${targetConnectionId}`);
   const sourceBranch = page.getByLabel('브랜치 검색 및 선택', { exact: true });
   const targetBranch = page.getByLabel('타겟 브랜치 검색 및 선택');
-  const sourceMetadata = page.getByLabel('가져올 메타데이터 타입');
-  const targetMetadata = page.getByLabel('타겟 메타데이터 타입');
+  const sourceMetadata = page.locator('#deploy-scope');
+  const targetMetadata = page.locator('#deploy-scope');
   await expect(sourceBranch).toHaveValue('main');
   await expect(targetBranch).toHaveValue('main');
   const sourceOptionCount = await desiredSource.locator('option').count();
@@ -1361,10 +1408,9 @@ test('Git→Git source와 target은 브랜치·metadata type을 각각 준비하
   await expect(sourceMetadata).toHaveValue('ApexClass');
   await expect(targetMetadata).toHaveValue('ApexClass');
 
-  await page.getByRole('button', { name: '이 브랜치로 소스 준비' }).click();
+  await page.getByRole('button', { name: '메타데이터 비교' }).click();
   await expect(page.getByRole('button', { name: /force-app 선택/u })).toBeVisible();
   await page.getByRole('button', { name: /force-app 선택/u }).click();
-  await page.getByRole('button', { name: '이 브랜치로 타겟 준비' }).click();
   await expect(page.getByRole('button', { name: /force-app 선택/u })).toBeVisible();
   await page.getByRole('button', { name: /force-app 선택/u }).click();
   await expect.poll(() => fixture.importRequests.length).toBe(2);
@@ -1373,20 +1419,21 @@ test('Git→Git source와 target은 브랜치·metadata type을 각각 준비하
   await expect(target.locator('option')).toHaveCount(targetOptionCount);
   await expect(page.locator('p[role="status"]').filter({ hasText: 'Git 타겟은 비교 전용입니다' })).toBeVisible();
 
-  await page.getByRole('button', { name: '메타데이터 비교' }).click();
+  await expect.poll(() => fixture.comparisonRequests.length).toBe(1);
   expect(fixture.comparisonRequests[0]).toMatchObject({ leftSourceId: `git:${secondImportId}`, rightSourceId: `git:${importId}` });
   await expect(page.getByRole('checkbox', { name: 'Hello 배포 대상으로 선택' })).toBeDisabled();
   await expect(page.getByRole('button', { name: /Dry-run/ })).toBeDisabled();
   await expect(page.getByRole('button', { name: /실제 배포/ })).toBeDisabled();
 
   await targetMetadata.fill('CustomField');
-  await page.getByRole('button', { name: '이 브랜치로 타겟 준비' }).click();
-  await expect(page.getByRole('button', { name: /force-app 선택/u })).toBeVisible();
+  expect(fixture.importRequests).toHaveLength(2);
+  await page.getByRole('button', { name: '메타데이터 비교' }).click();
   await page.getByRole('button', { name: /force-app 선택/u }).click();
-  await expect.poll(() => fixture.importRequests.length).toBe(3);
-  await expect(page.getByText('소스와 타겟의 Git 메타데이터 타입을 동일하게 선택하고 다시 준비하세요.', { exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: '메타데이터 비교' })).toBeDisabled();
-  expect(fixture.importRequests.at(-1)).toMatchObject({ metadataType: 'CustomField' });
+  await expect.poll(() => fixture.importRequests.length).toBe(4);
+  await page.getByRole('button', { name: /force-app 선택/u }).click();
+  await expect.poll(() => fixture.comparisonRequests.length).toBe(2);
+  expect(fixture.importRequests.slice(2).map((request) => request.metadataType)).toEqual(['CustomField', 'CustomField']);
+  await expect(page.locator('#deploy-scope')).toBeEditable();
 });
 
 test('타겟 Git 브랜치를 바꾼 뒤 늦게 끝난 준비 응답을 버리고 최신 요청만 반영한다', async ({ page }) => {
@@ -1406,14 +1453,14 @@ test('타겟 Git 브랜치를 바꾼 뒤 늦게 끝난 준비 응답을 버리�
   const targetBranch = page.getByLabel('타겟 브랜치 검색 및 선택');
   await expect(targetBranch).toHaveValue('main');
   await targetBranch.fill('release');
-  await page.getByRole('button', { name: '이 브랜치로 타겟 준비' }).click();
+  await page.getByRole('button', { name: '메타데이터 비교' }).click();
   await expect.poll(() => fixture.importRequests.length).toBe(1);
   const target = page.getByLabel('TARGET 비교 소스');
   await target.selectOption(targetSource.id);
   await target.selectOption(`git-connection:${targetConnectionId}`);
   const latestTargetBranch = page.getByLabel('타겟 브랜치 검색 및 선택');
   await expect(latestTargetBranch).toHaveValue('main');
-  await page.getByRole('button', { name: '이 브랜치로 타겟 준비' }).click();
+  await page.getByRole('button', { name: '메타데이터 비교' }).click();
   await expect.poll(() => fixture.importRequests.length).toBe(2);
   await expect(page.getByRole('button', { name: /force-app 선택/u })).toBeVisible();
   await page.getByRole('button', { name: /force-app 선택/u }).click();

@@ -213,6 +213,11 @@ describe('Git PAT/API token 연결 라우트', { timeout: 30_000 }, () => {
     const fixture = await createFixture();
     try {
       const owner = await bootstrap(fixture.server);
+      const missingPath = await fixture.server.inject({ method: 'POST', url: '/api/v1/git/connections', headers: headers(owner),
+        payload: { provider: 'gitlab', token: 'fixture-token', repositoryPath: 'https://gitlab.hmc.co.kr' } });
+      expect(missingPath.statusCode).toBe(400);
+      expect(missingPath.json()).toMatchObject({ error: { code: 'GIT_REPOSITORY_PATH_REQUIRED', message: expect.stringContaining('그룹/저장소') } });
+      expect(fixture.remoteCalls).toEqual([]);
       const inputs = [
         { provider: 'github', token: 'github_pat_11AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', repositoryPath: 'https://github.com/acme/github-project.git' },
         { provider: 'gitlab', token: 'glpat-AAAAAAAAAAAAAAAAAAAA', repositoryPath: 'https://gitlab.com/group/project.git' },

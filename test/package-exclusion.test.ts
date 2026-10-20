@@ -28,7 +28,7 @@ describe('installed package exclusion', () => {
     expect(result).toEqual({ namespaces: ['other', 'pkg'], unnamespacedPackages: ['Unlocked'] });
   });
 
-  it('selects one package by ID and rejects unknown, unnamespaced and shared-namespace packages', async () => {
+  it('selects one package by ID and requires component loading for ambiguous namespaces', async () => {
     const sources = [{ kind: 'org' as const, alias: 'left', displayName: 'left' },
       { kind: 'org' as const, alias: 'right', displayName: 'right' }];
     const client = { runJson: async () => ({ result: [
@@ -43,15 +43,31 @@ describe('installed package exclusion', () => {
     expect(packages.find((entry) => entry.id === '033000000000001')).toMatchObject({ orgAliases: ['left', 'right'] });
     expect(await resolvePackageExclusion(sources, client, process.cwd(), undefined, ['033000000000002']))
       .toEqual({ namespaces: ['second'], unnamespacedPackages: [], selectedPackages: [{ id: '033000000000002', name: 'Second' }] });
-    for (const id of ['033000000000099', '033000000000003', '033000000000004']) {
-      await expect(resolvePackageExclusion(sources, client, process.cwd(), undefined, [id]))
+    await expect(resolvePackageExclusion(sources, client, process.cwd(), undefined, ['033000000000099']))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    for (const id of ['033000000000003', '033000000000004']) {
+      await expect(resolvePackageExclusion(sources, client, process.cwd(), undefined, [id], async () => undefined))
         .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+      const loaded = await resolvePackageExclusion(sources, client, process.cwd(), undefined, [id],
+        async (_entry, alias) => [{ type: 'ApexClass', fullName: `Owned_${alias}` }]);
+      expect(loaded).toMatchObject({ namespaces: [], unnamespacedPackages: [],
+        componentKeys: ['ApexClass:Owned_left', 'ApexClass:Owned_right'] });
     }
     expect(validateExcludedPackageIds(['033000000000002', '033000000000001', '033000000000002']))
       .toEqual(['033000000000001', '033000000000002']);
     for (const value of ['033000000000001', ['bad'], [null], Array(201).fill('033000000000001')]) {
       expect(() => validateExcludedPackageIds(value)).toThrow();
     }
+  });
+
+  it('skips component resolution for unique namespaces even when a cached resolver is available', async () => {
+    const sources = [{ kind: 'org' as const, alias: 'dev', displayName: 'dev' }];
+    const result = await resolvePackageExclusion(sources, { async runJson() { return { result: [
+      { SubscriberPackageId: '033000000000001', SubscriberPackageName: 'Unique', SubscriberPackageNamespace: 'unique' },
+    ] }; } }, process.cwd(), undefined, ['033000000000001'], async () => {
+      throw new Error('unique namespace should not resolve components');
+    });
+    expect(result).toEqual({ namespaces: ['unique'], unnamespacedPackages: [], selectedPackages: [{ id: '033000000000001', name: 'Unique' }] });
   });
 
   it.each([{}, { result: {} }, { result: [{}] }, { result: [{ SubscriberPackageName: 'Broken', SubscriberPackageNamespace: '*' }] }])(
@@ -66,6 +82,30 @@ describe('installed package exclusion', () => {
       .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     await expect(resolvePackageExclusion([{ kind: 'org', alias: 'org', displayName: 'org' }],
       { runJson: async () => { throw new Error('permission denied'); } }, process.cwd())).rejects.toThrow('permission denied');
+  });
+
+  it('retrieves one shared-namespace package and keeps its sibling package in the comparison', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-shared-package-'));
+    directories.push(root);
+    const packageRoot = path.join(root, 'snapshot');
+    await writeFixtureFiles(packageRoot, { 'classes/shared__First.cls': 'first', 'classes/shared__Second.cls': 'second', 'classes/Local.cls': 'local' });
+    const sources = [{ kind: 'org' as const, alias: 'dev', displayName: 'dev' }];
+    const exclusion = await resolvePackageExclusion(sources, { async runJson(args) {
+      if (args[0] === 'package') return { result: [
+        { SubscriberPackageId: '033000000000001', SubscriberPackageName: 'First', SubscriberPackageNamespace: 'shared' },
+        { SubscriberPackageId: '033000000000002', SubscriberPackageName: 'Second', SubscriberPackageNamespace: 'shared' },
+      ] };
+      expect(args[args.indexOf('--package-name') + 1]).toBe('First');
+      await writeFixtureFiles(path.join(args[args.indexOf('--target-metadata-dir') + 1]!, 'First'), {
+        'package.xml': '<Package><types><members>shared__First</members><name>ApexClass</name></types></Package>',
+      });
+      return { result: { success: true } };
+    } }, root, undefined, ['033000000000001']);
+    expect(exclusion).toMatchObject({ namespaces: [], componentKeys: ['ApexClass:shared__First'] });
+    const snapshot: MetadataSnapshot = { source: sources[0]!, packageRoot, manifestPath: 'package.xml', manifestSha256: 'same', payloadSha256: 'raw', createdAt: '' };
+    const result = await compareSnapshots(snapshot, snapshot, { packageExclusion: exclusion });
+    expect(result.components.map((component) => component.fullName).sort()).toEqual(['Local', 'shared__Second']);
+    expect(result.packageExclusion?.excludedComponents).toBe(1);
   });
 
   it.each([
@@ -107,6 +147,11 @@ describe('installed package exclusion', () => {
     expect(excluded.packageExclusion?.excludedComponents).toBe(3);
     expect(excluded.warnings.join('\n')).toContain('네임스페이스가 없어 제외하지 않은 패키지: Unlocked');
     expect(excluded.components[0]?.key).toBe('ApexClass:Local');
+    const exact = await compareSnapshots(snapshot(left), snapshot(right), {
+      packageExclusion: { namespaces: [], unnamespacedPackages: [], componentKeys: ['ApexClass:pkg__Shared', 'ApexClass:Local'] },
+    });
+    expect(exact.components.map((component) => component.fullName).sort()).toEqual(['pkg__LeftOnly', 'pkg__RightOnly']);
+    expect(exact.packageExclusion?.excludedComponents).toBe(2);
     expect(await readFile(path.join(right, 'classes/pkg__Shared.cls'), 'utf8')).toBe('new package');
     await writeFixtureFiles(right, { 'classes/SecondLocal.cls': 'keep' });
     const inventory = await compareSnapshots(snapshot(left), snapshot(right), {

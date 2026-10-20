@@ -4,7 +4,9 @@
 
 ## 웹 UI와 SQLite 상태 저장소
 
-웹 UI는 사용자·권한·배포 승인·작업 상태와 감사 로그를 SQLite에 저장한다. 기본 위치는 현재 프로젝트의 `.sfud/sfud.db`다. 비교 리포트와 원본 실행 결과는 기존 `.sfud/runs` 파일 구조를 유지하며 데이터베이스에는 인덱스와 무결성 정보만 기록한다.
+웹 UI는 사용자·권한·배포 승인·작업 상태와 감사 로그를 SQLite에 저장한다. 새 환경의 첫 실행과 `sfud init`은 개인용 `LOCAL=true`와 홈 설정 기준 `data/local`을 준비한다. 기본 DB는 `~/.sfud/data/local/sfud.db`이며 Windows는 `%USERPROFILE%\.sfud\data\local\sfud.db`다. 기존 설정과 명시한 환경변수는 보존한다. 이전 팀 서버의 기본 경로는 실행 폴더의 `.sfud/sfud.db`다. 비교 리포트와 원본 실행 결과는 데이터 디렉터리의 `runs` 파일 구조를 유지하며 데이터베이스에는 인덱스와 무결성 정보만 기록한다.
+
+같은 OS 계정과 설정 경로의 다른 터미널에서 `sfud stop`으로 정상 종료한다. 여러 UI가 있으면 `sfud stop --port 27546`처럼 선택한다. 종료 후 npm을 재설치해도 홈 설정·암호화 키·DB는 보존된다. 이전 버전에서 시작한 UI는 실행 터미널에서 `Ctrl+C`로 종료한다.
 
 프런트엔드는 `deployment`, `comparison`, `auth`, `admin` 기능 단위로 나뉜다. 배포 요청과 응답은
 TypeBox schema를 서버와 UI가 공유하며 Fastify와 브라우저 API client가 같은 계약을 runtime에

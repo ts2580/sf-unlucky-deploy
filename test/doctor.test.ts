@@ -23,6 +23,19 @@ async function database(directory: string, mode: string) {
 }
 
 describe('doctor 읽기 전용 진단', () => {
+  it('새 환경에서는 첫 UI와 같은 개인용·고정 경로를 미리 보여주고 기존 빈 설정은 보존한다', async () => {
+    const { root, environment } = await fixture();
+    const fresh = { SFUD_CONFIG_DIR: environment.SFUD_CONFIG_DIR };
+    const report = await runDoctor({}, fresh, tools, root);
+    expect(report.configuration).toMatchObject({ mode: 'personal', dataDirectory: path.join(fresh.SFUD_CONFIG_DIR, 'data', 'local') });
+    expect(await readdir(root)).toEqual([]);
+    const team = await runDoctor({}, { ...fresh, LOCAL: 'false' }, tools, root);
+    expect(team.configuration?.mode).toBe('multiuser');
+    await initializeHomeConfiguration({ ...fresh, LOCAL: 'false' }, 'automatic');
+    const existing = await runDoctor({}, fresh, tools, root);
+    expect(existing.configuration?.mode).toBe('multiuser');
+    expect(existing.configuration?.dataDirectory).toBe(path.join(root, '.sfud'));
+  }, timeout);
   it('없는 홈·데이터 경로는 생성하지 않고 URL은 기본 점검하지 않는다', async () => {
     const { root, environment } = await fixture();
     const reach = vi.fn(async () => true);

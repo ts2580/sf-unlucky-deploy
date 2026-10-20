@@ -894,6 +894,16 @@ const MIGRATIONS: Migration[] = [
     INSERT INTO deployment_draft_revision(id, revision) VALUES(1, 0);`,
   },
 
+  {
+    version: 49,
+    name: 'git_private_ip_check_setting',
+    sql: `CREATE TABLE git_network_settings (
+      id INTEGER PRIMARY KEY CHECK(id = 1),
+      check_private_ips INTEGER NOT NULL DEFAULT 0 CHECK(check_private_ips IN (0, 1)),
+      updated_by TEXT REFERENCES users(id), updated_at TEXT
+    ) STRICT;
+    INSERT INTO git_network_settings(id, check_private_ips) VALUES(1, 0);`,
+  },
 ];
 
 export async function applyMigrations(

@@ -39,6 +39,11 @@ export async function runDoctor(options: { checkUrl?: boolean } = {}, environmen
   try {
     const snapshot = await readHomeConfigurationSnapshot(environment);
     effective = snapshot.environment;
+    // Preview first-run defaults without creating configuration or a key.
+    if (snapshot.originals.config === undefined && (environment.LOCAL ?? 'true') === 'true') {
+      effective.LOCAL ??= 'true';
+      effective.SFUD_DATA_DIR ??= path.join(snapshot.paths.directory, 'data', 'local');
+    }
     add('home-files', snapshot.originals.config === undefined ? 'warn' : 'pass', snapshot.originals.config === undefined ? '홈 설정 파일이 없습니다. 현재 환경과 기본값만 점검했습니다.' : '홈 설정 형식·소유자·파일 권한 검사를 통과했습니다.');
     add('secret-file', snapshot.originals.secrets === undefined ? 'warn' : 'pass', snapshot.originals.secrets === undefined ? '비밀 설정 파일이 없습니다.' : '비밀 설정 형식·권한 검사를 통과했습니다.');
     const settings = resolveRuntimeSettings(effective, cwd);

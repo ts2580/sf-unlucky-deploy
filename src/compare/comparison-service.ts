@@ -203,6 +203,8 @@ export class ComparisonService {
       }, {
         cwd: job.projectPath,
         sfClient: this.sfClient,
+        packageComponentResolver: (entry, alias, cwd, requestSignal, required) =>
+          this.workspace.resolvePackageComponents(entry, alias, cwd, requestSignal, required, job.createdBy),
         stdout: () => undefined,
         signal,
         ...(job.sourceSnapshot === undefined ? {} : { sourceSnapshot: job.sourceSnapshot }),

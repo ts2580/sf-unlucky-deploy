@@ -2,28 +2,52 @@ import { SfudError } from '../core/errors.js';
 import type { SfClient } from '../salesforce/sf-client.js';
 import type { SourceSpec } from '../sources/source-spec.js';
 import type { InstalledPackage } from '../api/package-contracts.js';
+import type { PackageComponent } from '../api/package-contracts.js';
+import { retrievePackageComponents } from './package-components.js';
 
 export interface PackageExclusion {
   selectedPackages?: Array<{ id: string; name: string }>;
   namespaces: string[];
   unnamespacedPackages: string[];
+  componentKeys?: string[];
 }
+
+export type PackageComponentResolver = (
+  entry: InstalledPackage, alias: string, cwd: string, signal: AbortSignal | undefined, required: boolean,
+) => Promise<PackageComponent[] | undefined>;
 
 export async function resolvePackageExclusion(
   sources: readonly SourceSpec[], sfClient: SfClient, cwd: string, signal?: AbortSignal, selectedIds?: readonly string[],
+  componentResolver?: PackageComponentResolver,
 ): Promise<PackageExclusion> {
   const packages = await listInstalledPackages(sources, sfClient, cwd, signal);
   const selected = selectedIds === undefined ? packages : selectedIds.map((id) => {
     const entry = packages.find((candidate) => candidate.id === id);
     if (entry === undefined) throw new SfudError('INVALID_ARGUMENT', `선택한 패키지가 현재 Org에 설치되어 있지 않습니다: ${id}`);
-    if (entry.exclusionUnavailableReason !== undefined) {
-      throw new SfudError('INVALID_ARGUMENT', `${entry.name}: ${entry.exclusionUnavailableReason}`);
-    }
     return entry;
   });
+  const exactIds = new Set<string>();
+  const componentKeys = new Set<string>();
+  if (selectedIds !== undefined) for (const entry of selected) {
+    // Unique namespaces need no component lookup; shared namespaces keep exact membership.
+    if (entry.namespace !== null && !packages.some((other) => other.id !== entry.id && other.namespace === entry.namespace)) continue;
+    const required = entry.exclusionUnavailableReason !== undefined;
+    if (packages.some((other) => other.id !== entry.id && other.name === entry.name
+      && other.orgAliases.some((alias) => entry.orgAliases.includes(alias)))) {
+      throw new SfudError('INVALID_ARGUMENT', '같은 이름의 패키지가 있어 구성요소를 안전하게 구분할 수 없습니다.');
+    }
+    const results = await Promise.all(entry.orgAliases.map((alias) => componentResolver === undefined
+      ? required ? retrievePackageComponents(entry.name, alias, sfClient, cwd, signal) : undefined
+      : componentResolver(entry, alias, cwd, signal, required)));
+    if (results.every((components) => components !== undefined)) {
+      exactIds.add(entry.id);
+      for (const components of results) for (const component of components!) componentKeys.add(`${component.type}:${component.fullName}`);
+    } else if (required) throw new SfudError('INVALID_ARGUMENT', `${entry.name}: 패키지 구성요소를 먼저 로딩하세요.`);
+  }
   return {
-    namespaces: [...new Set(selected.flatMap((entry) => entry.namespace === null ? [] : [entry.namespace]))].sort(),
-    unnamespacedPackages: selected.filter((entry) => entry.namespace === null).map((entry) => entry.name).sort(),
+    namespaces: [...new Set(selected.flatMap((entry) => entry.namespace === null || exactIds.has(entry.id) ? [] : [entry.namespace]))].sort(),
+    unnamespacedPackages: selected.filter((entry) => entry.namespace === null && !exactIds.has(entry.id)).map((entry) => entry.name).sort(),
+    ...(exactIds.size === 0 ? {} : { componentKeys: [...componentKeys].sort() }),
     ...(selectedIds === undefined ? {} : { selectedPackages: selected.map(({ id, name }) => ({ id, name })) }),
   };
 }
@@ -71,14 +95,20 @@ export async function listInstalledPackages(
       packages.set(entry.SubscriberPackageId, {
         id: entry.SubscriberPackageId, name: entry.SubscriberPackageName, namespace: normalizedNamespace,
         orgAliases: [...(existing?.orgAliases ?? []), alias].sort(),
+        ...(entry.SubscriberPackageVersionId === undefined && existing?.versionIds === undefined ? {} : {
+          versionIds: { ...existing?.versionIds,
+            ...(typeof entry.SubscriberPackageVersionId === 'string' && /^04t[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/u.test(entry.SubscriberPackageVersionId)
+              ? { [alias]: entry.SubscriberPackageVersionId } : {}),
+          },
+        }),
       });
     }
   }
   const result = [...packages.values()];
   for (const entry of result) {
-    if (entry.namespace === null) entry.exclusionUnavailableReason = '네임스페이스가 없어 개별 제외를 지원하지 않습니다.';
+    if (entry.namespace === null) entry.exclusionUnavailableReason = '개별 제외하려면 패키지 로딩으로 구성요소를 조회하세요.';
     else if (result.some((other) => other.id !== entry.id && other.namespace === entry.namespace)) {
-      entry.exclusionUnavailableReason = '다른 패키지와 네임스페이스를 공유하여 개별 제외를 지원하지 않습니다.';
+      entry.exclusionUnavailableReason = '네임스페이스를 공유합니다. 패키지 로딩으로 구성요소를 조회하세요.';
     }
   }
   return result.sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));

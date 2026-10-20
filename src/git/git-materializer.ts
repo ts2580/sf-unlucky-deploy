@@ -102,7 +102,12 @@ export class GitMaterializer {
       if (options.signal?.aborted) throw new GitError('IMPORT_CANCELLED');
       return { checksum: hash.digest('hex'), fileCount: entries.length, sizeBytes, manifests };
     } catch (error) {
-      await rm(destination, { recursive: true, force: true });
+      try { await rm(destination, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
+      catch {
+        process.emitWarning(`Git 가져오기 실패 후 프로젝트 폴더를 정리하지 못했습니다. 작업 종료 후 삭제해 주세요: ${destination}`, {
+          code: 'SFUD_GIT_MATERIALIZATION_CLEANUP_FAILED',
+        });
+      }
       throw error;
     }
   }
