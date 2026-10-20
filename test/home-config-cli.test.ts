@@ -65,7 +65,7 @@ describe('홈 설정 CLI 실행 경계', () => {
   }, process.platform === 'win32' ? 180_000 : 40_000);
   it('첫 UI 실행에서 자동 생성하고 환경변수·기존 설정을 보존하며 도움말과 경로 조회는 생성하지 않는다', async () => {
     const { cwd, environment, configFile } = await fixture();
-    for (const args of [['--version'], ['ui', '--help'], ['config', 'path']]) {
+    for (const args of [['--version'], ['ui', '--help'], ['stop', '--help'], ['stop'], ['init', '--help'], ['config', 'path']]) {
       expect(await run(args, cwd, environment)).toMatchObject({ code: 0, stderr: '' });
       await expect(lstat(path.dirname(configFile))).rejects.toMatchObject({ code: 'ENOENT' });
     }
@@ -103,6 +103,15 @@ describe('홈 설정 CLI 실행 경계', () => {
     expect((await run(['config', 'init'], cwd, environment)).code).toBe(2);
     expect(await readFile(configFile, 'utf8')).toBe(original);
     expect(await readFile(secretsFile, 'utf8')).toBe(originalSecrets);
+  }, CLI_TEST_TIMEOUT_MS);
+
+  it('init 간편 명령도 개인용 기본 설정과 키를 생성한다', async () => {
+    const { cwd, environment, configFile } = await fixture();
+    const initialized = await run(['init'], cwd, environment);
+    expect(initialized).toMatchObject({ code: 0, stderr: '' });
+    expect(initialized.stdout).toContain('LOCAL=true');
+    expect(JSON.parse(await readFile(configFile, 'utf8'))).toMatchObject({ env: { LOCAL: 'true', SFUD_DATA_DIR: 'data/local' } });
+    expect(parseEnv(await readFile(path.join(path.dirname(configFile), 'secrets.env'), 'utf8')).SFUD_TOKEN_SECRET).toMatch(/^[0-9a-f-]{36}$/u);
   }, CLI_TEST_TIMEOUT_MS);
 
   it('옵션 값으로 받은 --help/-h가 설정 검사를 우회하지 않고 실제 도움말은 비밀 파일을 읽지 않는다', async () => {

@@ -5,6 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import { SfudError } from '../../core/errors.js';
 import { createWebServer } from './app.js';
 import type { GitHostPolicy } from '../../git/git-network.js';
+import { startUiControl } from './ui-control.js';
 
 export const DEFAULT_UI_HOST = '127.0.0.1';
 export const DEFAULT_UI_PORT = 27_546;
@@ -22,13 +23,17 @@ export interface StartWebUiOptions {
   publicOrigin?: string;
   gitHostPolicy?: GitHostPolicy;
   logger?: boolean;
+  controlDirectory?: string;
 }
 
 export async function startWebUi(options: StartWebUiOptions): Promise<FastifyInstance> {
   const effectiveOptions = options;
   assertSafeBind(effectiveOptions.host, effectiveOptions.allowRemote);
   const app = await createWebServer(effectiveOptions);
+  let control: Awaited<ReturnType<typeof startUiControl>> | undefined;
+  let closing = false;
   const closeOnSignal = () => {
+    closing = true;
     void app.close().catch((error: unknown) => {
       const reason = error instanceof Error ? error.message : String(error);
       process.stderr.write(`[UI_SHUTDOWN_FAILED] ${reason}\n`);
@@ -38,12 +43,25 @@ export async function startWebUi(options: StartWebUiOptions): Promise<FastifyIns
   process.once('SIGINT', closeOnSignal);
   process.once('SIGTERM', closeOnSignal);
   app.addHook('onClose', async () => {
+    closing = true;
+    await control?.dispose();
     process.removeListener('SIGINT', closeOnSignal);
     process.removeListener('SIGTERM', closeOnSignal);
   });
 
   try {
     const address = await app.listen({ host: effectiveOptions.host, port: effectiveOptions.port });
+    if (closing) throw new Error('시작 중 UI 종료가 요청되었습니다.');
+    if (options.controlDirectory !== undefined) {
+      const bound = app.server.address();
+      if (bound === null || typeof bound === 'string') throw new Error('UI 수신 포트를 확인하지 못했습니다.');
+      control = await startUiControl(options.controlDirectory,
+        { host: options.host, port: bound.port }, async () => { await app.close(); });
+      if (closing) {
+        await control.dispose();
+        throw new Error('시작 중 UI 종료가 요청되었습니다.');
+      }
+    }
     process.stdout.write(`sfud UI: ${address}\n`);
     if (await app.sfudRuntime.auth.isSetupRequired()) {
       process.stdout.write(`sfud 최초 관리자 설정 코드: ${app.sfudRuntime.auth.getBootstrapToken()}\n`);

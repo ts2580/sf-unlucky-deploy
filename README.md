@@ -16,7 +16,6 @@ Node.js **22.19.0 이상**, npm, Salesforce CLI v2(`sf`), Git이 필요하다.
 
 ```bash
 npm install --global --allow-scripts=sqlite3 @trstyq/sf-unlucky-deploy@latest
-sfud config init
 sfud ui --project "/path/to/salesforce-project"
 ```
 
@@ -30,7 +29,7 @@ npm install --global --ignore-scripts @trstyq/sf-unlucky-deploy@win32-x64
 
 `--project`에는 `sfdx-project.json`이 있는 로컬 Salesforce DX 프로젝트 경로를 넣는다. 여러 프로젝트는 옵션을 반복해서 등록하고, Git과 Org만 사용할 때는 생략한다.
 
-처음 설치한 환경에서 `config init`은 개인용 `LOCAL=true` 설정을 만들고, 같은 폴더의 `secrets.env`에 UUID 기반 `SFUD_TOKEN_SECRET`을 자동 저장한다. 기존 비밀값 파일이나 환경변수의 암호화 키 설정은 보존한다. 브라우저에서 **http://127.0.0.1:27546**을 열면 별도 SFUD 로그인 없이 사용할 수 있다. 기존 설정이 있으면 덮어쓰지 않으므로 `sfud config path`로 위치를 확인하고 `env.LOCAL`을 `"true"`로 설정한다.
+새 환경에서는 설치 후 첫 `sfud ui` 실행과 `sfud init`(또는 `sfud config init`)이 같은 개인용 기본 설정을 만든다. `LOCAL=true`, 설정 폴더 기준 `data/local`, UUID 기반 `SFUD_TOKEN_SECRET`을 준비한다. npm 설치 단계에서는 설정을 만들지 않으므로 Windows 번들의 `--ignore-scripts` 설치에서도 첫 실행 시 적용된다. 브라우저에서 **http://127.0.0.1:27546**을 열면 별도 SFUD 로그인 없이 사용할 수 있다. 기존 설정·비밀값 파일과 환경변수는 보존하며, 명시한 `LOCAL=false`도 유지한다. 설정 위치는 `sfud config path`로 확인한다. 기존 팀 서버를 개인용으로 전환할 때는 기존 DB를 재사용하지 말고 별도 데이터 경로를 사용한다.
 
 Org도 비교하려면 UI를 실행한 OS 계정에서 미리 로그인하거나 **인증 관리 → Salesforce**에서 연결한다.
 
@@ -40,6 +39,20 @@ sf org login web --alias prod
 ```
 
 팀 서버에서 여러 사용자가 접속할 경우에는 [웹 UI와 서버 운영](https://github.com/ts2580/sf-unlucky-deploy/blob/main/docs/web-ui.md)의 `LOCAL=false` 설정을 따른다.
+
+### 종료와 업데이트
+
+다른 터미널에서도 같은 OS 계정과 설정 경로로 실행한 UI를 정상 종료할 수 있다.
+
+```bash
+sfud stop
+# 여러 UI가 실행 중이면 포트로 선택
+sfud stop --port 27546
+```
+
+진행 중인 작업과 DB 연결 정리가 끝나면 종료 성공을 표시한다. 실행 중인 UI가 없으면 그대로 끝난다. 이 명령을 지원하지 않는 이전 버전은 실행 터미널에서 `Ctrl+C`로 종료한다. Windows에서는 UI 종료 후 설치 명령을 다시 실행한다.
+
+npm 재설치는 홈 설정·암호화 키·DB를 삭제하지 않는다. 새 기본 DB는 Linux/macOS의 `~/.sfud/data/local/sfud.db`, Windows의 `%USERPROFILE%\.sfud\data\local\sfud.db`에 저장한다. `SFUD_CONFIG_DIR`나 데이터 경로를 바꾸면 다른 DB를 열며, 기존 설정이 실행 폴더 기준 경로를 사용했다면 실행 폴더도 확인한다.
 
 ### 원격 리눅스에서 혼자 사용하기
 
@@ -60,7 +73,7 @@ Salesforce **새 연결**의 브라우저 OAuth 콜백은 별도 SSH 포트 전�
 
 ### 1. Git 저장소 연결
 
-새 환경에서 `sfud config init`으로 초기화했다면 Git 토큰 저장용 암호화 키도 준비된다. 기존 설치에 키가 없는 경우에는 `sfud config path`에 표시되는 설정 파일과 같은 디렉터리의 `secrets.env`에 `SFUD_TOKEN_SECRET`을 설정한다. 아래 명령으로 임의 문자열을 만들고, 결과를 `SFUD_TOKEN_SECRET=<생성한 값>` 형태로 저장한 뒤 UI를 재시작한다. 기존 키가 있다면 그대로 사용한다.
+새 환경의 `sfud init` 또는 첫 `sfud ui` 실행에서 Git 토큰 저장용 암호화 키도 준비된다. 기존 설치에 키가 없는 경우에는 `sfud config path`에 표시되는 설정 파일과 같은 디렉터리의 `secrets.env`에 `SFUD_TOKEN_SECRET`을 설정한다. 아래 명령으로 임의 문자열을 만들고, 결과를 `SFUD_TOKEN_SECRET=<생성한 값>` 형태로 저장한 뒤 UI를 재시작한다. 기존 키가 있다면 그대로 사용한다.
 
 ```bash
 node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
@@ -95,9 +108,11 @@ Git을 Target으로 선택하면 비교 전용으로 동작한다. Git으로 커
 ### 설치 패키지를 비교에서 제외하기
 
 1. Source 또는 Target에 Salesforce Org를 선택하고, **2번 메타데이터 검색 → 비교에서 제외할 설치 패키지**를 펼친다.
-2. **패키지 로딩**을 누르면 패키지별 구성요소를 자동 조회한다. 스피너와 현재 처리 중인 패키지를 표시하며, 조회에는 수 분이 걸릴 수 있다.
-3. 완료된 패키지의 **구성요소 보기**를 열어 유형·이름을 확인하거나 검색하고, 제외할 패키지만 선택한다. 기본값은 선택 없음이다.
+2. **패키지 로딩**을 누르면 네임스페이스가 없거나 공유하는 패키지만 구성요소를 조회한다. 고유 네임스페이스 패키지는 조회 없이 바로 제외할 수 있다. 최대 3개 패키지를 병렬로 조회하고 스피너·처리 건수·조회 중인 패키지 이름을 표시한다. 조회에는 수 분이 걸릴 수 있다.
+3. 완료된 패키지의 **구성요소 보기**를 열어 유형·이름을 확인하거나 검색하고, 제외할 패키지만 선택한다. **전체 제외** 슬라이더로 모든 패키지를 선택·해제할 수 있다. 필요한 구성요소가 아직 없으면 먼저 병렬 로딩하며, 모두 성공했을 때 전체 선택을 적용한다. 기본값은 선택 없음이다.
 4. **메타데이터 비교**를 실행하면 선택한 패키지의 구성요소를 Source·Target 양쪽의 비교 결과에서 제외한다. 원본 파일과 배포 파일은 수정하지 않는다.
+
+펼친 패키지 목록은 가로 전체 너비를 사용하고, 화면 폭에 따라 여러 열로 표시해 불필요한 세로 공백을 줄인다.
 
 **네임스페이스가 없는 패키지와 네임스페이스를 공유하는 패키지도 구성요소 로딩에 성공하면 각각 제외할 수 있다.**
 실패한 패키지에는 사유를 표시하며 **패키지 로딩**을 다시 눌러 재시도한다. Salesforce가 구성요소 조회를 지원하지 않거나,
@@ -105,7 +120,7 @@ Git을 Target으로 선택하면 비교 전용으로 동작한다. Git으로 커
 비교 시 설치 여부와 버전을 다시 확인하고, Org 선택이 바뀌면 기존 제외 선택을 초기화한다.
 Org를 바꾸거나 화면을 떠나면 진행 중인 패키지 구성요소 조회도 취소한다. 전체·`CustomObject` 비교에서는
 부모 XML 안의 선택한 패키지 필드·규칙·레이블만 비교에서 제외하고 나머지 부모 내용을 보존한다.
-구성요소를 로딩하지 않은 고유 네임스페이스 패키지는 기존 네임스페이스 기준 제외도 사용할 수 있다.
+고유 네임스페이스 패키지는 구성요소 로딩을 생략하고 네임스페이스로 제외한다.
 
 ## 확인한 변경을 Org에 배포하기
 

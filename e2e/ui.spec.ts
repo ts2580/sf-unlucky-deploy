@@ -126,6 +126,11 @@ test('큰 화면의 작업 공간을 활용하고 좁은 화면에서는 패널�
       expect(Math.abs(metrics.source.y - metrics.search.y)).toBeLessThan(2);
       expect(metrics.search.x).toBeGreaterThanOrEqual(metrics.source.right);
       expect(metrics.summary.width).toBeGreaterThanOrEqual(350);
+      const sourceSpacing = await page.locator('.deploy-source-panel').evaluate((panel) => {
+        const last = panel.lastElementChild!;
+        return panel.getBoundingClientRect().bottom - last.getBoundingClientRect().bottom - parseFloat(getComputedStyle(panel).paddingBottom);
+      });
+      expect(sourceSpacing, `${width}px 소스 패널 하단 공백`).toBeLessThan(2);
     } else {
       expect(metrics.search.y).toBeGreaterThanOrEqual(metrics.source.bottom);
     }
@@ -429,7 +434,8 @@ test('설치 패키지 목록 오류와 토글 선택 및 해제를 표시한다
   await packages.getByRole('checkbox', { name: 'Installed CRM 비교에서 제외' }).check();
   await expect(page.locator('.package-exclusions-summary')).toContainText('1개 패키지 제외');
   await packages.getByRole('checkbox', { name: 'Installed CRM 비교에서 제외' }).uncheck();
-  await expect(packages.getByRole('checkbox')).not.toBeChecked();
+  await expect(packages.getByRole('checkbox', { name: 'Installed CRM 비교에서 제외' })).not.toBeChecked();
+  await expect(packages.getByRole('checkbox', { name: '전체 패키지 제외', exact: true })).not.toBeChecked();
   await page.setViewportSize({ width: 320, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.reload();

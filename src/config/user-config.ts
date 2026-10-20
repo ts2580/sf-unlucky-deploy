@@ -313,6 +313,7 @@ export async function initializeHomeConfiguration(
   let createdDirectory = false;
   let createdDirectoryIdentity: { dev: number; ino: number } | undefined;
   let createdFile: { path: string; dev: number; ino: number } | undefined;
+  let releaseLock: (() => Promise<void>) | undefined;
   try {
     try {
       await lstat(paths.directory);
@@ -334,13 +335,18 @@ export async function initializeHomeConfiguration(
       }
     }
     const directoryIdentity = await assertSecureDirectory(paths.directory);
+    releaseLock = await lockInitialization(paths, directoryIdentity);
     if (mode === 'automatic') {
       try {
         await lstat(paths.configFile);
+        // Existing installations keep their key (or lack of one). Only the
+        // initializer that creates config.json may generate a new token.
+        await createSecretsTemplateIfMissing(paths, directoryIdentity);
         return paths;
       } catch (error) { if (!isNotFound(error)) throw error; }
     }
-    const initialEnvironment = mode === 'personal' ? { LOCAL: 'true', SFUD_DATA_DIR: 'data/local' } : {};
+    const personal = mode === 'personal' || environment.LOCAL === undefined || environment.LOCAL === 'true';
+    const initialEnvironment = personal ? { LOCAL: 'true', SFUD_DATA_DIR: 'data/local' } : {};
     const document = `${JSON.stringify({ version: 1, env: initialEnvironment }, null, 2)}\n`;
     const handle = await open(paths.configFile, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollowFlag(), 0o600);
     try {
@@ -357,7 +363,7 @@ export async function initializeHomeConfiguration(
     }
     const hasTokenKey = ['SFUD_TOKEN_SECRET', 'SFUD_GIT_TOKEN_SECRET', 'SFUD_SF_TOKEN_SECRET', 'SFUD_GIT_TOKEN_KEY_FILE']
       .some((key) => environment[key] !== undefined);
-    await createSecretsTemplateIfMissing(paths, directoryIdentity, mode === 'personal' && !hasTokenKey);
+    await createSecretsTemplateIfMissing(paths, directoryIdentity, personal && !hasTokenKey);
     return paths;
   } catch (error) {
     if (createdFile !== undefined) {
@@ -378,6 +384,31 @@ export async function initializeHomeConfiguration(
     }
     if (error instanceof SfudError) throw error;
     throw configurationError('홈 설정을 안전하게 초기화하지 못했습니다.');
+  } finally { await releaseLock?.(); }
+}
+
+async function lockInitialization(paths: HomeConfigPaths, directoryIdentity: { dev: number; ino: number }): Promise<() => Promise<void>> {
+  // Share setup's writer lock so no reader can observe the initializer's
+  // config before its secrets have been completely written and secured.
+  const lockPath = path.join(paths.directory, '.setup.lock');
+  const deadline = Date.now() + 30_000;
+  while (true) {
+    await verifyDirectoryIdentity(paths.directory, directoryIdentity);
+    let handle;
+    try { handle = await open(lockPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollowFlag(), 0o600); }
+    catch (error) {
+      if (!isExists(error)) throw error;
+      if (Date.now() >= deadline) throw configurationError('다른 설정 초기화 또는 저장이 진행 중입니다. 완료 후 다시 실행하세요.');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      continue;
+    }
+    const identity = await handle.stat();
+    return async () => {
+      await handle.close();
+      await verifyDirectoryIdentity(paths.directory, directoryIdentity);
+      try { await verifySamePath(lockPath, identity); await unlink(lockPath); }
+      catch (error) { if (!isNotFound(error)) throw error; }
+    };
   }
 }
 
@@ -426,6 +457,31 @@ export function shouldLoadHomeConfiguration(commandName: string): boolean {
 
 export async function inspectSecureConfigurationFile(filePath: string, maxBytes: number): Promise<void> {
   await readSecureFile(filePath, maxBytes);
+}
+
+/** Runtime capabilities use the same owner, link and ACL checks as home secrets. */
+export async function readPrivateHomeFile(filePath: string, maxBytes: number): Promise<Buffer> {
+  await assertSecureDirectory(path.dirname(filePath));
+  return (await readSecureFile(filePath, maxBytes))!;
+}
+
+export async function createPrivateHomeFile(filePath: string, contents: string): Promise<{ dev: number; ino: number }> {
+  const directory = path.dirname(filePath);
+  const identity = await assertSecureDirectory(directory);
+  const handle = await open(filePath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollowFlag(), 0o600);
+  const stat = await handle.stat();
+  try {
+    await handle.writeFile(contents, 'utf8');
+    await handle.sync();
+    await verifyWindowsAcl(filePath, 'set');
+    await verifySamePath(filePath, stat);
+    await verifyDirectoryIdentity(directory, identity);
+    return { dev: stat.dev, ino: stat.ino };
+  } catch (error) {
+    await handle.close();
+    try { await verifySamePath(filePath, stat); await unlink(filePath); } catch { /* keep replaced files */ }
+    throw error;
+  } finally { await handle.close(); }
 }
 
 async function assertSecureDirectory(directory: string): Promise<{ dev: number; ino: number }> {
