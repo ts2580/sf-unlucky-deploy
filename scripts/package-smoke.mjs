@@ -6,6 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { assertPackedMetadataMatches, assertSafeArchive, verifyUiAssetPaths } from './package-archive-policy.mjs';
 import { WINDOWS_BUNDLE, assertWindowsBundleArchive } from './windows-bundle-policy.mjs';
+import { packageSmokeCapabilities } from './package-smoke-policy.mjs';
 
 const root = process.cwd();
 const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'sfud-package-smoke-'));
@@ -52,6 +53,7 @@ try {
   if (actualVersion !== expectedCliVersion) throw new Error(`설치된 sfud 버전 불일치: ${actualVersion} != ${expectedCliVersion}`);
   const help = await run(executable, ['--help'], temporaryDirectory);
   if (!help.includes('Salesforce')) throw new Error('설치된 CLI 도움말이 예상한 명령 출력을 반환하지 않습니다.');
+  const capabilities = packageSmokeCapabilities(help, !windowsBundle || expectedCliVersion === sourcePackageJson.version);
 
   let configDirectory = path.join(temporaryDirectory, 'home-config');
   const env = { ...selectedNodeEnvironment(), SFUD_CONFIG_DIR: configDirectory };
@@ -78,9 +80,12 @@ try {
     throw new Error('홈 설정 초기화 재실행이 기존 설정을 덮어썼습니다.');
   }
 
-  // Exercise first-run defaults independently of explicit init.
-  configDirectory = path.join(temporaryDirectory, 'automatic-config');
-  env.SFUD_CONFIG_DIR = configDirectory;
+  // Historical pinned bundles use their supported explicit-init path. Current
+  // artifacts must independently exercise the new automatic defaults.
+  if (capabilities.automaticPersonalConfig) {
+    configDirectory = path.join(temporaryDirectory, 'automatic-config');
+    env.SFUD_CONFIG_DIR = configDirectory;
+  }
   const dataDirectory = path.join(configDirectory, 'data', 'local');
   const port = await reservePort();
   const url = `http://127.0.0.1:${port}`;
@@ -90,7 +95,8 @@ try {
   if (health.version !== actualVersion || health.service !== 'sfud-ui') throw new Error(`UI health 응답 불일치: ${JSON.stringify(health)}`);
   const automaticConfig = await readFile(path.join(configDirectory, 'config.json'));
   const automaticSecrets = await readFile(path.join(configDirectory, 'secrets.env'));
-  if (!automaticConfig.equals(originalConfig) || !/^SFUD_TOKEN_SECRET=[0-9a-f-]{36}$/mu.test(automaticSecrets.toString('utf8'))) {
+  if (capabilities.automaticPersonalConfig
+    && (!automaticConfig.equals(originalConfig) || !/^SFUD_TOKEN_SECRET=[0-9a-f-]{36}$/mu.test(automaticSecrets.toString('utf8')))) {
     throw new Error('설치 후 첫 실행의 개인 설정·암호화 키가 init 기본값과 일치하지 않습니다.');
   }
   const html = await (await globalThis.fetch(url)).text();
@@ -102,7 +108,7 @@ try {
     const body = await response.arrayBuffer();
     if (!response.ok || body.byteLength === 0) throw new Error(`UI 자산 로딩 실패: ${asset}`);
   }
-  await stopInstalledUi(ui, executable, port, env);
+  await stopInstalledUi(ui, executable, port, env, capabilities.stop);
   ui = undefined;
 
   const databasePath = path.join(dataDirectory, 'sfud.db');
@@ -124,9 +130,9 @@ try {
     || !(await readFile(path.join(configDirectory, 'secrets.env'))).equals(automaticSecrets)) {
     throw new Error('UI 재시작 중 기존 설정 또는 암호화 키가 변경되었습니다.');
   }
-  await stopInstalledUi(ui, executable, restartPort, env);
+  await stopInstalledUi(ui, executable, restartPort, env, capabilities.stop);
   ui = undefined;
-  successMessage = `package smoke PASS: ${path.basename(tarball)} · sfud ${actualVersion} · Node ${process.version} · home-config/init/automatic/no-overwrite/UI/stop/SQLite/cross-cwd-restart`;
+  successMessage = `package smoke PASS: ${path.basename(tarball)} · sfud ${actualVersion} · Node ${process.version} · home-config/init/${capabilities.automaticPersonalConfig ? 'automatic' : 'explicit'}/no-overwrite/UI/${capabilities.stop ? 'stop' : 'signal-stop'}/SQLite/cross-cwd-restart`;
 } finally {
   if (ui !== undefined) await stopUi(ui).catch(() => {});
   await rm(temporaryDirectory, { recursive: true, force: true });
@@ -209,7 +215,8 @@ async function stopUi(child) {
   globalThis.clearTimeout(timer);
 }
 
-async function stopInstalledUi(child, executable, port, env) {
+async function stopInstalledUi(child, executable, port, env, supportsStop) {
+  if (!supportsStop) { await stopUi(child); return; }
   await run(executable, ['stop', '--port', String(port)], temporaryDirectory, env);
   if (child.exitCode !== null || child.signalCode !== null) {
     if (child.exitCode !== 0) throw new Error('stop 후 UI가 정상 종료하지 않았습니다.');
