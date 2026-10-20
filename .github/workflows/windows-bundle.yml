@@ -63,6 +63,7 @@ jobs:
           SOURCE_TARBALL: ${{ steps.bundle.outputs.source_tarball }}
         run: node scripts/package-windows-bundle.mjs "source-release/$env:SOURCE_TARBALL" windows-release
       - uses: actions/upload-artifact@v6
+        if: always()
         with:
           name: windows-sqlite-bundle
           path: windows-release/
