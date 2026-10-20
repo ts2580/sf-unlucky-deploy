@@ -97,7 +97,10 @@ try {
   const assets = verifyUiAssetPaths(html, entries);
   for (const asset of assets) {
     const response = await globalThis.fetch(new URL(asset, url));
-    if (!response.ok || Number(response.headers.get('content-length') ?? '0') === 0) throw new Error(`UI 자산 로딩 실패: ${asset}`);
+    // Drain the response before stopping the server. An unread asset can keep
+    // its HTTP response active under Windows socket backpressure.
+    const body = await response.arrayBuffer();
+    if (!response.ok || body.byteLength === 0) throw new Error(`UI 자산 로딩 실패: ${asset}`);
   }
   await stopInstalledUi(ui, executable, port, env);
   ui = undefined;
