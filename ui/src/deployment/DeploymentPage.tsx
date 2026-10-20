@@ -13,7 +13,7 @@ import { gitMetadataTypes } from '../../../src/api/git-metadata-types';
 import type { WorkspaceSource, WorkspaceResponse } from '../../../src/api/workspace-contracts';
 import type { GitConnection } from '../../../src/api/git-contracts';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { GitBranchSource } from './GitBranchSource';
+import { GitBranchSource, type GitBranchSourceHandle } from './GitBranchSource';
 import { createIdempotencyKey } from './idempotency-key';
 
 import { useWorkflowUpdates } from './useWorkflowUpdates';
@@ -71,7 +71,7 @@ interface DeploymentCartItem {
   fullName: string;
 }
 
-function defaultMetadataType(metadataTypes: MetadataTypeOption[]): string {
+function defaultMetadataType(metadataTypes: readonly MetadataTypeOption[]): string {
   return metadataTypes.find((metadataType) => metadataType.name === 'ApexClass')?.name
     ?? metadataTypes[0]?.name
     ?? '';
@@ -123,11 +123,15 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const [targetOrgId, setTargetOrgId] = useState('');
   const [targetSelectionId, setTargetSelectionId] = useState('');
   const [preparedGitTarget, setPreparedGitTarget] = useState<WorkspaceSource>();
-  const updateGitSource = useCallback((source: WorkspaceSource | undefined) => {
-    setPreparedGitSource(source); setSourceId(source?.id ?? '');
+  const [sourceBranchKey, setSourceBranchKey] = useState<string>();
+  const [targetBranchKey, setTargetBranchKey] = useState<string>();
+  const sourceBranchRef = useRef<GitBranchSourceHandle>(null);
+  const targetBranchRef = useRef<GitBranchSourceHandle>(null);
+  const updateSourceBranch = useCallback((key: string | undefined) => {
+    setSourceBranchKey(key); setPreparedGitSource(undefined); setSourceId('');
   }, []);
-  const updateGitTarget = useCallback((source: WorkspaceSource | undefined) => {
-    setPreparedGitTarget(source); setTargetOrgId(source?.id ?? '');
+  const updateTargetBranch = useCallback((key: string | undefined) => {
+    setTargetBranchKey(key); setPreparedGitTarget(undefined); setTargetOrgId('');
   }, []);
   const [testLevel, setTestLevel] = useState('auto');
   const [tests, setTests] = useState('');
@@ -163,14 +167,18 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const dryRunJobSelectionKeyRef = useRef<string | null>(null);
   const selectedGitConnection = gitConnections.find((connection) => `${gitConnectionSourcePrefix}${connection.id}` === sourceSelectionId);
   const selectedTargetGitConnection = gitConnections.find((connection) => `${gitConnectionSourcePrefix}${connection.id}` === targetSelectionId);
-  const sourceMetadataType = (preparedGitSource?.id === sourceId ? preparedGitSource : workspace?.sources.find((entry) => entry.id === sourceId))?.provenance?.metadataType;
+  const sourceReady = selectedGitConnection !== undefined ? sourceBranchKey !== undefined : sourceId.length > 0;
+  const targetReady = selectedTargetGitConnection !== undefined ? targetBranchKey !== undefined : targetOrgId.length > 0;
+  const sourceMetadataType = selectedGitConnection !== undefined ? undefined : (preparedGitSource?.id === sourceId ? preparedGitSource : workspace?.sources.find((entry) => entry.id === sourceId))?.provenance?.metadataType;
   const target = preparedGitTarget?.id === targetOrgId ? preparedGitTarget : workspace?.sources.find((entry) => entry.id === targetOrgId);
   const comparisonOnly = targetSelectionId.startsWith(gitConnectionSourcePrefix) || target?.location === 'git';
   const deploymentTargetValid = target?.kind === 'org' && targetOrgId.startsWith('org:') && !comparisonOnly;
-  const targetMetadataType = compareCurrentType ? target?.provenance?.metadataType : undefined;
+  const targetMetadataType = compareCurrentType && selectedTargetGitConnection === undefined ? target?.provenance?.metadataType : undefined;
   const preparedMetadataType = sourceMetadataType ?? targetMetadataType;
   const metadataScopeMismatch = sourceMetadataType !== undefined && targetMetadataType !== undefined && sourceMetadataType !== targetMetadataType;
-  const metadataTypeSourceIds = compareCurrentType ? `${sourceId},${targetOrgId}` : sourceId;
+  const metadataSourceId = selectedGitConnection !== undefined ? sourceSelectionId : sourceId;
+  const metadataTargetId = selectedTargetGitConnection !== undefined ? targetSelectionId : targetOrgId;
+  const metadataTypeSourceIds = compareCurrentType ? `${metadataSourceId},${metadataTargetId}` : metadataSourceId;
   const packageOrgIds = [...new Set([sourceId, ...(compareCurrentType ? [targetOrgId] : [])]
     .filter((id) => id.startsWith('org:')))].sort().join(',');
   const excludedPackageIds = packageSelection.sourceIds === packageOrgIds ? packageSelection.ids : [];
@@ -181,8 +189,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   }, [packageOrgIds]);
   const workflowSelectionKey = [
     sourceSelectionId, targetSelectionId,
-    sourceId,
-    compareCurrentType ? targetOrgId : '',
+    selectedGitConnection !== undefined ? sourceBranchKey ?? '' : sourceId,
+    compareCurrentType ? selectedTargetGitConnection !== undefined ? targetBranchKey ?? '' : targetOrgId : '',
     scopeQuery,
     compareCurrentType ? showIdentical : false,
     compareCurrentType,
@@ -255,7 +263,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       setMetadataTypesStatus('ready'); setMetadataTypesError('');
       return;
     }
-    if (sourceId.length === 0 || (compareCurrentType && targetOrgId.length === 0)) {
+    if (!sourceReady || (compareCurrentType && !targetReady)) {
       setMetadataTypes([]);
       setScopeQuery('');
       setMetadataTypesStatus('idle');
@@ -271,6 +279,12 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     if (preparedType !== undefined) {
       setMetadataTypes(gitMetadataTypes.filter((entry) => entry.name === preparedType));
       setScopeQuery(preparedType); setMetadataTypesStatus('ready'); setMetadataTypesError('');
+      return;
+    }
+    if (selectedGitConnection !== undefined || (compareCurrentType && selectedTargetGitConnection !== undefined)) {
+      setMetadataTypes([...gitMetadataTypes]);
+      setScopeQuery((current) => current || defaultMetadataType(gitMetadataTypes));
+      setMetadataTypesStatus('ready'); setMetadataTypesError('');
       return;
     }
     const controller = new AbortController();
@@ -297,7 +311,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
           : 'Salesforce metadata type을 불러오지 못했습니다.');
       });
     return () => controller.abort();
-  }, [compareCurrentType, metadataTypeSourceIds, sourceId, targetOrgId, preparedMetadataType, metadataScopeMismatch, loadedPreset, savedComponentMode]);
+  }, [compareCurrentType, metadataTypeSourceIds, sourceId, targetOrgId, sourceReady, targetReady, selectedGitConnection, selectedTargetGitConnection, preparedMetadataType, metadataScopeMismatch, loadedPreset, savedComponentMode]);
 
   useEffect(() => { setPresetSourceReview(null); }, [preparedActionKey]);
 
@@ -458,9 +472,15 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   };
 
   const runComparison = async () => {
-    if ((savedComponentMode ? deploymentCart.length === 0 : selectedMetadataType === undefined || metadataScopeMismatch) || !sourceId || (compareCurrentType && !targetOrgId)) return;
+    if (comparing || (savedComponentMode ? deploymentCart.length === 0 : selectedMetadataType === undefined || metadataScopeMismatch) || !sourceReady || (compareCurrentType && !targetReady)) return;
     setError('');
     setComparisonJob(null);
+    if (loadedPreset === null && selectedGitConnection !== undefined) {
+      setPreparedGitSource(undefined); setSourceId(''); setDeploymentCart([]);
+    }
+    if (loadedPreset === null && compareCurrentType && selectedTargetGitConnection !== undefined) {
+      setPreparedGitTarget(undefined); setTargetOrgId('');
+    }
     if (loadedPreset === null && sourceId.startsWith('git-registered:')) {
       setDeploymentCart((current) => current.filter((component) => component.type === selectedMetadataType!.name));
     }
@@ -472,7 +492,24 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     comparisonJobSelectionKeyRef.current = selectionKey;
     try {
       if (loadedPreset !== null && comparisonJob !== null) actionSourcesRef.current = null;
-      const action = loadedPreset === null ? { sourceId, targetId: targetOrgId } : await prepareActionSources(controller.signal);
+      let action;
+      if (loadedPreset === null) {
+        let comparisonSourceId = sourceId;
+        let comparisonTargetId = targetOrgId;
+        const assertCurrent = () => {
+          if (controller.signal.aborted || workflowSelectionKeyRef.current !== selectionKey) throw new DOMException('Aborted', 'AbortError');
+        };
+        if (selectedGitConnection !== undefined) {
+          const prepared = await sourceBranchRef.current!.prepare(selectedMetadataType!.name, controller.signal);
+          assertCurrent(); setPreparedGitSource(prepared); setSourceId(prepared.id); comparisonSourceId = prepared.id;
+        }
+        if (compareCurrentType && selectedTargetGitConnection !== undefined) {
+          const prepared = await targetBranchRef.current!.prepare(selectedMetadataType!.name, controller.signal);
+          assertCurrent(); setPreparedGitTarget(prepared); setTargetOrgId(prepared.id); comparisonTargetId = prepared.id;
+        }
+        assertCurrent();
+        action = { sourceId: comparisonSourceId, targetId: comparisonTargetId };
+      } else action = await prepareActionSources(controller.signal);
       if (action === null) return;
       const data = await startComparison({
           ...(!savedComponentMode ? { scope: 'all' as const, metadataType: selectedMetadataType!.name }
@@ -490,7 +527,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       ) return;
       setComparisonJob(data.job);
     } catch (caught) {
-      if (caught instanceof DOMException && caught.name === 'AbortError') return;
+      if (controller.signal.aborted || workflowSelectionKeyRef.current !== selectionKey || caught instanceof DOMException && caught.name === 'AbortError') return;
       setError(caught instanceof Error ? caught.message : '비교를 시작하지 못했습니다.');
     } finally {
       if (comparisonRequestControllerRef.current === controller) {
@@ -739,6 +776,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     setLoadedPreset(null); actionSourcesRef.current = null;
     presetMetadataTypeRef.current = undefined; presetPackageIdsRef.current = undefined;
     setTargetSelectionId(value);
+    setTargetBranchKey(undefined);
     setTargetOrgId(value.startsWith(gitConnectionSourcePrefix) ? '' : value);
     setPreparedGitTarget(undefined);
     if (value.startsWith(gitConnectionSourcePrefix) || workspace?.sources.find((entry) => entry.id === value)?.location === 'git') {
@@ -749,6 +787,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     setLoadedPreset(null); actionSourcesRef.current = null;
     presetMetadataTypeRef.current = undefined; presetPackageIdsRef.current = undefined;
     setSourceSelectionId(value);
+    setSourceBranchKey(undefined);
     setSourceId(value.startsWith(gitConnectionSourcePrefix) ? '' : value);
     setPreparedGitSource(undefined);
   };
@@ -815,9 +854,9 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
             </div>
             {gitConnectionsLoading && <p className="settings-message">등록된 Git 저장소를 불러오는 중……</p>}
             {selectedGitConnection !== undefined && <GitBranchSource key={`source-${selectedGitConnection.id}`}
-              connection={selectedGitConnection} side="source" canRun={canRun} onSourceChange={updateGitSource} />}
+              ref={sourceBranchRef} connection={selectedGitConnection} side="source" canRun={canRun} metadataType={scopeQuery} onBranchChange={updateSourceBranch} />}
             {selectedTargetGitConnection !== undefined && <GitBranchSource key={`target-${selectedTargetGitConnection.id}`}
-              connection={selectedTargetGitConnection} side="target" canRun={canRun} onSourceChange={updateGitTarget} />}
+              ref={targetBranchRef} connection={selectedTargetGitConnection} side="target" canRun={canRun} metadataType={scopeQuery} onBranchChange={updateTargetBranch} />}
             {comparisonOnly && <p className="warning-note" role="status">Git 타겟은 비교 전용입니다. Dry-run과 배포는 Salesforce org를 타겟으로 선택해야 합니다.</p>}
           </section>
 
@@ -828,6 +867,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
                 <input id="deploy-scope" list="salesforce-deploy-metadata-types" value={scopeQuery} readOnly={preparedMetadataType !== undefined} onChange={(event) => {
                   if (loadedPreset !== null) presetMetadataTypeRef.current = { key: metadataTypeSourceIds, value: event.target.value };
                   setLoadedPreset(null); setScopeQuery(event.target.value);
+                  if (selectedGitConnection !== undefined) { setPreparedGitSource(undefined); setSourceId(''); }
+                  if (selectedTargetGitConnection !== undefined) { setPreparedGitTarget(undefined); setTargetOrgId(''); }
                 }} placeholder={metadataTypesLoading ? 'metadata type 불러오는 중…' : 'metadata type 검색'} autoComplete="off" disabled={metadataTypesStatus !== 'ready'} aria-invalid={metadataTypesInvalid ? true : undefined} aria-describedby="metadata-type-hint" />
                 <datalist id="salesforce-deploy-metadata-types">
                   {metadataTypes.map((entry) => <option key={entry.name} value={entry.name}>{entry.directoryName}</option>)}
@@ -843,7 +884,9 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
                     ? metadataTypesError
                     : scopeValid
                       ? preparedMetadataType !== undefined
-                        ? `${scopeQuery} 파일 준비 완료 · 다른 타입은 위에서 선택한 뒤 다시 가져오세요.`
+                        ? `${scopeQuery} 파일 준비 완료`
+                        : selectedGitConnection !== undefined || selectedTargetGitConnection !== undefined
+                          ? '타입을 선택하고 비교를 실행하면 선택한 Git 브랜치에서 코드를 가져옵니다.'
                         : `${metadataTypes.length}개 metadata type 검색 가능 · ${compareCurrentType ? 'source와 target의 합집합' : 'source 기준'}`
                       : metadataTypes.length === 0
                         ? '사용 가능한 Salesforce metadata type이 없습니다.'
@@ -859,7 +902,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
                 onChange={(ids) => setPackageSelection({ sourceIds: packageOrgIds, ids })} />}
             </div>
             <div className="comparison-run-actions">
-              <button className={`button button-primary comparison-run-button${comparing || metadataTypesLoading ? ' comparison-run-loading' : ''}`} type="button" onClick={() => void runComparison()} aria-busy={comparing || metadataTypesLoading} aria-describedby={metadataTypesLoading ? 'metadata-type-hint' : undefined} disabled={!canRun || comparing || workspace === null || (savedComponentMode ? deploymentCart.length === 0 : metadataTypesStatus !== 'ready' || !scopeValid) || !sourceId || (compareCurrentType && (!targetOrgId || sourceId === targetOrgId))}><Icon name={comparing || metadataTypesLoading ? 'refresh' : 'compare'} /><span>{metadataTypesLoading && !comparing ? '타입 불러오는 중…' : compareCurrentType && !comparisonLimitExceeded
+              <button className={`button button-primary comparison-run-button${comparing || metadataTypesLoading ? ' comparison-run-loading' : ''}`} type="button" onClick={() => void runComparison()} aria-busy={comparing || metadataTypesLoading} aria-describedby={metadataTypesLoading ? 'metadata-type-hint' : undefined} disabled={!canRun || comparing || workspace === null || (savedComponentMode ? deploymentCart.length === 0 : metadataTypesStatus !== 'ready' || !scopeValid) || !sourceReady || (compareCurrentType && (!targetReady || (!selectedGitConnection && !selectedTargetGitConnection && sourceId === targetOrgId)))}><Icon name={comparing || metadataTypesLoading ? 'refresh' : 'compare'} /><span>{metadataTypesLoading && !comparing ? '타입 불러오는 중…' : compareCurrentType && !comparisonLimitExceeded
                 ? comparing ? '메타데이터 비교 중……' : '메타데이터 비교'
                 : comparing ? '메타데이터 다운로드 중……' : '메타데이터 다운로드'}</span></button>
             </div>

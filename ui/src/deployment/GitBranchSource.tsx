@@ -1,145 +1,140 @@
-import { useEffect, useRef, useState } from 'react';
-import { gitMetadataTypes } from '../../../src/api/git-metadata-types';
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import type { GitConnection } from '../../../src/api/git-contracts';
 import type { GitImport, GitRefsResponse } from '../../../src/api/git-project-contracts';
 import type { WorkspaceSource } from '../../../src/api/workspace-contracts';
 import { createImport, errorMessage as gitErrorMessage, importById, inspect as inspectGitRepository,
   providerNames, refs as gitRefs, selectImportProject } from '../git/api';
+import { Icon } from '../components/Icon';
 
-// Each side owns its selection, import polling and generation guard. Remount
-// when changing repositories so a late response cannot replace another side.
-export function GitBranchSource({ connection: selectedGitConnection, side, canRun, onSourceChange }: {
-  connection: GitConnection; side: 'source' | 'target'; canRun: boolean;
-  onSourceChange: (source: WorkspaceSource | undefined) => void;
-}) {
-  const [gitBranches, setGitBranches] = useState<GitRefsResponse['refs']>([]);
-  const [gitBranchInput, setGitBranchInput] = useState('');
-  const [gitMetadataType, setGitMetadataType] = useState('ApexClass');
-  const selectedGitMetadataType = gitMetadataTypes.find((entry) => entry.name === gitMetadataType.trim());
-  const [gitBranchLoading, setGitBranchLoading] = useState(false);
-  const [gitBranchError, setGitBranchError] = useState('');
-  const [gitImport, setGitImport] = useState<GitImport>();
-  const [gitImportBusy, setGitImportBusy] = useState(false);
-  const gitSelectionVersion = useRef(0);
-  useEffect(() => () => { gitSelectionVersion.current++; }, []);
-  const selectedGitBranch = gitBranches.find((branch) => branch.name === gitBranchInput);
+export interface GitBranchSourceHandle {
+  prepare(metadataType: string, signal: AbortSignal): Promise<WorkspaceSource>;
+}
+
+function waitForPoll(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); };
+    const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, 1_000);
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) { signal.removeEventListener('abort', abort); abort(); }
+  });
+}
+
+// Branch selection only reads refs. The comparison action explicitly starts imports.
+export const GitBranchSource = forwardRef<GitBranchSourceHandle, {
+  connection: GitConnection; side: 'source' | 'target'; canRun: boolean; metadataType: string;
+  onBranchChange: (key: string | undefined) => void;
+}>(function GitBranchSource({ connection, side, canRun, metadataType, onBranchChange }, ref) {
+  const [branches, setBranches] = useState<GitRefsResponse['refs']>([]);
+  const [branchInput, setBranchInput] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [imported, setImported] = useState<GitImport>();
+  const [preparing, setPreparing] = useState(false);
+  const [selectingProject, setSelectingProject] = useState(false);
+  const version = useRef(0);
+  const preparationSignal = useRef<AbortSignal | undefined>(undefined);
+  const selectedBranch = branches.find((branch) => branch.name === branchInput);
   const branchOptionsId = side === 'source' ? 'git-branch-options' : 'target-git-branch-options';
-  const typeOptionsId = side === 'source' ? 'git-metadata-type-options' : 'target-git-metadata-type-options';
   const headingId = `${side}-git-branch-heading`;
+
   useEffect(() => {
-    if (selectedGitConnection === undefined) {
-      setGitBranches([]);
-      setGitBranchInput('');
-      setGitBranchLoading(false);
-      setGitBranchError('');
-      return;
-    }
     const controller = new AbortController();
-    const request = { provider: selectedGitConnection.provider, repositoryPath: selectedGitConnection.repositoryPath!, connectionId: selectedGitConnection.id };
-    const loadBranches = async () => {
-      setGitBranches([]); setGitBranchInput(''); setGitBranchError(''); setGitBranchLoading(true);
+    const request = { provider: connection.provider, repositoryPath: connection.repositoryPath!, connectionId: connection.id };
+    const load = async () => {
+      setBranches([]); setBranchInput(''); setError(''); setLoading(true);
       try {
         const repository = await inspectGitRepository(request, controller.signal);
-        const branches: GitRefsResponse['refs'] = [];
+        const all: GitRefsResponse['refs'] = [];
         const cursors = new Set<string>();
         let cursor: string | undefined;
         do {
           const page = await gitRefs({ ...request, kind: 'branch', ...(cursor === undefined ? {} : { cursor }) }, controller.signal);
-          branches.push(...page.refs);
-          cursor = page.nextCursor;
+          all.push(...page.refs); cursor = page.nextCursor;
           if (cursor !== undefined && (cursors.has(cursor) || cursors.size >= 100)) break;
           if (cursor !== undefined) cursors.add(cursor);
         } while (cursor !== undefined);
         if (controller.signal.aborted) return;
-        const unique = [...new Map(branches.map((branch) => [branch.name, branch])).values()]
+        const unique = [...new Map(all.map((branch) => [branch.name, branch])).values()]
           .sort((left, right) => left.name.localeCompare(right.name));
-        setGitBranches(unique);
-        setGitBranchInput(unique.find((branch) => branch.name === repository.repository.defaultBranch)?.name ?? unique[0]?.name ?? '');
-      } catch (cause) {
-        if (!controller.signal.aborted) setGitBranchError(gitErrorMessage(cause));
-      } finally { if (!controller.signal.aborted) setGitBranchLoading(false); }
+        setBranches(unique);
+        setBranchInput(unique.find((branch) => branch.name === repository.repository.defaultBranch)?.name ?? unique[0]?.name ?? '');
+      } catch (cause) { if (!controller.signal.aborted) setError(gitErrorMessage(cause)); }
+      finally { if (!controller.signal.aborted) setLoading(false); }
     };
-    void loadBranches();
-    return () => controller.abort();
-  }, [selectedGitConnection]);
+    void load();
+    return () => { controller.abort(); version.current++; };
+  }, [connection]);
 
   useEffect(() => {
-    if (gitImport === undefined || !['QUEUED', 'FETCHING', 'SELECTING', 'MATERIALIZING'].includes(gitImport.status)) return;
-    let live = true;
-    const version = gitSelectionVersion.current;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const poll = async () => {
+    onBranchChange(selectedBranch === undefined ? undefined : `${selectedBranch.name}\u0000${selectedBranch.commitSha}`);
+  }, [selectedBranch?.name, selectedBranch?.commitSha, onBranchChange]);
+
+  useEffect(() => {
+    version.current++; setImported(undefined); setPreparing(false); setSelectingProject(false); setError('');
+  }, [metadataType]);
+
+  useImperativeHandle(ref, () => ({
+    async prepare(type, signal) {
+      if (!canRun || selectedBranch === undefined || loading || preparing) throw new Error('Git 브랜치를 선택하세요.');
+      const currentVersion = ++version.current;
+      preparationSignal.current = signal;
+      const assertCurrent = () => {
+        if (signal.aborted || currentVersion !== version.current) throw new DOMException('Aborted', 'AbortError');
+      };
+      setPreparing(true); setError(''); setImported(undefined);
       try {
-        const response = await importById(gitImport.id);
-        if (!live || gitSelectionVersion.current !== version) return;
-        setGitImport(response.import);
-        if (response.import.status === 'READY' && response.import.source !== undefined) {
-          onSourceChange(response.import.source);
+        assertCurrent();
+        let current = (await createImport({ provider: connection.provider, repositoryPath: connection.repositoryPath!,
+          connectionId: connection.id, ref: { kind: 'branch', name: selectedBranch.name },
+          expectedCommitSha: selectedBranch.commitSha, metadataType: type }, signal)).import;
+        const deadline = Date.now() + 10 * 60_000;
+        while (true) {
+          assertCurrent(); setImported(current);
+          if (current.status === 'READY' && current.source !== undefined) return current.source;
+          if (!['QUEUED', 'FETCHING', 'SELECTING', 'MATERIALIZING'].includes(current.status)) {
+            throw new Error(current.errorMessage ?? 'Git 코드를 가져오지 못했습니다. 다시 비교를 실행하세요.');
+          }
+          if (Date.now() >= deadline) throw new Error('Git 코드 가져오기 대기 시간이 초과되었습니다. 다시 비교를 실행하세요.');
+          await waitForPoll(signal); assertCurrent();
+          current = (await importById(current.id, signal)).import;
         }
-      } catch (cause) {
-        if (live && gitSelectionVersion.current === version) setGitBranchError(gitErrorMessage(cause));
+      } finally {
+        if (currentVersion === version.current) {
+          setPreparing(false); preparationSignal.current = undefined;
+          if (signal.aborted) setImported(undefined);
+        }
       }
-      if (live && gitSelectionVersion.current === version) timer = setTimeout(() => void poll(), 1_000);
-    };
-    void poll();
-    return () => { live = false; if (timer !== undefined) clearTimeout(timer); };
-  }, [gitImport?.id, gitImport?.status, onSourceChange]);
+    },
+  }));
 
-  const filteredGitBranches = gitBranches.filter((branch) =>
-    branch.name.toLocaleLowerCase().includes(gitBranchInput.trim().toLocaleLowerCase()));
-  const prepareGitBranch = async () => {
-    if (!canRun || selectedGitConnection === undefined || selectedGitBranch === undefined || selectedGitMetadataType === undefined || gitImportBusy
-      || ['QUEUED', 'FETCHING', 'SELECTING', 'MATERIALIZING'].includes(gitImport?.status ?? '')) return;
-    const version = ++gitSelectionVersion.current;
-    onSourceChange(undefined);
-    setGitImportBusy(true); setGitBranchError(''); setGitImport(undefined);
+  const chooseProject = async (root: string) => {
+    if (!canRun || imported?.status !== 'SELECTING' || selectingProject) return;
+    const currentVersion = version.current;
+    setSelectingProject(true); setError('');
     try {
-      const response = await createImport({ provider: selectedGitConnection.provider, repositoryPath: selectedGitConnection.repositoryPath!,
-        connectionId: selectedGitConnection.id, ref: { kind: 'branch', name: selectedGitBranch.name }, expectedCommitSha: selectedGitBranch.commitSha, metadataType: selectedGitMetadataType.name });
-      if (gitSelectionVersion.current !== version) return;
-      setGitImport(response.import);
-      if (response.import.status === 'READY' && response.import.source !== undefined) {
-        onSourceChange(response.import.source);
-      }
-    } catch (cause) { if (gitSelectionVersion.current === version) setGitBranchError(gitErrorMessage(cause)); }
-    finally { if (gitSelectionVersion.current === version) setGitImportBusy(false); }
-  };
-  const chooseGitProjectRoot = async (root: string) => {
-    if (!canRun || gitImport === undefined || gitImportBusy) return;
-    const version = gitSelectionVersion.current;
-    setGitImportBusy(true); setGitBranchError('');
-    try {
-      await selectImportProject(gitImport.id, root);
-      if (gitSelectionVersion.current === version) setGitImport({ ...gitImport, status: 'MATERIALIZING' });
-    } catch (cause) { if (gitSelectionVersion.current === version) setGitBranchError(gitErrorMessage(cause)); }
-    finally { if (gitSelectionVersion.current === version) setGitImportBusy(false); }
+      await selectImportProject(imported.id, root, preparationSignal.current);
+      if (currentVersion === version.current) setImported({ ...imported, status: 'MATERIALIZING' });
+    } catch (cause) {
+      if (currentVersion === version.current && !preparationSignal.current?.aborted) setError(gitErrorMessage(cause));
+    } finally { if (currentVersion === version.current) setSelectingProject(false); }
   };
 
-  return (<section className="git-branch-source" aria-labelledby={headingId} aria-busy={gitBranchLoading}>
-              <div><strong id={headingId} title={selectedGitConnection.repositoryPath}>{side === 'target' ? '타겟 · ' : '소스 · '}{providerNames[selectedGitConnection.provider]} · {selectedGitConnection.alias ?? selectedGitConnection.repositoryPath}</strong><p>브랜치와 메타데이터 타입을 선택하면 해당 파일을 임시 작업공간에 가져옵니다.</p></div>
-              <label>{side === 'target' ? '타겟 브랜치 검색 및 선택' : '브랜치 검색 및 선택'}<input list={branchOptionsId} value={gitBranchInput} autoComplete="off" spellCheck={false}
-                disabled={!canRun || gitBranchLoading || gitImportBusy || ['QUEUED', 'FETCHING', 'SELECTING', 'MATERIALIZING'].includes(gitImport?.status ?? '')} onChange={(event) => {
-                  gitSelectionVersion.current++; setGitBranchInput(event.target.value); onSourceChange(undefined); setGitImport(undefined); setGitBranchError('');
-                }} placeholder="브랜치 이름 입력" />
-                <datalist id={branchOptionsId}>{filteredGitBranches.map((branch) => <option key={branch.name} value={branch.name} />)}</datalist>
-              </label>
-              <label>{side === 'target' ? '타겟 메타데이터 타입' : '가져올 메타데이터 타입'}<input list={typeOptionsId} value={gitMetadataType} autoComplete="off" spellCheck={false}
-                disabled={!canRun || gitImportBusy || ['QUEUED', 'FETCHING', 'SELECTING', 'MATERIALIZING'].includes(gitImport?.status ?? '')}
-                onChange={(event) => {
-                  gitSelectionVersion.current++; setGitMetadataType(event.target.value); onSourceChange(undefined); setGitImport(undefined); setGitBranchError('');
-                }} placeholder="예: ApexClass, CustomField" aria-invalid={selectedGitMetadataType === undefined} />
-                <datalist id={typeOptionsId}>{gitMetadataTypes.map((type) => <option key={type.name} value={type.name}>{type.directoryName}</option>)}</datalist>
-              </label>
-              {selectedGitMetadataType === undefined && <p className="settings-error">목록에서 가져올 메타데이터 타입을 선택하세요.</p>}
-              {gitBranchLoading ? <p role="status" aria-live="polite">브랜치 불러오는 중…</p>
-                : <p>{gitBranches.length === 0 ? '사용 가능한 브랜치가 없습니다.' : `${gitBranches.length}개 브랜치 · 입력하여 검색할 수 있습니다.`}</p>}
-              {selectedGitBranch !== undefined && <p className="git-sha">현재 선택: <code>{selectedGitBranch.name}</code> · 고정할 커밋 <code>{selectedGitBranch.commitSha}</code></p>}
-              {gitImport?.status === 'SELECTING' ? <div className="git-roots"><p>가져올 Salesforce DX 프로젝트 루트를 선택하세요.</p>
-                {gitImport.projectRoots.map((root) => <button className="small-button" type="button" key={root} disabled={gitImportBusy} onClick={() => void chooseGitProjectRoot(root)}>{root} 선택</button>)}</div>
-                : <button className="button button-secondary" type="button" disabled={!canRun || gitImportBusy || ['QUEUED', 'FETCHING', 'MATERIALIZING'].includes(gitImport?.status ?? '') || selectedGitBranch === undefined || selectedGitMetadataType === undefined || gitBranchLoading}
-                  onClick={() => void prepareGitBranch()}>{gitImportBusy || ['QUEUED', 'FETCHING', 'MATERIALIZING'].includes(gitImport?.status ?? '') ? '브랜치 소스 준비 중……' : side === 'target' ? '이 브랜치로 타겟 준비' : '이 브랜치로 소스 준비'}</button>}
-              {gitImport !== undefined && gitImport.status !== 'SELECTING' && <p role="status">{gitImport.status === 'READY' ? 'Git 파일을 가져왔습니다. 아래에서 메타데이터를 조회하세요.' : `Git 소스 ${gitImport.status}`}</p>}
-              {gitImport?.errorMessage && <p className="settings-error" role="alert">{gitImport.errorMessage}</p>}
-              {gitBranchError && <p className="settings-error" role="alert">{gitBranchError}</p>}
-            </section>);
-}
+  return <section className="git-branch-source" aria-labelledby={headingId} aria-busy={loading}>
+    <div><strong id={headingId} title={connection.repositoryPath}>{side === 'target' ? '타겟 · ' : '소스 · '}{providerNames[connection.provider]} · {connection.alias ?? connection.repositoryPath}</strong>
+      <p>브랜치를 선택하세요. 아래 메타데이터 검색에서 타입을 선택하고 비교를 실행하면 Git 코드를 가져옵니다.</p></div>
+    <label>{side === 'target' ? '타겟 브랜치 검색 및 선택' : '브랜치 검색 및 선택'}<input list={branchOptionsId} value={branchInput} autoComplete="off" spellCheck={false}
+      disabled={!canRun || loading || preparing} onChange={(event) => {
+        version.current++; setBranchInput(event.target.value); setImported(undefined); setError('');
+      }} placeholder={loading ? '브랜치 검색 중……' : '브랜치 이름 입력'} />
+      <datalist id={branchOptionsId}>{branches.filter((branch) => branch.name.toLocaleLowerCase().includes(branchInput.trim().toLocaleLowerCase()))
+        .map((branch) => <option key={branch.name} value={branch.name} />)}</datalist>
+    </label>
+    {loading ? <p className="git-branch-loading" role="status" aria-live="polite"><Icon name="refresh" /><span>브랜치 검색 중……</span></p>
+      : <p>{branches.length === 0 ? '사용 가능한 브랜치가 없습니다.' : `${branches.length}개 브랜치 · 입력하여 검색할 수 있습니다.`}</p>}
+    {selectedBranch !== undefined && <p className="git-sha">현재 선택: <code>{selectedBranch.name}</code> · 고정할 커밋 <code>{selectedBranch.commitSha}</code></p>}
+    {imported?.status === 'SELECTING' && <div className="git-roots"><p>가져올 Salesforce DX 프로젝트 루트를 선택하세요. 선택 후 비교를 계속합니다.</p>
+      {imported.projectRoots.map((root) => <button className="small-button" type="button" key={root} disabled={selectingProject} onClick={() => void chooseProject(root)}>{root} 선택</button>)}</div>}
+    {preparing && imported?.status !== 'SELECTING' && <p className="git-branch-loading" role="status"><Icon name="refresh" /><span>Git 코드 가져오는 중……</span></p>}
+    {error && <p className="settings-error" role="alert">{error}</p>}
+  </section>;
+});
