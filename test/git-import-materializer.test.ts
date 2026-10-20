@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GitMaterializer } from '../src/git/git-materializer.js';
+import { GitError } from '../src/git/git-errors.js';
 import { GitObjectStore } from '../src/git/git-object-store.js';
 import { runIsolatedGit } from '../src/git/git-process.js';
 import { safeGitPath, selectedGitEntries } from '../src/git/git-project-validator.js';
@@ -79,6 +80,29 @@ function project(prefix = ''): Entry[] {
 }
 
 describe('Git 원시 파일 추출', { timeout: 30_000 }, () => {
+  it.each(['restore', 'validation'])('부분 복원 후 최종 폴더 정리가 잠겨도 원래 %s 오류를 보존한다', async (stage) => {
+    const f = await fixture(project());
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    const target = path.join(f.root, 'partial-final-project');
+    const original = new GitError('GIT_PROCESS_FAILED');
+    const restore = f.objects.restoreFiles.bind(f.objects);
+    vi.spyOn(f.objects, 'restoreFiles').mockImplementation(async (...args) => {
+      await restore(...args);
+      if (stage === 'restore') throw original;
+      await writeFile(path.join(target, 'force-app/main/default/classes/Hello.cls'), 'corrupted');
+    });
+    vi.mocked(rm).mockImplementation(async (directory, options) => {
+      if (directory === target) throw Object.assign(new Error('fixture Windows final directory lock'), { code: 'EPERM' });
+      return actual.rm(directory, options);
+    });
+    const warning = vi.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    const result = f.materializer.materialize(f.commit, '.', target);
+    if (stage === 'restore') await expect(result).rejects.toBe(original);
+    else await expect(result).rejects.toMatchObject({ code: 'INVALID_GIT_OBJECT' });
+    expect(rm).toHaveBeenCalledWith(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining(target), { code: 'SFUD_GIT_MATERIALIZATION_CLEANUP_FAILED' });
+    expect(await readdir(target)).toContain('sfdx-project.json');
+  });
   it.each(['.', 'salesforce'])('디렉터리 rename이 EPERM인 환경에서도 %s 프로젝트를 원본 바이트로 복원한다', async (projectRoot) => {
     const prefix = projectRoot === '.' ? '' : `${projectRoot}/`;
     const f = await fixture(project(prefix));
