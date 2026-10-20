@@ -39,6 +39,24 @@ async function writeConfig(directory: string, env: Record<string, unknown>): Pro
 }
 
 describe('사용자 홈 설정 보안', { timeout: process.platform === 'win32' ? 120_000 : 5_000 }, () => {
+  it('새 자동 설정도 init과 같은 개인용 기본값·고정 데이터 경로·UUID 키를 생성한다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-personal-auto-'));
+    roots.push(root);
+    const environment: NodeJS.ProcessEnv = { SFUD_CONFIG_DIR: path.join(root, '.sfud') };
+    await loadHomeConfiguration(environment);
+    const paths = getHomeConfigPaths(environment);
+    expect(JSON.parse(await readFile(paths.configFile, 'utf8'))).toEqual({ version: 1, env: { LOCAL: 'true', SFUD_DATA_DIR: 'data/local' } });
+    expect(environment.LOCAL).toBe('true');
+    expect(environment.SFUD_DATA_DIR).toBe(path.join(paths.directory, 'data', 'local'));
+    expect(environment.SFUD_TOKEN_SECRET).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+    const secretBytes = await readFile(paths.secretsFile);
+    const restarted: NodeJS.ProcessEnv = { SFUD_CONFIG_DIR: paths.directory };
+    await loadHomeConfiguration(restarted);
+    expect(restarted.LOCAL).toBe('true');
+    expect(restarted.SFUD_DATA_DIR).toBe(environment.SFUD_DATA_DIR);
+    expect(restarted.SFUD_TOKEN_SECRET).toBe(environment.SFUD_TOKEN_SECRET);
+    expect(await readFile(paths.secretsFile)).toEqual(secretBytes);
+  });
   it.skipIf(process.platform !== 'win32')('Windows PowerShell은 제한된 환경에서 설정 경로 없이 시작하고 종료한다', async () => {
     await runWindowsPowerShell('exit 0', {});
   });

@@ -15,6 +15,10 @@ export function PackageExclusions({ sourceIds, selectedIds, onChange }: {
   const [members, setMembers] = useState<Record<string, PackageComponent[]>>({});
   const [failures, setFailures] = useState<Record<string, string>>({});
   const active = useRef<AbortController | null>(null);
+  const latestSelection = useRef(selectedIds);
+  latestSelection.current = selectedIds;
+  const selectedCount = packages.filter((entry) => selectedIds.includes(entry.id)).length;
+  const allSelected = packages.length > 0 && selectedCount === packages.length;
   useEffect(() => {
     const controller = new AbortController();
     active.current = controller;
@@ -38,7 +42,7 @@ export function PackageExclusions({ sourceIds, selectedIds, onChange }: {
     return () => { controller.abort(); active.current?.abort(); };
   }, [sourceIds]);
 
-  async function loadComponents() {
+  async function loadComponents(selectAll = false) {
     active.current?.abort();
     const controller = new AbortController();
     active.current = controller;
@@ -51,19 +55,45 @@ export function PackageExclusions({ sourceIds, selectedIds, onChange }: {
       setPackages(data.packages);
       setMembers({});
       setStatus('ready');
-      for (const [index, entry] of data.packages.entries()) {
-        setProgress(`패키지 로딩 중…… ${index + 1}/${data.packages.length} · ${entry.name}`);
-        try {
-          const loaded = await apiRequest<LoadedPackage, { sourceIds: string[] }>(`/api/v1/installed-packages/${encodeURIComponent(entry.id)}/components`, {
-            method: 'POST', csrf: true, body: { sourceIds: sourceIds.split(',') }, signal: controller.signal, timeoutMs: 1_400_000,
-          });
-          if (controller.signal.aborted) return;
-          setPackages((current) => current.map((item) => item.id === entry.id ? loaded.package : item));
-          setMembers((current) => ({ ...current, [entry.id]: loaded.components }));
-        } catch (caught) {
-          if (controller.signal.aborted) return;
-          setFailures((current) => ({ ...current, [entry.id]: errorMessage(caught) }));
+      const toLoad = data.packages.filter((entry) => entry.namespace === null
+        || data.packages.some((other) => other.id !== entry.id && other.namespace === entry.namespace));
+      let next = 0;
+      let completed = 0;
+      let failed = false;
+      const running = new Map<string, string>();
+      const showProgress = () => setProgress(`패키지 로딩 중…… ${completed}/${toLoad.length} 처리 · ${[...running.values()].join(', ')}`);
+      const worker = async () => {
+        while (!controller.signal.aborted) {
+          const entry = toLoad[next++];
+          if (entry === undefined) return;
+          running.set(entry.id, entry.name);
+          showProgress();
+          try {
+            const loaded = await apiRequest<LoadedPackage, { sourceIds: string[] }>(`/api/v1/installed-packages/${encodeURIComponent(entry.id)}/components`, {
+              method: 'POST', csrf: true, body: { sourceIds: sourceIds.split(',') }, signal: controller.signal, timeoutMs: 1_400_000,
+            });
+            if (controller.signal.aborted) return;
+            setPackages((current) => current.map((item) => item.id === entry.id ? loaded.package : item));
+            setMembers((current) => ({ ...current, [entry.id]: loaded.components }));
+          } catch (caught) {
+            if (controller.signal.aborted) return;
+            failed = true;
+            setFailures((current) => ({ ...current, [entry.id]: errorMessage(caught) }));
+          } finally {
+            running.delete(entry.id);
+            completed++;
+            if (!controller.signal.aborted) showProgress();
+          }
         }
+      };
+      await Promise.all(Array.from({ length: Math.min(3, toLoad.length) }, () => worker()));
+      if (controller.signal.aborted) return;
+      if (selectAll) {
+        if (failed) setError('일부 패키지 로딩이 실패하여 전체 제외를 적용하지 않았습니다. 오류를 확인하고 다시 시도하세요.');
+        else if (selectedIds.length !== latestSelection.current.length || selectedIds.some((id) => !latestSelection.current.includes(id))) {
+          setError('로딩 중 패키지 선택이 변경되어 전체 제외를 적용하지 않았습니다. 다시 선택하세요.');
+        }
+        else onChange(data.packages.map((entry) => entry.id).sort());
       }
     } catch (caught) {
       if (controller.signal.aborted) return;
@@ -85,7 +115,18 @@ export function PackageExclusions({ sourceIds, selectedIds, onChange }: {
               disabled={status === 'loading' || !!progress} aria-busy={!!progress} onClick={() => void loadComponents()}>
               <Icon name="refresh" />{progress ? '패키지 로딩 중……' : '패키지 로딩'}
             </button>
-            <p>구성요소를 조회하면 네임스페이스가 없는 패키지도 개별 제외할 수 있습니다. 조회에는 수 분이 걸릴 수 있습니다.</p>
+            <label className={`option-toggle package-all-toggle${status !== 'ready' || !!progress || packages.length === 0 ? ' option-toggle-disabled' : ''}`}>
+              <span><strong>전체 제외</strong><small>{selectedCount}/{packages.length}개 선택</small></span>
+              <input type="checkbox" aria-label="전체 패키지 제외" checked={allSelected}
+                ref={(input) => { if (input) input.indeterminate = selectedCount > 0 && !allSelected; }}
+                disabled={status !== 'ready' || !!progress || packages.length === 0}
+                onChange={(event) => {
+                  if (!event.target.checked) onChange([]);
+                  else if (packages.every((entry) => entry.exclusionUnavailableReason === undefined)) onChange(packages.map((entry) => entry.id).sort());
+                  else void loadComponents(true);
+                }} /><i aria-hidden="true" />
+            </label>
+            <p>네임스페이스가 없거나 공유하는 패키지만 구성요소를 조회합니다. 고유 네임스페이스는 조회 없이 제외할 수 있습니다. 조회에는 수 분이 걸릴 수 있습니다.</p>
           </div>
           {progress && <p role="status">{progress}</p>}
           {status === 'loading' && <p role="status">설치 패키지 목록을 불러오는 중입니다.</p>}

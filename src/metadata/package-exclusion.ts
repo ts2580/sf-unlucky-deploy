@@ -29,6 +29,8 @@ export async function resolvePackageExclusion(
   const exactIds = new Set<string>();
   const componentKeys = new Set<string>();
   if (selectedIds !== undefined) for (const entry of selected) {
+    // Unique namespaces need no component lookup; shared namespaces keep exact membership.
+    if (entry.namespace !== null && !packages.some((other) => other.id !== entry.id && other.namespace === entry.namespace)) continue;
     const required = entry.exclusionUnavailableReason !== undefined;
     if (packages.some((other) => other.id !== entry.id && other.name === entry.name
       && other.orgAliases.some((alias) => entry.orgAliases.includes(alias)))) {

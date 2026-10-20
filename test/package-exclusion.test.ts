@@ -60,6 +60,16 @@ describe('installed package exclusion', () => {
     }
   });
 
+  it('skips component resolution for unique namespaces even when a cached resolver is available', async () => {
+    const sources = [{ kind: 'org' as const, alias: 'dev', displayName: 'dev' }];
+    const result = await resolvePackageExclusion(sources, { async runJson() { return { result: [
+      { SubscriberPackageId: '033000000000001', SubscriberPackageName: 'Unique', SubscriberPackageNamespace: 'unique' },
+    ] }; } }, process.cwd(), undefined, ['033000000000001'], async () => {
+      throw new Error('unique namespace should not resolve components');
+    });
+    expect(result).toEqual({ namespaces: ['unique'], unnamespacedPackages: [], selectedPackages: [{ id: '033000000000001', name: 'Unique' }] });
+  });
+
   it.each([{}, { result: {} }, { result: [{}] }, { result: [{ SubscriberPackageName: 'Broken', SubscriberPackageNamespace: '*' }] }])(
     'fails closed for an invalid inventory: %j', async (response) => {
       await expect(resolvePackageExclusion([{ kind: 'org', alias: 'org', displayName: 'org' }],

@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
+import path from 'node:path';
 
 const e2eDataDirectory = process.env.SFUD_E2E_DATA_DIRECTORY;
 if (e2eDataDirectory === undefined) {
@@ -20,6 +21,10 @@ export default defineConfig({
     reuseExistingServer: false,
     timeout: 30_000,
     env: {
+      LOCAL: 'false',
+      SFUD_CONFIG_DIR: path.join(e2eDataDirectory, 'home-config'),
+      SFUD_UI_HOST: '127.0.0.1',
+      SFUD_UI_PORT: '27546',
       SFUD_BOOTSTRAP_TOKEN: 'sfud-e2e-bootstrap-token',
       SFUD_DATA_DIR: e2eDataDirectory,
     },

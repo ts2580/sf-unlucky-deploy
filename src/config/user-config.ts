@@ -340,7 +340,8 @@ export async function initializeHomeConfiguration(
         return paths;
       } catch (error) { if (!isNotFound(error)) throw error; }
     }
-    const initialEnvironment = mode === 'personal' ? { LOCAL: 'true', SFUD_DATA_DIR: 'data/local' } : {};
+    const personal = mode === 'personal' || environment.LOCAL === undefined || environment.LOCAL === 'true';
+    const initialEnvironment = personal ? { LOCAL: 'true', SFUD_DATA_DIR: 'data/local' } : {};
     const document = `${JSON.stringify({ version: 1, env: initialEnvironment }, null, 2)}\n`;
     const handle = await open(paths.configFile, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollowFlag(), 0o600);
     try {
@@ -357,7 +358,7 @@ export async function initializeHomeConfiguration(
     }
     const hasTokenKey = ['SFUD_TOKEN_SECRET', 'SFUD_GIT_TOKEN_SECRET', 'SFUD_SF_TOKEN_SECRET', 'SFUD_GIT_TOKEN_KEY_FILE']
       .some((key) => environment[key] !== undefined);
-    await createSecretsTemplateIfMissing(paths, directoryIdentity, mode === 'personal' && !hasTokenKey);
+    await createSecretsTemplateIfMissing(paths, directoryIdentity, personal && !hasTokenKey);
     return paths;
   } catch (error) {
     if (createdFile !== undefined) {
@@ -426,6 +427,31 @@ export function shouldLoadHomeConfiguration(commandName: string): boolean {
 
 export async function inspectSecureConfigurationFile(filePath: string, maxBytes: number): Promise<void> {
   await readSecureFile(filePath, maxBytes);
+}
+
+/** Runtime capabilities use the same owner, link and ACL checks as home secrets. */
+export async function readPrivateHomeFile(filePath: string, maxBytes: number): Promise<Buffer> {
+  await assertSecureDirectory(path.dirname(filePath));
+  return (await readSecureFile(filePath, maxBytes))!;
+}
+
+export async function createPrivateHomeFile(filePath: string, contents: string): Promise<{ dev: number; ino: number }> {
+  const directory = path.dirname(filePath);
+  const identity = await assertSecureDirectory(directory);
+  const handle = await open(filePath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollowFlag(), 0o600);
+  const stat = await handle.stat();
+  try {
+    await handle.writeFile(contents, 'utf8');
+    await handle.sync();
+    await verifyWindowsAcl(filePath, 'set');
+    await verifySamePath(filePath, stat);
+    await verifyDirectoryIdentity(directory, identity);
+    return { dev: stat.dev, ino: stat.ino };
+  } catch (error) {
+    await handle.close();
+    try { await verifySamePath(filePath, stat); await unlink(filePath); } catch { /* keep replaced files */ }
+    throw error;
+  } finally { await handle.close(); }
 }
 
 async function assertSecureDirectory(directory: string): Promise<{ dev: number; ino: number }> {
