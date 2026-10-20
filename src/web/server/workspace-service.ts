@@ -20,6 +20,8 @@ import type { OrgIdentitySnapshot } from '../../deploy/org-identity.js';
 import { discoverLocalMetadataTypes, resolveLocalPackageDirectories } from '../../metadata/local-metadata.js';
 import { listInstalledPackages } from '../../metadata/package-exclusion.js';
 import type { InstalledPackage } from '../../api/package-contracts.js';
+import type { LoadedPackage, PackageComponent } from '../../api/package-contracts.js';
+import { retrievePackageComponents } from '../../metadata/package-components.js';
 
 const IMPORT_TTL_MS = 4 * 60 * 60 * 1_000;
 const DEFAULT_USER_IMPORT_QUOTA_BYTES = 500 * 1024 * 1024;
@@ -77,6 +79,7 @@ export class WorkspaceService {
   private readonly metadataTypeRequests = new Map<string, Promise<WorkspaceMetadataType[]>>();
   private readonly apexTestClassCache = new Map<string, { expiresAt: number; value: string[] }>();
   private readonly apexTestClassRequests = new Map<string, Promise<string[]>>();
+  private readonly packageComponents = new Map<string, PackageComponent[]>();
 
   private constructor(
     private readonly sfClient: SfClient,
@@ -183,10 +186,68 @@ export class WorkspaceService {
       throw new Error('설치 패키지 목록은 Salesforce Org 1~2개를 선택해야 합니다.');
     }
     const sources = await Promise.all(sourceIds.map((id) => this.resolveSource(id, ownerUserId)));
-    return withRequestWorkspace(this.defaultProject().realPath, async (cwd) => listInstalledPackages(
+    const packages = await withRequestWorkspace(this.defaultProject().realPath, async (cwd) => listInstalledPackages(
       sources.map((source) => ({ kind: 'org' as const, alias: source.slice(4), displayName: source.slice(4) })),
       this.sfClient, cwd,
     ));
+    return packages.map((entry) => {
+      const components = this.cachedPackageComponents(entry, ownerUserId);
+      if (components === undefined) return entry;
+      const { exclusionUnavailableReason: _reason, ...available } = entry;
+      return { ...available, componentCount: components.length };
+    });
+  }
+
+  public async loadPackageComponents(sourceIds: readonly string[], packageId: string, ownerUserId: string): Promise<LoadedPackage> {
+    const packages = await this.listPackages(sourceIds, ownerUserId);
+    const entry = packages.find((candidate) => candidate.id === packageId);
+    if (entry === undefined) throw new SfudError('INVALID_ARGUMENT', '선택한 패키지가 현재 Org에 설치되어 있지 않습니다.');
+    if (packages.some((other) => other.id !== entry.id && other.name === entry.name
+      && other.orgAliases.some((alias) => entry.orgAliases.includes(alias)))) {
+      throw new SfudError('INVALID_ARGUMENT', '같은 이름의 패키지가 있어 구성요소를 안전하게 구분할 수 없습니다.');
+    }
+    const components = new Map<string, PackageComponent>();
+    for (const alias of entry.orgAliases) {
+      for (const member of (await this.resolvePackageComponents(entry, alias, this.defaultProject().realPath, undefined, true, ownerUserId))!) {
+        components.set(`${member.type}:${member.fullName}`, member);
+      }
+    }
+    const { exclusionUnavailableReason: _reason, ...available } = entry;
+    return { package: { ...available, componentCount: components.size }, components: [...components.values()] };
+  }
+
+  public async resolvePackageComponents(
+    entry: InstalledPackage, alias: string, cwd: string, signal: AbortSignal | undefined, required: boolean, ownerUserId: string,
+  ): Promise<PackageComponent[] | undefined> {
+    // Reauthorize even for a cache hit, and pin the current connection generation.
+    await this.resolveSource(`org:${alias}`, ownerUserId);
+    const key = this.packageComponentKey(entry, alias, ownerUserId);
+    const cached = key === undefined ? undefined : this.packageComponents.get(key);
+    if (cached !== undefined) return cached;
+    if (!required) return undefined;
+    const components = await retrievePackageComponents(entry.name, alias, this.sfClient, cwd, signal);
+    if (key !== undefined) {
+      if (this.packageComponents.size >= 200) this.packageComponents.delete(this.packageComponents.keys().next().value!);
+      this.packageComponents.set(key, components);
+    }
+    return components;
+  }
+
+  private packageComponentKey(entry: InstalledPackage, alias: string, ownerUserId: string): string | undefined {
+    const version = entry.versionIds?.[alias];
+    if (version === undefined) return undefined; // Never reuse an unversioned retrieval.
+    return JSON.stringify([ownerUserId, alias, currentSalesforceConnectionPin(alias), entry.id, version]);
+  }
+
+  private cachedPackageComponents(entry: InstalledPackage, ownerUserId: string): PackageComponent[] | undefined {
+    const members = new Map<string, PackageComponent>();
+    for (const alias of entry.orgAliases) {
+      const key = this.packageComponentKey(entry, alias, ownerUserId);
+      const cached = key === undefined ? undefined : this.packageComponents.get(key);
+      if (cached === undefined) return undefined;
+      for (const member of cached) members.set(`${member.type}:${member.fullName}`, member);
+    }
+    return [...members.values()];
   }
 
   public async listMetadataTypes(

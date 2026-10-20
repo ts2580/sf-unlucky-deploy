@@ -123,9 +123,10 @@ async function comparePreparedSnapshots(
     }
   }
   const excludedKeys = new Set<string>();
+  const packageComponentKeys = new Set(options.packageExclusion?.componentKeys ?? []);
   for (const components of [leftComponents, rightComponents]) {
     for (const [key, component] of components) {
-      if (belongsToPackage(component.fullName, options.packageExclusion?.namespaces ?? [], component.type)) {
+      if (packageComponentKeys.has(key) || belongsToPackage(component.fullName, options.packageExclusion?.namespaces ?? [], component.type)) {
         excludedKeys.add(key);
         components.delete(key);
       }
@@ -134,7 +135,7 @@ async function comparePreparedSnapshots(
   const packageExclusion = options.packageExclusion === undefined ? undefined
     : { ...options.packageExclusion, excludedComponents: excludedKeys.size };
   const packageWarnings = packageExclusion === undefined ? [] : [
-    `설치 패키지 제외: ${packageExclusion.excludedComponents}개 컴포넌트 (네임스페이스: ${packageExclusion.namespaces.join(', ') || '없음'}).`,
+    `설치 패키지 제외: ${packageExclusion.excludedComponents}개 컴포넌트 (네임스페이스: ${packageExclusion.namespaces.join(', ') || '없음'}${packageExclusion.componentKeys === undefined ? '' : ', 조회한 구성요소 기준 포함'}).`,
     ...(packageExclusion.unnamespacedPackages.length === 0 ? [] : [
       `네임스페이스가 없어 제외하지 않은 패키지: ${packageExclusion.unnamespacedPackages.join(', ')}.`,
     ]),

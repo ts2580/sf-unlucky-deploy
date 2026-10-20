@@ -423,7 +423,7 @@ test('설치 패키지 목록 오류와 토글 선택 및 해제를 표시한다
   const packages = page.getByRole('group', { name: '비교에서 제외할 설치 패키지' });
   await page.locator('.package-exclusions-summary').click();
   await expect(packages.getByRole('alert')).toContainText('목록 조회 권한');
-  await expect(packages.getByRole('button')).toHaveCount(0);
+  await expect(packages.getByRole('button', { name: '패키지 로딩', exact: true })).toBeEnabled();
   await page.reload();
   await page.locator('.package-exclusions-summary').click();
   await packages.getByRole('checkbox', { name: 'Installed CRM 비교에서 제외' }).check();

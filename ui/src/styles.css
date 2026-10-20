@@ -494,6 +494,13 @@ button:focus-visible, a:focus-visible { outline: 3px solid #60a5fa; outline-offs
 .package-exclusions-content p { margin: 0 0 10px; font-size: var(--ui-font-small); color: #61768a; overflow-wrap: anywhere; }
 .package-exclusions-list { display: grid; gap: 8px; max-height: 240px; overflow: auto; padding: 4px; }
 .package-exclusion-item { position: relative; }
+.package-loading-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+.package-loading-actions .button { flex: 0 0 auto; }
+.package-loading-actions p { flex: 1 1 200px; margin: 0; }
+.package-members { padding: 8px; font-size: var(--ui-font-small); overflow-wrap: anywhere; }
+.package-members summary { cursor: pointer; }
+.package-members input { box-sizing: border-box; width: 100%; margin-top: 8px; }
+.package-members ul { padding-left: 18px; max-height: 180px; overflow: auto; }
 .comparison-run-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
 .comparison-run-actions .comparison-run-button { grid-column: 3; padding: 8px 14px; }
 @media (max-width: 700px) {
