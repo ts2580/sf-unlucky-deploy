@@ -3,6 +3,7 @@ import { once } from 'node:events';
 import { mkdtemp, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createConnection, createServer } from 'node:net';
+import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -107,7 +108,53 @@ describe('sfud UI 정상 종료', { timeout }, () => {
     // POSIX mode alone does not set the Windows owner and protected ACL.
     await createPrivateHomeFile(path.join(directory, file), bytes.toString('utf8'));
     expect(await stopWebUi({}, environment)).toEqual({ stopped: false });
-    expect(await readFile(path.join(directory, file))).toEqual(bytes);
+    await expect(readFile(path.join(directory, file))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it.skipIf(process.platform === 'win32')('257개 비정상 종료 기록을 정리하고 선택한 실제 UI를 종료한다', async () => {
+    const { directory, environment } = await fixture();
+    const stale = await startUiControl(directory, { host: '127.0.0.1', port: 3000 }, async () => {});
+    const staleFile = (await readdir(directory)).find((name) => name.startsWith('ui-'))!;
+    const record = JSON.parse(await readFile(path.join(directory, staleFile), 'utf8'));
+    await stale.dispose();
+    for (let index = 0; index < 257; index++) {
+      const id = randomUUID();
+      const port = 3000 + index;
+      await createPrivateHomeFile(path.join(directory, `ui-${port}-${id}.json`), `${JSON.stringify({ ...record, id, port })}\n`);
+    }
+    let stopped = false;
+    const live = await startUiControl(directory, { host: '127.0.0.1', port: 27546 }, async () => {
+      stopped = true;
+      await live.dispose();
+    });
+    controls.push(live);
+    expect(await stopWebUi({ port: 27546 }, environment)).toMatchObject({ stopped: true, port: 27546 });
+    expect(stopped).toBe(true);
+    expect((await readdir(directory)).filter((name) => name.startsWith('ui-'))).toEqual([]);
+  });
+
+  it('일시적인 제어 응답 지연만으로 실행 기록을 삭제하지 않는다', async () => {
+    const { directory, environment } = await fixture();
+    const control = await startUiControl(directory, { host: '127.0.0.1', port: 27546 }, async () => {});
+    const file = (await readdir(directory)).find((name) => name.startsWith('ui-'))!;
+    const record = JSON.parse(await readFile(path.join(directory, file), 'utf8'));
+    await control.dispose();
+    const sockets = new Set<import('node:net').Socket>();
+    const delayed = createServer((socket) => {
+      sockets.add(socket);
+      socket.on('close', () => sockets.delete(socket));
+    });
+    await new Promise<void>((resolve) => delayed.listen(0, '127.0.0.1', resolve));
+    const address = delayed.address() as { port: number };
+    const contents = `${JSON.stringify({ ...record, controlPort: address.port })}\n`;
+    try {
+      await createPrivateHomeFile(path.join(directory, file), contents);
+      expect(await stopWebUi({}, environment)).toEqual({ stopped: false });
+      expect(await readFile(path.join(directory, file), 'utf8')).toBe(contents);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) => delayed.close((error) => error ? reject(error) : resolve()));
+    }
   });
 
   it('실제 CLI의 자동 개인 설정·다른 폴더에서 stop·재시작이 같은 SQLite 기록과 키를 보존한다', async () => {

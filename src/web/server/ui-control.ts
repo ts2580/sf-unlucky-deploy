@@ -16,6 +16,7 @@ interface UiRecord {
   token: string;
 }
 interface ControlReply { service: 'sfud-control'; id: string; status: 'running' | 'stopped' | 'failed' }
+interface StoredRecord { file: string; bytes: Buffer; identity: { dev: number; ino: number }; record: UiRecord }
 const RECORD_NAME = /^ui-\d+-[0-9a-f-]{36}\.json$/u;
 const MAX_MESSAGE = 4096;
 
@@ -132,21 +133,39 @@ export async function stopWebUi(
   let files: string[];
   try { files = (await readdir(directory)).filter((file) => RECORD_NAME.test(file)); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { stopped: false }; throw error; }
-  if (files.length > 256) throw new SfudError('UI_STOP_FAILED', 'UI 실행 기록이 너무 많습니다. 홈 설정의 ui-*.json 기록을 확인하세요.');
-  const records: UiRecord[] = [];
+  const records: StoredRecord[] = [];
   for (const file of files) {
+    const filename = path.join(directory, file);
     let bytes: Buffer;
-    try { bytes = await readPrivateHomeFile(path.join(directory, file), MAX_MESSAGE); }
+    let identity;
+    try {
+      identity = await lstat(filename);
+      bytes = await readPrivateHomeFile(filename, MAX_MESSAGE);
+      const after = await lstat(filename);
+      if (identity.dev !== after.dev || identity.ino !== after.ino) continue;
+    }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
     let record: UiRecord;
     try { record = readRecord(bytes); } catch { continue; }
-    if ((options.port === undefined || options.port === record.port)
-      && (options.host === undefined || options.host === record.host)) records.push(record);
+    records.push({ file: filename, bytes, identity, record });
   }
-  const live = (await Promise.all(records.map(async (record) => {
-    try { return (await exchange(record, 'status', 1500)).status === 'running' ? record : undefined; }
-    catch { return undefined; }
-  }))).filter((record): record is UiRecord => record !== undefined);
+  const live: UiRecord[] = [];
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(8, records.length) }, async () => {
+    while (next < records.length) {
+      const stored = records[next++]!;
+      const { record } = stored;
+      try {
+        const status = await exchange(record, 'status', 1500);
+        if (status.status === 'running' && (options.port === undefined || options.port === record.port)
+          && (options.host === undefined || options.host === record.host)) live.push(record);
+      } catch (error) {
+        // A refused connection proves the recorded listener is gone. Keep
+        // records on timeouts, authentication failures, or transient errors.
+        if ((error as NodeJS.ErrnoException).code === 'ECONNREFUSED') await removeStaleRecord(stored);
+      }
+    }
+  }));
   if (live.length === 0) return { stopped: false };
   if (live.length > 1) throw new SfudError('UI_STOP_AMBIGUOUS', `실행 중인 UI가 여러 개입니다 (${live.map((record) => `${record.host}:${record.port}`).join(', ')}). --port와 필요 시 --host로 선택하세요.`);
   const record = live[0]!;
@@ -154,4 +173,14 @@ export async function stopWebUi(
     if ((await exchange(record, 'stop', 60_000)).status !== 'stopped') throw new Error('Shutdown failed');
   } catch { throw new SfudError('UI_STOP_FAILED', 'UI 정상 종료를 확인하지 못했습니다. 실행 터미널의 오류를 확인하세요.'); }
   return { stopped: true, host: record.host, port: record.port };
+}
+
+async function removeStaleRecord(stored: StoredRecord): Promise<void> {
+  try {
+    const current = await lstat(stored.file);
+    if (current.dev !== stored.identity.dev || current.ino !== stored.identity.ino) return;
+    if (!(await readPrivateHomeFile(stored.file, MAX_MESSAGE)).equals(stored.bytes)) return;
+    const after = await lstat(stored.file);
+    if (after.dev === stored.identity.dev && after.ino === stored.identity.ino) await unlink(stored.file);
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
 }
