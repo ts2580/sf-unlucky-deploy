@@ -5,6 +5,7 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promise
 import os from 'node:os';
 import path from 'node:path';
 import { WINDOWS_BUNDLE as policy, assertWindowsBundleArchive, assertWindowsX64Binary } from './windows-bundle-policy.mjs';
+import { readNpmTarball } from './npm-tar.mjs';
 
 if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('Windows x64 러너에서 패키징해야 합니다.');
 const [sourceArgument, destinationArgument] = process.argv.slice(2);
@@ -79,7 +80,7 @@ try {
   await writeFile(path.join(stage, 'WINDOWS-README.md'), instructions);
   const packed = JSON.parse(await npm(['pack', '--ignore-scripts', '--json', '--pack-destination', destination], stage));
   const tarball = packed[0].filename;
-  const entries = (await run('tar', ['-tf', tarball], destination)).trim().split(/\r?\n/u);
+  const entries = await readNpmTarball(process.env.SFUD_SMOKE_NPM_CLI, path.join(destination, tarball));
   assertWindowsBundleArchive(entries);
   const sbom = await npm(['sbom', '--omit=dev', '--sbom-format=cyclonedx', '--sbom-type=application'], stage);
   JSON.parse(sbom);

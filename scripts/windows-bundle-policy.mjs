@@ -1,9 +1,9 @@
 export const WINDOWS_BUNDLE = Object.freeze({
   name: '@trstyq/sf-unlucky-deploy',
-  version: '0.7.0-rc.1.win32-x64.1',
-  baseVersion: '0.7.0-rc.1',
-  sourceCommit: 'fd5346e575b634381ce53812bd0238f758818ce6',
-  sourceSha256: '09cd5c1841458dfd7ea1138ceafd5c28fb2be38bdbe3e9852e1465af7227c202',
+  version: '0.7.0-win32-x64.1',
+  baseVersion: '0.7.0',
+  sourceCommit: '86b53e0f45cf6fb80db3144c145c5ef0285944a9',
+  sourceSha256: '18955c8c930c0cc55a7c7e673592d4bf66541aa2f80fcb6083104fb6067b017e',
   sqliteVersion: '6.0.1',
   sqliteUrl: 'https://github.com/TryGhost/node-sqlite3/releases/download/v6.0.1/sqlite3-v6.0.1-napi-v6-win32-x64.tar.gz',
   sqliteSha256: 'e0bbbb6e43b45378e6d6e2c5cc096e61e4c8932dbc2d2c9c08b8e3aaa80c9adf',
