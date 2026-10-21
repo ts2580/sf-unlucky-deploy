@@ -15,10 +15,10 @@ export function PackageExclusions({ sourceIds, selectedIds, onChange }: {
   const [members, setMembers] = useState<Record<string, PackageComponent[]>>({});
   const [failures, setFailures] = useState<Record<string, string>>({});
   const active = useRef<AbortController | null>(null);
-  const latestSelection = useRef(selectedIds);
-  latestSelection.current = selectedIds;
   const selectedCount = packages.filter((entry) => selectedIds.includes(entry.id)).length;
-  const allSelected = packages.length > 0 && selectedCount === packages.length;
+  const availablePackages = packages.filter((entry) => entry.exclusionUnavailableReason === undefined);
+  const unavailableCount = packages.length - availablePackages.length;
+  const allSelected = availablePackages.length > 0 && availablePackages.every((entry) => selectedIds.includes(entry.id));
   useEffect(() => {
     const controller = new AbortController();
     active.current = controller;
@@ -42,7 +42,7 @@ export function PackageExclusions({ sourceIds, selectedIds, onChange }: {
     return () => { controller.abort(); active.current?.abort(); };
   }, [sourceIds]);
 
-  async function loadComponents(selectAll = false) {
+  async function loadComponents() {
     active.current?.abort();
     const controller = new AbortController();
     active.current = controller;
@@ -59,7 +59,6 @@ export function PackageExclusions({ sourceIds, selectedIds, onChange }: {
         || data.packages.some((other) => other.id !== entry.id && other.namespace === entry.namespace));
       let next = 0;
       let completed = 0;
-      let failed = false;
       const running = new Map<string, string>();
       const showProgress = () => setProgress(`패키지 로딩 중…… ${completed}/${toLoad.length} 처리 · ${[...running.values()].join(', ')}`);
       const worker = async () => {
@@ -77,7 +76,6 @@ export function PackageExclusions({ sourceIds, selectedIds, onChange }: {
             setMembers((current) => ({ ...current, [entry.id]: loaded.components }));
           } catch (caught) {
             if (controller.signal.aborted) return;
-            failed = true;
             setFailures((current) => ({ ...current, [entry.id]: errorMessage(caught) }));
           } finally {
             running.delete(entry.id);
@@ -87,14 +85,6 @@ export function PackageExclusions({ sourceIds, selectedIds, onChange }: {
         }
       };
       await Promise.all(Array.from({ length: Math.min(3, toLoad.length) }, () => worker()));
-      if (controller.signal.aborted) return;
-      if (selectAll) {
-        if (failed) setError('일부 패키지 로딩이 실패하여 전체 제외를 적용하지 않았습니다. 오류를 확인하고 다시 시도하세요.');
-        else if (selectedIds.length !== latestSelection.current.length || selectedIds.some((id) => !latestSelection.current.includes(id))) {
-          setError('로딩 중 패키지 선택이 변경되어 전체 제외를 적용하지 않았습니다. 다시 선택하세요.');
-        }
-        else onChange(data.packages.map((entry) => entry.id).sort());
-      }
     } catch (caught) {
       if (controller.signal.aborted) return;
       setError(errorMessage(caught));
@@ -115,19 +105,16 @@ export function PackageExclusions({ sourceIds, selectedIds, onChange }: {
               disabled={status === 'loading' || !!progress} aria-busy={!!progress} onClick={() => void loadComponents()}>
               <Icon name="refresh" />{progress ? '패키지 로딩 중……' : '패키지 로딩'}
             </button>
-            <label className={`option-toggle package-all-toggle${status !== 'ready' || !!progress || packages.length === 0 ? ' option-toggle-disabled' : ''}`}>
+            <label className={`option-toggle package-all-toggle${status !== 'ready' || !!progress || availablePackages.length === 0 ? ' option-toggle-disabled' : ''}`}>
               <span><strong>전체 제외</strong><small>{selectedCount}/{packages.length}개 선택</small></span>
               <input type="checkbox" aria-label="전체 패키지 제외" checked={allSelected}
                 ref={(input) => { if (input) input.indeterminate = selectedCount > 0 && !allSelected; }}
-                disabled={status !== 'ready' || !!progress || packages.length === 0}
-                onChange={(event) => {
-                  if (!event.target.checked) onChange([]);
-                  else if (packages.every((entry) => entry.exclusionUnavailableReason === undefined)) onChange(packages.map((entry) => entry.id).sort());
-                  else void loadComponents(true);
-                }} /><i aria-hidden="true" />
+                disabled={status !== 'ready' || !!progress || availablePackages.length === 0}
+                onChange={(event) => onChange(event.target.checked ? availablePackages.map((entry) => entry.id).sort() : [])} /><i aria-hidden="true" />
             </label>
             <p>네임스페이스가 없거나 공유하는 패키지만 구성요소를 조회합니다. 고유 네임스페이스는 조회 없이 제외할 수 있습니다. 조회에는 수 분이 걸릴 수 있습니다.</p>
           </div>
+          {status === 'ready' && unavailableCount > 0 && <p>전체 제외는 제외 가능한 {availablePackages.length}개 패키지만 선택합니다. 나머지 {unavailableCount}개는 패키지 로딩을 완료해 주세요.</p>}
           {progress && <p role="status">{progress}</p>}
           {status === 'loading' && <p role="status">설치 패키지 목록을 불러오는 중입니다.</p>}
           {error && <p role="alert">{error}</p>}
