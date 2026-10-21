@@ -36,6 +36,9 @@ for (const width of [1440, 390, 2560]) {
       status: route.request().method() === 'POST' ? 202 : 200,
       json: route.request().method() === 'GET' && new URL(route.request().url()).pathname === '/api/v1/comparisons' ? { jobs: [] } : { job },
     }));
+    await page.route('**/api/v1/apex-test-classes**', (route) => route.fulfill({ json: {
+      testClasses: [{ name: 'Paged001_Test', matchesConfiguredSuffix: true }],
+    } }));
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
     try {
@@ -64,6 +67,8 @@ for (const width of [1440, 390, 2560]) {
       });
       expect(paginationGap).toBeGreaterThanOrEqual(0);
       await page.getByLabel('Paged001 배포 대상으로 선택').check();
+      await expect(page.getByRole('region', { name: 'Apex 테스트 클래스 선택' })
+        .getByRole('checkbox', { name: 'Paged001_Test' })).toBeVisible();
       const collapsedHeight = await page.evaluate(() => document.documentElement.scrollHeight);
       await list.locator('.component-result summary > div').first().click();
       await expect(list.locator('.component-result').first()).toHaveAttribute('open', '');
