@@ -744,7 +744,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       && (item.location !== 'git' || loadedPreset !== null)
       && (item.id === sourceSelectionId || item.id === targetSelectionId)
       && sources.findIndex((source) => source?.id === item.id) === index);
-  const deploySources: WorkspaceSource[] = [
+  const deploySources: WorkspaceSource[] = workspace === null ? [] : [
     ...restoredSources,
     ...(workspace?.sources ?? []).filter((source) => (source.location !== 'git'
       || (loadedPreset !== null && (source.id === sourceSelectionId || source.id === targetSelectionId)))

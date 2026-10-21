@@ -1025,6 +1025,38 @@ test('Git을 다시 가져오는 동안 이전 비교의 배포 선택을 비운
   await expect(page.getByRole('checkbox', { name: 'Hello 배포 대상으로 선택' })).not.toBeChecked();
 });
 
+test('Git 연결이 먼저 도착해도 초기 작업 공간 조회를 마친 뒤 소스·타겟을 선택한다', async ({ page }) => {
+  const bound = connection({ repositoryPath: 'acme/registered-project' });
+  await mockGitApis(page, { initialConnections: [bound] });
+  let releaseWorkspace!: () => void; let releaseConnections!: () => void;
+  const workspaceReady = new Promise<void>((resolve) => { releaseWorkspace = resolve; });
+  const connectionsReady = new Promise<void>((resolve) => { releaseConnections = resolve; });
+  await page.route('**/api/v1/workspace', async (route) => {
+    await workspaceReady;
+    return json(route, { ...baseWorkspace, sources: [targetSource, readySource(historicalImportId)] });
+  });
+  await page.route('**/api/v1/git/connections', async (route) => {
+    await connectionsReady;
+    return json(route, { connections: [bound], tokenStorage: 'ready' });
+  });
+  try {
+    await page.goto('http://127.0.0.1:27546/deploy');
+    const loading = page.getByText('등록된 Git 저장소를 불러오는 중……', { exact: true });
+    await expect(loading).toBeVisible(); releaseConnections();
+    await expect(loading).toHaveCount(0);
+    const source = page.getByLabel('DESIRED SOURCE 비교 소스');
+    const target = page.getByLabel('TARGET 비교 소스');
+    await expect(source).toBeDisabled(); await expect(target).toBeDisabled();
+    releaseWorkspace();
+    await source.selectOption(`git-connection:${connectionId}`);
+    await expect(page.getByLabel('브랜치 검색 및 선택')).toHaveValue('main');
+    await page.getByLabel('브랜치 검색 및 선택').fill('release');
+    await expect(source).toHaveValue(`git-connection:${connectionId}`);
+    await expect(target).toHaveValue(targetSource.id);
+    await expect(page.getByRole('button', { name: '메타데이터 비교', exact: true })).toBeEnabled();
+  } finally { releaseConnections(); releaseWorkspace(); }
+});
+
 test('source를 바꾼 뒤 늦게 끝난 import 응답을 버리고 중복 준비를 잠근다', async ({ page }) => {
   const registeredPath = 'acme/registered-project';
   const historical = readySource(historicalImportId, { label: 'legacy/project', provenance: {
