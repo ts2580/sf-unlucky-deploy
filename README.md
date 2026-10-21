@@ -25,6 +25,8 @@ Windows x64에서는 SQLite 바이너리를 포함한 번들을 설치할 수 �
 npm install --global --ignore-scripts @trstyq/sf-unlucky-deploy@win32-x64
 ```
 
+Windows 번들은 SQLite native 바이너리를 포함하며 `sqlite3`의 설치 스크립트와 자동 C++ 빌드를 제거했다. 위 명령으로 설치 스크립트 실행을 생략할 수 있다. 일반판은 SQLite 바이너리 설치가 필요하므로 이 옵션을 사용하려면 `win32-x64` 번들을 선택한다.
+
 정식 일반판은 `latest`, 시험판 일반판은 `next`, Windows 번들은 `win32-x64` 채널을 사용한다. 같은 설치 명령을 다시 실행하면 해당 채널의 버전으로 갱신된다.
 
 `--project`에는 `sfdx-project.json`이 있는 로컬 Salesforce DX 프로젝트 경로를 넣는다. 여러 프로젝트는 옵션을 반복해서 등록하고, Git과 Org만 사용할 때는 생략한다.
