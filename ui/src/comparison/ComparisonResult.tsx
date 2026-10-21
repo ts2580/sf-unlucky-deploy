@@ -1,6 +1,6 @@
 import type { WorkspaceSource } from '../../../src/api/workspace-contracts';
 import { comparisonDisplayWarnings } from '../../../src/reports/comparison-display';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { ComparisonFileDiff } from '../ComparisonFileDiff';
 import { Icon } from '../components/Icon';
@@ -70,8 +70,6 @@ export function ComparisonResultPanel({
   const [identicalLoading, setIdenticalLoading] = useState(false);
   const [filterError, setFilterError] = useState('');
   const [loadAttempt, setLoadAttempt] = useState(0);
-  const resultListRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { if (resultListRef.current) resultListRef.current.scrollTop = 0; }, [job.id, resultPage, query, statusFilters]);
   const components = expandedResult?.id === job.id ? expandedResult.components : job.result?.components ?? [];
   const identicalMissing = (job.result?.summary.identical ?? 0) > components.filter((item) => item.status === 'IDENTICAL').length;
   const identicalSelected = statusFilters.includes('IDENTICAL');
@@ -151,7 +149,8 @@ export function ComparisonResultPanel({
       {comparisonDisplayWarnings(job.result.warnings).map((warning) => <p className="comparison-warning" key={warning}><Icon name="shield" />{warning}</p>)}
       {deploymentView && !comparisonOnly && !sourceOnly && summary.removed > 0 && <p className="comparison-warning"><Icon name="shield" />TARGET ONLY 항목은 destructive manifest 없이는 target org에서 삭제되지 않습니다.</p>}
       <div className="component-results">
-        <div className="component-results-list" ref={resultListRef} role="region" aria-label="메타데이터 검색 결과 목록" tabIndex={deploymentView ? 0 : undefined}>
+        <div className="component-results-list" key={JSON.stringify([job.id, currentResultPage, query, statusFilters])}
+          role="region" aria-label="메타데이터 검색 결과 목록" tabIndex={deploymentView ? 0 : undefined}>
           {filteredComponents.length === 0
             ? !identicalLoading && !filterError && <p className="empty-result">{query.trim() !== '' || statusFilters.length > 0 ? '선택한 상태와 검색 조건에 맞는 메타데이터가 없습니다.' : sourceOnly ? 'Source에서 받아온 메타데이터가 없습니다.' : '표시할 차이가 없습니다. 동일 항목은 IDENTICAL을 눌러 확인하세요.'}</p>
             : visibleComponents.map((component) => <details key={component.key} className={`component-result${deploymentView ? ' component-selectable' : ''}${selectedKeys.has(component.key) ? ' component-selected' : ''}`}>

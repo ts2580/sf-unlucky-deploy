@@ -57,7 +57,12 @@ for (const width of [1440, 390, 2560]) {
       expect(await list.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
       const pagination = page.getByRole('navigation', { name: '메타데이터 검색 결과 페이지' });
       await expect(list.getByRole('navigation')).toHaveCount(0);
-      expect((await pagination.boundingBox())!.y).toBeGreaterThanOrEqual((await list.boundingBox())!.y + (await list.boundingBox())!.height);
+      const paginationGap = await page.evaluate(() => {
+        const listBox = document.querySelector('.component-results-list')!.getBoundingClientRect();
+        const navigationBox = document.querySelector('.component-pagination')!.getBoundingClientRect();
+        return navigationBox.top - listBox.bottom;
+      });
+      expect(paginationGap).toBeGreaterThanOrEqual(0);
       await page.getByLabel('Paged001 배포 대상으로 선택').check();
       const collapsedHeight = await page.evaluate(() => document.documentElement.scrollHeight);
       await list.locator('.component-result summary > div').first().click();

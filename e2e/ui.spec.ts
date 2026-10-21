@@ -521,7 +521,7 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(page.locator('#salesforce-deploy-metadata-types option')).toHaveCount(3);
   await expect(page.getByText('전체 메타데이터', { exact: true })).toHaveCount(0);
   await expect(page.getByText('3개 metadata type 검색 가능 · source와 target의 합집합')).toBeVisible();
-  const comparisonOptions = page.getByRole('region', { name: '메타데이터 검색' });
+  const comparisonOptions = page.getByRole('region', { name: '메타데이터 검색', exact: true });
   const comparisonButton = comparisonOptions.locator('.comparison-run-button');
   await expect(comparisonButton).toHaveAccessibleName('메타데이터 비교');
   await expect(comparisonButton).toHaveClass(/button-primary/u);
@@ -949,7 +949,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.locator('.comparison-progress')).toHaveCount(0);
   await expect(page.getByText('NEW', { exact: true }).first()).toBeVisible({ timeout: 5_000 });
   await expect(page.getByRole('heading', { name: 'fixture-project → target' })).toBeVisible();
-  const searchPanelBox = await page.getByRole('region', { name: '메타데이터 검색' }).boundingBox();
+  const searchPanelBox = await page.getByRole('region', { name: '메타데이터 검색', exact: true }).boundingBox();
   const searchResultBox = await page.locator('.comparison-result').first().boundingBox();
   const testPanelBox = await page.getByRole('region', { name: 'Apex 테스트 설정' }).boundingBox();
   expect(searchPanelBox).not.toBeNull();
