@@ -39,6 +39,11 @@ for (const width of [1440, 390, 2560]) {
     await page.route('**/api/v1/apex-test-classes**', (route) => route.fulfill({ json: {
       testClasses: [{ name: 'Paged001_Test', matchesConfiguredSuffix: true }],
     } }));
+    // The synthetic comparison uses Org IDs without real authentication records.
+    // Keep draft saving successful so its unrelated error banner cannot change the measured height.
+    await page.route('**/api/v1/deployment-drafts', (route) => route.fulfill({ json: route.request().method() === 'PUT'
+      ? { id: 'scroll-draft', tabId: route.request().postDataJSON().tabId, expiresAt: '2099-01-01T00:00:00Z', updatedAt: '2026-10-22T00:00:00Z' }
+      : { drafts: [] } }));
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
     try {
