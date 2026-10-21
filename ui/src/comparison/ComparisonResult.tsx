@@ -33,7 +33,7 @@ export function WorkspaceSourceSelect({
       <span className="source-logo"><Icon name={selected?.kind === 'local' ? 'folder' : 'cloud'} /></span>
       <span><strong>{selected?.label ?? '소스 조회 중'}</strong><small>{selected === undefined ? '연결 상태를 확인하고 있습니다.' : sourceDescription(selected)}</small></span>
       <Icon name="chevron" />
-      <select aria-label={`${side} 비교 소스`} value={value} onChange={(event) => onChange(event.target.value)} disabled={sources.length === 0}>
+      <select aria-label={`${side} 비교 소스`} value={value} onChange={(event) => onChange(event.target.value)} disabled={sources.length === 0 || (value !== '' && selected === undefined)}>
         {value === '' && <option value="" disabled>소스를 선택하세요.</option>}
         {sources.map((source) => <option key={source.id} value={source.id}>{source.label} · {sourceDescription(source)}</option>)}
       </select>

@@ -1058,6 +1058,9 @@ test('Git 연결이 먼저 도착해도 초기 작업 공간 조회를 마친 �
 });
 
 test('source를 바꾼 뒤 늦게 끝난 import 응답을 버리고 중복 준비를 잠근다', async ({ page }) => {
+  // Widen the initial historical-source cleanup window, as on slower CI browsers.
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 6 });
   const registeredPath = 'acme/registered-project';
   const historical = readySource(historicalImportId, { label: 'legacy/project', provenance: {
     ...readySource(historicalImportId).provenance!, repositoryPath: 'legacy/project', importId: historicalImportId,
@@ -1071,6 +1074,8 @@ test('source를 바꾼 뒤 늦게 끝난 import 응답을 버리고 중복 준�
   await page.goto('http://127.0.0.1:27546/deploy');
   const desiredSource = page.getByLabel('DESIRED SOURCE 비교 소스');
   await desiredSource.selectOption(`git-connection:${connectionId}`);
+  await expect(desiredSource).toHaveValue(`git-connection:${connectionId}`);
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
   await page.getByLabel('브랜치 검색 및 선택').fill('release');
   const prepareButton = page.getByRole('button', { name: '메타데이터 비교' });
   await prepareButton.click();
