@@ -670,6 +670,11 @@ button:focus-visible, a:focus-visible { outline: 3px solid #60a5fa; outline-offs
 /* Saved deployment selections and recovery actions. */
 .comparison-result-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-width: 0; }
 .comparison-result-actions .button,.file-diff-toolbar .button { min-height: 40px; height: auto; padding: 8px 12px; white-space: normal; }
+.deployment-page .component-results-list {
+  position: relative; min-height: 0; max-height: min(60dvh, 640px); overflow: auto;
+  overscroll-behavior: contain; scrollbar-gutter: stable; padding: 3px;
+}
+.deployment-page .component-results-list:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; border-radius: 8px; }
 .component-files .file-diff-toolbar { display: flex; justify-content: flex-end; padding: 8px; border-bottom: 1px solid #263c55; }
 .diff-download { min-width: 0; max-width: 100%; min-height: 40px; padding: 8px 12px; border: 1px solid #d9e3ed; border-radius: 8px; color: #30475f; background: #fbfdff; font: inherit; cursor: pointer; }
 .diff-download:focus-visible { outline: 2px solid #55a7e7; outline-offset: 2px; }

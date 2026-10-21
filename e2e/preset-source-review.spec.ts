@@ -3,6 +3,69 @@ import { createWebServer } from '../src/web/server/app.js';
 import type { WorkspaceSource } from '../src/api/workspace-contracts.js';
 
 for (const width of [1440, 390]) {
+  test(`저장한 Git 소스·타겟만 정확하게 표시하고 일반 선택으로 돌아오면 이력을 숨긴다 (${width}px)`, async ({ page }) => {
+    const app = await createWebServer({ host: '127.0.0.1', port: 0, localMode: true, accessPassword: 'preset-review-test', databasePath: ':memory:',
+      sfClient: { async runJson() { return { result: { nonScratchOrgs: [] } }; } } });
+    const org: WorkspaceSource = { id: 'org:target', kind: 'org', label: 'target' };
+    const source: WorkspaceSource = { id: 'git-registered:saved-source', kind: 'local', location: 'git', label: '저장된 source · main' };
+    const target: WorkspaceSource = { id: 'git:saved-target', kind: 'local', location: 'git', label: '저장된 target · release' };
+    const orphan: WorkspaceSource = { id: 'git:old-import', kind: 'local', location: 'git', label: '삭제된 저장소의 가져오기 이력' };
+    const preset = { id: 'git-pair', name: 'Git 비교 설정', schemaVersion: 1, createdAt: '2026-10-22T00:00:00Z', updatedAt: '2026-10-22T00:00:00Z' };
+    const selection = { sourceId: source.id, targetId: target.id, metadataType: 'ApexClass', compareCurrentType: true, showIdentical: false,
+      excludedPackageIds: [], testLevel: 'auto', tests: [] };
+    // Desktop covers a resolved source overriding stale workspace data; mobile covers workspace fallback.
+    const resolved = { preset, selection, ...(width === 1440 ? { source, target } : {}), warnings: [], preparationRequired: false };
+    let submitted: Record<string, unknown> | undefined;
+    try {
+      const address = await app.listen({ host: '127.0.0.1', port: 0 });
+      await page.setViewportSize({ width, height: 900 });
+      await page.route('**/api/v1/workspace', (route) => route.fulfill({ json: { orgs: [{ ...org, alias: 'target', connected: true }], projects: [],
+        sources: [org, { ...source, label: width === 1440 ? '오래된 source 이름' : source.label }, ...(width === 390 ? [target] : []), orphan] } }));
+      await page.route('**/api/v1/metadata-types**', (route) => route.fulfill({ json: { metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }] } }));
+      await page.route('**/api/v1/installed-packages**', (route) => route.fulfill({ json: { packages: [] } }));
+      await page.route('**/api/v1/deployment-presets', (route) => route.fulfill({ json: { presets: [preset] } }));
+      await page.route('**/api/v1/deployment-presets/git-pair/*', (route) => route.fulfill({ json: resolved }));
+      await page.route('**/api/v1/deployment-drafts', (route) => route.fulfill({ json: route.request().method() === 'GET' ? { drafts: [] }
+        : { id: 'pair-draft', tabId: route.request().postDataJSON().tabId, expiresAt: '2099-01-01T00:00:00Z', updatedAt: preset.updatedAt } }));
+      await page.route('**/api/v1/comparisons', (route) => {
+        if (route.request().method() === 'GET') return route.fulfill({ json: { jobs: [] } });
+        submitted = route.request().postDataJSON();
+        return route.fulfill({ json: { job: { id: 'git-pair-comparison', status: 'SUCCEEDED', scope: 'all', manifest: 'ApexClass', left: target, right: source,
+          result: { summary: { total: 0, added: 0, removed: 0, modified: 0, identical: 0, different: 0 }, warnings: [], components: [] } } } });
+      });
+      await page.goto(`${address}/deploy`);
+      await page.getByLabel('접속 비밀번호').fill('preset-review-test');
+      await page.getByRole('button', { name: '접속', exact: true }).click();
+      const sourceSelect = page.getByLabel('DESIRED SOURCE 비교 소스');
+      const targetSelect = page.getByLabel('TARGET 비교 소스');
+      await expect(sourceSelect.locator('option[value^="git"]')).toHaveCount(0);
+      await expect(targetSelect.locator('option[value^="git"]')).toHaveCount(0);
+      const settings = page.locator('details[aria-label="저장한 배포 설정"]');
+      await settings.locator('summary').click();
+      await settings.getByRole('combobox', { name: '저장 설정', exact: true }).selectOption(preset.id);
+      await settings.getByRole('button', { name: '불러오기', exact: true }).click();
+      await expect(sourceSelect).toHaveValue(source.id); await expect(targetSelect).toHaveValue(target.id);
+      await expect(page.locator('.source-violet strong')).toHaveText(source.label);
+      await expect(page.locator('.source-blue strong')).toHaveText(target.label);
+      await expect(sourceSelect.locator(`option[value="${source.id}"]`)).toHaveCount(1);
+      await expect(targetSelect.locator(`option[value="${target.id}"]`)).toHaveCount(1);
+      await expect(sourceSelect.locator(`option[value="${target.id}"]`)).toHaveCount(0);
+      await expect(targetSelect.locator(`option[value="${source.id}"]`)).toHaveCount(0);
+      await expect(sourceSelect.locator(`option[value="${orphan.id}"]`)).toHaveCount(0);
+      await expect(page.getByRole('button', { name: '배포 대상 Dry-run', exact: true })).toBeDisabled();
+      // Choosing the already displayed item must not discard the loaded preset.
+      await sourceSelect.selectOption(source.id); await targetSelect.selectOption(target.id);
+      await expect(sourceSelect).toHaveValue(source.id); await expect(targetSelect).toHaveValue(target.id);
+      await page.getByRole('button', { name: '메타데이터 비교', exact: true }).click();
+      await expect.poll(() => submitted).toMatchObject({ rightSourceId: source.id, leftSourceId: target.id });
+      await page.locator('.deploy-source-panel').screenshot({ path: test.info().outputPath(`saved-git-sources-${width}.png`) });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+      await sourceSelect.selectOption(org.id);
+      await expect(sourceSelect.locator('option[value^="git"]')).toHaveCount(0);
+      await expect(targetSelect.locator('option[value^="git"]')).toHaveCount(0);
+      await expect(targetSelect).toHaveValue('');
+    } finally { await page.context().close(); await app.close(); }
+  });
   for (const operation of ['compare', 'dry-run', 'direct'] as const) {
     test(`저장한 Git ref 이동 시 ${operation} 제출을 중단하고 새 커밋 확인을 요구한다 (${width}px)`, async ({ page }) => {
       const app = await createWebServer({ host: '127.0.0.1', port: 0, localMode: true,
@@ -11,7 +74,7 @@ for (const width of [1440, 390]) {
           orgId: '00D000000000001', connectedStatus: 'Connected', isSandbox: true }] } }; } },
       });
       const target: WorkspaceSource = { id: 'org:target', kind: 'org', label: 'target', environment: 'sandbox' };
-      const source: WorkspaceSource = { id: 'git-registered:saved-branch', kind: 'local', location: 'git', label: 'owner/project · main' };
+      const source: WorkspaceSource = { id: operation === 'dry-run' ? 'git:saved-import' : 'git-registered:saved-branch', kind: 'local', location: 'git', label: 'owner/project · main' };
       const sha = 'b'.repeat(40);
       const preparedSource: WorkspaceSource = { ...source, id: 'git:prepared-import', provenance: {
         provider: 'github', host: 'github.com', repositoryId: '123', repositoryPath: 'owner/project',
@@ -67,6 +130,11 @@ for (const width of [1440, 390]) {
         await settings.getByRole('combobox', { name: '저장 설정', exact: true }).selectOption(preset.id);
         await settings.getByRole('button', { name: '불러오기', exact: true }).click();
         await expect(page.getByLabel('SavedClass 배포 대상으로 선택')).toBeChecked();
+        await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue(source.id);
+        await expect(page.locator('.source-violet strong')).toHaveText(source.label);
+        await expect(page.getByLabel('DESIRED SOURCE 비교 소스').locator('option:checked')).toContainText(source.label);
+        await expect(page.getByLabel('TARGET 비교 소스')).toHaveValue(target.id);
+        await expect(page.locator('.deploy-source-panel')).not.toContainText('소스 조회 중');
         expect(prepares).toBe(0); expect(submitted).toHaveLength(0);
         const action = page.getByRole('button', { name: operation === 'compare' ? '메타데이터 비교'
           : operation === 'dry-run' ? '배포 대상 Dry-run' : '배포 대상 실제 배포', exact: true });

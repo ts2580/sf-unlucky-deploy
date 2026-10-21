@@ -1,7 +1,7 @@
 import { GitRegisteredBranches } from './GitRegisteredBranches';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type { ApiUser } from '../auth/api';
-import { GitAliasInputSchema, GitConnectionResponseSchema, GitTokenInputSchema, GitEnvironmentResponseSchema,
+import { GitAliasInputSchema, GitConnectionResponseSchema, GitTokenInputSchema, GitEnvironmentResponseSchema, GitRepositorySelectionSchema,
   type GitConnection, type GitProvidersResponse, type GitProviderId, type GitTokenInput } from '../../../src/api/git-contracts';
 import type { GitImport } from '../../../src/api/git-project-contracts';
 import { apiRequest } from '../api-client';
@@ -13,6 +13,7 @@ import { ConnectionTable } from '../components/ConnectionTable';
 import { ConnectionDialog } from '../components/ConnectionDialog';
 import { GitAliasEditor } from './GitAliasEditor';
 import { GitRepositoryPicker } from './GitRepositoryPicker';
+import { GitRepositoryConnectDialog } from './GitRepositoryConnectDialog';
 
 export function GitSettings({ user, section = 'projects' }: { user: ApiUser; section?: 'projects' | 'connections' }) {
   const [registrationOpen, setRegistrationOpen] = useState(false);
@@ -20,7 +21,7 @@ export function GitSettings({ user, section = 'projects' }: { user: ApiUser; sec
   const [configuration, setConfiguration] = useState<GitProvidersResponse>();
   const [accounts, setAccounts] = useState<GitConnection[]>([]);
   const [connected, setConnected] = useState<GitConnection>();
-  const [selectedRepositoryPath, setSelectedRepositoryPath] = useState<string>();
+  const [repositoryAccount, setRepositoryAccount] = useState<GitConnection>();
   const [provider, setProvider] = useState<GitProviderId>('github');
   const [token, setToken] = useState('');
   const [email, setEmail] = useState('');
@@ -92,7 +93,7 @@ export function GitSettings({ user, section = 'projects' }: { user: ApiUser; sec
       setAccounts((old) => [...old.filter((entry) => entry.id !== result.connection.id), result.connection]);
       setConnected(result.connection); setReplacement(undefined); setEmail(''); setExpiry('');
       setMessage(`${providerNames[result.connection.provider]} ${result.connection.repositoryPath ? '저장소 연결' : '토큰'}을 등록했습니다.`);
-      try { await refresh(); } finally { setRegistrationOpen(false); if (!result.connection.repositoryPath && !replacement) setImportOpen(true); }
+      try { await refresh(); } finally { setRegistrationOpen(false); if (!result.connection.repositoryPath && !replacement) setRepositoryAccount(result.connection); }
     } catch (cause) { setError(errorMessage(cause)); }
     finally { setBusy(false); }
   };
@@ -129,6 +130,19 @@ export function GitSettings({ user, section = 'projects' }: { user: ApiUser; sec
     setRepositoryPath(account.repositoryPath ?? ''); setToken(''); setEmail('');
     setExpiry(account.expiresAt?.slice(0, 10) ?? ''); setError(''); setAlias(account.alias ?? '');
   };
+  const connectAccountRepository = async (account: GitConnection, path: string) => {
+    if (!canEdit || busy) return;
+    setBusy(true); setError('');
+    try {
+      await apiRequest(`/api/v1/git/connections/${encodeURIComponent(account.id)}/repositories`, {
+        method: 'POST', csrf: true, body: { repositoryPath: path }, requestSchema: GitRepositorySelectionSchema,
+        responseSchema: GitConnectionResponseSchema,
+      });
+      await refresh(); closeRegistration();
+      setMessage('저장소를 연결했습니다. 비교 화면에서 브랜치를 선택하세요.');
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setBusy(false); }
+  };
   return <>
     {section === 'connections' && <section className="workflow-panel settings-wide git-panel connections-panel" aria-labelledby="git-connections-heading">
       <div className="panel-heading"><span className="card-icon icon-blue"><Icon name="code" /></span><div><h2 id="git-connections-heading">Git 계정 연결</h2><p>저장소 URL과 PAT/API Token으로 접근을 확인하고 내 계정에 암호화하여 저장합니다.</p></div><button type="button" className="button button-primary" disabled={!configuration || !canEdit || busy} onClick={() => { setReplacement(undefined); setAlias(''); setToken(''); setRepositoryPath(''); setEmail(''); setExpiry(''); setError(''); setMessage(''); setConnectionMode('repository'); setRegistrationOpen(true); }}>새 연결</button></div>
@@ -157,7 +171,7 @@ export function GitSettings({ user, section = 'projects' }: { user: ApiUser; sec
         </div>
         {connectionMode === 'account' && replacement?.status === 'ACTIVE' && !replacement.repositoryPath && replacement.provider === provider
           && <GitRepositoryPicker key={replacement.id} connection={replacement} disabled={busy} onSelect={(path) => {
-            setSelectedRepositoryPath(path); setConnected(replacement); closeRegistration(); setReimport(undefined); setImportOpen(true);
+            void connectAccountRepository(replacement, path);
           }} />}
         {connectionMode === 'repository' && <p>계정·워크스페이스 목록 조회 권한 없이 지정한 저장소만 확인합니다. 셀프호스팅 제공자는 포트와 /scm 같은 경로를 포함한 전체 HTTPS clone URL을 입력하세요. 공개 저장소는 토큰 없이도 접근되므로 계정 인증을 확인한 것으로 표시하지 않습니다.</p>}
           {configuration?.environmentAvailable && <button className="small-button" type="button" disabled={!canEdit || busy} onClick={() => void importEnvironment()}>환경변수 토큰 등록</button>}
@@ -198,7 +212,9 @@ export function GitSettings({ user, section = 'projects' }: { user: ApiUser; sec
     </section>
     <GitRegisteredBranches canEdit={canEdit} revision={revision} />
     <GitProjectList canEdit={canEdit} revision={revision} onReimport={(item) => { setReimport({ ...item }); setImportOpen(true); }} /></>}
+    {repositoryAccount && <GitRepositoryConnectDialog connection={repositoryAccount} canEdit={canEdit} onClose={() => setRepositoryAccount(undefined)}
+      onConnected={() => { setRepositoryAccount(undefined); setRevision((value) => value + 1); setMessage('저장소를 연결했습니다. 비교 화면에서 브랜치를 선택하세요.'); void refresh().catch(() => undefined); }} />}
     {importOpen && <GitImportDialog userId={user.id} canEdit={canEdit} providers={configuration?.providers ?? []} connections={accounts}
-      connected={connected} selectedRepositoryPath={selectedRepositoryPath} reimport={reimport} onImported={(kind) => { setMessage(kind === 'import' ? '저장소 가져오기를 시작했습니다. 설정에서 Git 프로젝트의 진행 상태를 확인하세요.' : '배포 브랜치를 등록했습니다. 설정에서 등록 브랜치를 확인하세요.'); setRevision((value) => value + 1); setReimport(undefined); setSelectedRepositoryPath(undefined); setImportOpen(false); }} onClose={() => { setReimport(undefined); setSelectedRepositoryPath(undefined); setImportOpen(false); }} />}
+      connected={connected} reimport={reimport} onImported={(kind) => { setMessage(kind === 'connection' ? '저장소를 연결했습니다. 비교 화면에서 브랜치를 선택하세요.' : kind === 'import' ? '저장소 가져오기를 시작했습니다. 설정에서 Git 프로젝트의 진행 상태를 확인하세요.' : '배포 브랜치를 등록했습니다. 설정에서 등록 브랜치를 확인하세요.'); if (kind === 'connection') void refresh().catch(() => undefined); setRevision((value) => value + 1); setReimport(undefined); setImportOpen(false); }} onClose={() => { setReimport(undefined); setImportOpen(false); }} />}
   </>;
 }

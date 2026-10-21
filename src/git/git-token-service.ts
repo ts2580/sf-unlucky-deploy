@@ -116,4 +116,24 @@ export class GitTokenService {
       throw new GitError('GIT_REAUTH_REQUIRED');
     } finally { this.validating.delete(owner); }
   }
+
+  public async registerRepository(owner: string, accountId: string, repositoryPath: string): Promise<GitConnection> {
+    if (!this.enabled) throw new GitError('PROVIDER_NOT_CONFIGURED');
+    this.connections.assertReady();
+    if (this.validating.has(owner) || this.validating.size >= 20) throw new GitError('PROVIDER_RATE_LIMITED');
+    this.validating.add(owner);
+    try {
+      const state = await this.connections.readCredentials(owner, accountId);
+      if (state.connection.repositoryPath !== undefined) throw new GitError('GIT_CONNECTION_REQUIRED');
+      if (state.tokens.expiresAt !== undefined && Date.parse(state.tokens.expiresAt) <= Date.now()) throw new GitError('GIT_REAUTH_REQUIRED');
+      const address = normalizeRepository(repositoryPath, state.connection.provider);
+      if (address.host !== state.connection.providerHost) throw new GitError('GIT_CONNECTION_REQUIRED');
+      const remote = new GitRemoteProvider(address, credentialProviderFor(address.provider, state.tokens), this.remote);
+      const repository = await remote.inspect(address, undefined, AbortSignal.timeout(20_000));
+      return await this.connections.save({ ownerUserId: owner, provider: address.provider, providerHost: address.host,
+        providerAccountId: repository.repositoryId, displayName: address.repositoryPath.slice(0, 200),
+        repositoryPath: connectionRepositoryPath(address), grantedPermissions: [], tokens: state.tokens },
+      undefined, { id: accountId, tokenVersion: state.tokenVersion });
+    } finally { this.validating.delete(owner); }
+  }
 }

@@ -19,7 +19,9 @@ for (const width of [1440, 390]) {
     let started = false;
     let gate = new Promise<void>((resolve) => { release = resolve; });
     const componentRequests: string[] = [];
+    let inventoryRequests = 0;
     page.on('request', (request) => {
+      if (new URL(request.url()).pathname === '/api/v1/installed-packages') inventoryRequests++;
       const match = /\/installed-packages\/(033[A-Za-z0-9]+)\/components$/u.exec(new URL(request.url()).pathname);
       if (match) componentRequests.push(match[1]!);
     });
@@ -66,6 +68,12 @@ for (const width of [1440, 390]) {
         throw new Error(`예상하지 못한 호출: ${args.join(' ')}`);
       } },
     });
+    const submissions: Array<{ excludedPackageIds?: string[] }> = [];
+    await page.route('**/api/v1/comparisons', async (route) => {
+      if (route.request().method() !== 'POST') return route.continue();
+      submissions.push(route.request().postDataJSON() as { excludedPackageIds?: string[] });
+      await route.fulfill({ status: 400, json: { error: { message: '회귀 검사: 비교 요청 내용 확인 완료' } } });
+    });
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
     try {
@@ -73,6 +81,7 @@ for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: 1000 });
       await page.goto(`${address}/deploy`);
       await page.getByLabel('DESIRED SOURCE 비교 소스').selectOption('org:dev');
+      await page.getByLabel('TARGET 비교 소스').selectOption('org:other');
       await page.locator('.package-exclusions-summary').click();
       const panel = page.getByRole('group', { name: '비교에서 제외할 설치 패키지' });
       const checkbox = panel.getByRole('checkbox', { name: 'Unlocked CRM 비교에서 제외' });
@@ -96,7 +105,7 @@ for (const width of [1440, 390]) {
         return element.getBoundingClientRect().bottom - button.getBoundingClientRect().bottom - parseFloat(getComputedStyle(element).paddingBottom);
       });
       expect(searchSpacing).toBeLessThan(2);
-      await all.click();
+      await load.click();
       await expect.poll(() => started).toBe(true);
       await expect.poll(() => activeRetrievals).toBe(3);
       expect(retrievedNames).toHaveLength(3);
@@ -112,20 +121,46 @@ for (const width of [1440, 390]) {
       await page.screenshot({ path: testInfo.outputPath(`package-loading-${width}.png`), fullPage: true });
       release!();
       await expect(panel.getByRole('alert').filter({ hasText: '패키지 조회 권한' })).toBeVisible();
-      await expect(panel.getByRole('alert').filter({ hasText: '전체 제외를 적용하지 않았습니다' })).toBeVisible();
       await expect(all).not.toBeChecked();
       await expect(load).toBeEnabled();
       await expect(panel.getByText('ZQueued CRM 구성요소 보기 (1개)', { exact: true })).toBeVisible();
       expect(peakRetrievals).toBe(3);
       await expect(checkbox).toBeDisabled();
-      fail = false;
-      await all.click();
-      await expect(checkbox).toBeEnabled();
+      // A failed member must not restart loading or block the packages already ready.
+      const beforeSelectAll = { inventory: inventoryRequests, components: componentRequests.length };
+      await all.check();
       await expect(all).toBeChecked();
+      await expect(page.locator('.package-exclusions-summary')).toContainText('4개 패키지 제외');
+      await expect(panel).toContainText('전체 제외는 제외 가능한 4개 패키지만 선택합니다. 나머지 1개는 패키지 로딩을 완료해 주세요.');
+      await expect(checkbox).not.toBeChecked();
+      for (const name of ['Unique CRM', 'Shared A', 'Shared B', 'ZQueued CRM']) {
+        await expect(panel.getByRole('checkbox', { name: `${name} 비교에서 제외`, exact: true })).toBeChecked();
+      }
+      await expect(load).toBeEnabled();
+      expect({ inventory: inventoryRequests, components: componentRequests.length }).toEqual(beforeSelectAll);
+      await page.screenshot({ path: testInfo.outputPath(`package-partial-selection-${width}.png`), fullPage: true });
+      await page.locator('.comparison-run-button').click();
+      await expect.poll(() => submissions.length).toBe(1);
+      expect(submissions[0]?.excludedPackageIds).toEqual(['033000000000002', '033000000000003', '033000000000004', '033000000000005']);
+      await all.uncheck();
+      await expect(page.locator('.package-exclusions-summary')).toContainText('패키지를 선택해 비교에서 제외');
+      await unique.check();
+      fail = false;
+      await load.click();
+      await expect(checkbox).toBeEnabled();
+      await expect(unique).toBeChecked();
+      const afterRetry = { inventory: inventoryRequests, components: componentRequests.length };
+      await all.check();
+      await expect(all).toBeChecked();
+      await expect(load).toBeEnabled();
+      expect({ inventory: inventoryRequests, components: componentRequests.length }).toEqual(afterRetry);
       await expect(page.locator('.package-exclusions-summary')).toContainText('5개 패키지 제외');
       for (const name of ['Unlocked CRM', 'Unique CRM', 'Shared A', 'Shared B', 'ZQueued CRM']) {
         await expect(panel.getByRole('checkbox', { name: `${name} 비교에서 제외`, exact: true })).toBeChecked();
       }
+      await page.locator('.comparison-run-button').click();
+      await expect.poll(() => submissions.length).toBe(2);
+      expect(submissions[1]?.excludedPackageIds).toEqual(['033000000000001', '033000000000002', '033000000000003', '033000000000004', '033000000000005']);
       await all.click();
       await expect(all).not.toBeChecked();
       await expect(checkbox).not.toBeChecked();
@@ -162,7 +197,7 @@ for (const width of [1440, 390]) {
       if (!(await page.locator('.package-exclusions').evaluate((element) => (element as HTMLDetailsElement).open))) await page.locator('.package-exclusions-summary').click();
       await expect(checkbox).toBeDisabled();
       await expect(all).toBeEnabled();
-      await all.click();
+      await load.click();
       await expect.poll(() => started).toBe(true);
       await expect.poll(() => activeRetrievals).toBe(3);
       await page.getByLabel('DESIRED SOURCE 비교 소스').selectOption('org:other');
