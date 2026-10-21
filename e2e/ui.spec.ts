@@ -712,7 +712,7 @@ for (const width of [1440, 390]) {
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
     page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
-    const registered = { id: 'git-registered:limit-fixture', kind: 'local', location: 'git', label: 'owner/repo · main', detail: '등록 브랜치' };
+    const registered = { id: 'git-connection:11111111-1111-4111-8111-111111111111', kind: 'local', location: 'git', label: 'owner/repo', detail: '등록 저장소' };
     const fixed = { ...registered, id: 'git:fixed-limit-source', provenance: {
       provider: 'github', host: 'github.com', repositoryId: 'fixture', repositoryPath: `team/${'billing-project-'.repeat(8)}`,
       refType: 'branch', refName: 'main', commitSha: 'a'.repeat(40), projectRoot: `packages/${'nested-directory-'.repeat(8)}`,
@@ -729,7 +729,15 @@ for (const width of [1440, 390]) {
           files: [{ path: 'classes/Hello.cls', kind: 'text', status: 'SOURCE' }] }],
       } };
     await page.route('**/api/v1/workspace', (route) => route.fulfill({ json: { orgs: [], projects: [], sources: [registered, target] } }));
-    await page.route('**/api/v1/git/connections', (route) => route.fulfill({ json: { connections: [] } }));
+    const bound = { id: registered.id.slice('git-connection:'.length), provider: 'github', providerHost: 'github.com', providerAccountId: 'fixture', repositoryPath: fixed.provenance.repositoryPath,
+      displayName: 'owner/repo', status: 'ACTIVE', grantedPermissions: [], createdAt: '2026-10-04T00:00:00Z', updatedAt: '2026-10-04T00:00:00Z' };
+    await page.route('**/api/v1/git/connections', (route) => route.fulfill({ json: { connections: [bound], tokenStorage: 'ready' } }));
+    await page.route('**/api/v1/git/repositories/inspect', (route) => route.fulfill({ json: { repository: { provider: 'github', host: 'github.com', repositoryPath: bound.repositoryPath, cloneUrl: `https://github.com/${bound.repositoryPath}.git`, repositoryId: 'fixture', private: true, defaultBranch: 'main' } } }));
+    await page.route('**/api/v1/git/repositories/refs', (route) => route.fulfill({ json: { refs: [{ kind: 'branch', name: 'main', commitSha: fixed.provenance.commitSha }] } }));
+    await page.route('**/api/v1/git/repositories/resolve', (route) => route.fulfill({ json: { commitSha: fixed.provenance.commitSha } }));
+    await page.route('**/api/v1/git/imports', (route) => route.fulfill({ status: 202, json: { import: { id: 'fixed-limit-source', provider: 'github', repositoryPath: bound.repositoryPath,
+      ref: { kind: 'branch', name: 'main' }, expectedCommitSha: fixed.provenance.commitSha, status: 'READY', projectRoots: ['.'], sizeBytes: 100,
+      createdAt: '2026-10-04T00:00:00Z', updatedAt: '2026-10-04T00:00:00Z', source: fixed } } }));
     await page.route('**/api/v1/metadata-types**', (route) => route.fulfill({ json: { metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }] } }));
     await page.route('**/api/v1/apex-test-classes**', (route) => route.fulfill({ json: { testClasses: [] } }));
     await page.route('**/api/v1/comparisons**', (route) => {
@@ -747,7 +755,8 @@ for (const width of [1440, 390]) {
       await route.fulfill({ status: 202, json: { job: { ...dryRunFixture('APPROVAL_PENDING'), source: fixed, comparisonLimit: limit } } });
     });
     await login(page, '/deploy');
-    await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue(registered.id);
+    await page.getByLabel('DESIRED SOURCE 비교 소스').selectOption(registered.id);
+    await expect(page.getByLabel('브랜치 검색 및 선택')).toHaveValue('main');
     await page.getByRole('button', { name: '메타데이터 비교' }).click();
     await expect(page.getByText('비교 제한 초과 · 배포 목록 준비 완료')).toBeVisible();
     await expect(page.getByText(/비교 대상 파일 2,001개/)).toBeVisible();

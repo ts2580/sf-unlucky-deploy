@@ -5,6 +5,7 @@ import type { GitRepositoryResponse, GitRefsResponse, GitImport } from '../../..
 import { GitRepositoryPicker } from './GitRepositoryPicker';
 import { createImport, errorMessage, inspect, providerNames, projectRoots, refs } from './api';
 import { ConnectionDialog } from '../components/ConnectionDialog';
+import { GitRepositoryConnectDialog } from './GitRepositoryConnectDialog';
 
 interface Draft { provider: GitProviderId; connectionId: string; repositoryPath: string; kind: 'branch' | 'tag' | 'commit'; name: string }
 const empty: Draft = { provider: 'github', connectionId: '', repositoryPath: '', kind: 'branch', name: '' };
@@ -19,10 +20,9 @@ function readDraft(userId: string): Draft {
   return empty;
 }
 
-export function GitImportDialog({ userId, canEdit, providers, connections, connected, selectedRepositoryPath, reimport, onImported, onClose }: {
+export function GitImportDialog({ userId, canEdit, providers, connections, connected, reimport, onImported, onClose }: {
   userId: string; canEdit: boolean; providers: GitProvidersResponse['providers']; connections: GitConnection[];
-  connected?: GitConnection; reimport?: GitImport; onImported(kind: 'import' | 'registration'): void;
-  selectedRepositoryPath?: string;
+  connected?: GitConnection; reimport?: GitImport; onImported(kind: 'import' | 'registration' | 'connection'): void;
   onClose(): void;
 }) {
   const [draft, setDraft] = useState(() => readDraft(userId));
@@ -53,10 +53,10 @@ export function GitImportDialog({ userId, canEdit, providers, connections, conne
   useEffect(() => {
     if (connected === undefined) return;
     setDraft((old) => ({ ...old, provider: connected.provider, connectionId: connected.id,
-      repositoryPath: connected.repositoryPath ?? selectedRepositoryPath ?? '', kind: 'branch', name: '' }));
+      repositoryPath: connected.repositoryPath ?? '', kind: 'branch', name: '' }));
     setRepository(undefined); setRefPage({ refs: [] });
     setMessage('연결이 완료되었습니다. 저장소와 가져올 기준을 선택하세요.');
-  }, [connected, selectedRepositoryPath]);
+  }, [connected]);
   useEffect(() => {
     if (reimport === undefined) return;
     setDraft((old) => ({ provider: reimport.provider, repositoryPath: reimport.errorCode === 'GIT_REPOSITORY_URL_REQUIRED' ? '' : reimport.repositoryPath, kind: reimport.ref.kind,
@@ -135,6 +135,10 @@ export function GitImportDialog({ userId, canEdit, providers, connections, conne
     try { sessionStorage.removeItem(`sfud:git-draft:${userId}`); } catch { /* Optional storage. */ }
     setDraft(empty); setRepository(undefined); setRefPage({ refs: [] }); setError(''); setMessage(''); onClose();
   };
+  if (reimport === undefined && connection?.status === 'ACTIVE' && connection.repositoryPath === undefined) {
+    return <GitRepositoryConnectDialog connection={connection} canEdit={canEdit}
+      onClose={close} onConnected={() => { try { sessionStorage.removeItem(`sfud:git-draft:${userId}`); } catch { /* Optional storage. */ } onImported('connection'); }} />;
+  }
   return <ConnectionDialog className="git-import-dialog" title={reimport ? 'Git 프로젝트 다시 가져오기' : 'Git 프로젝트 가져오기'} busy={busy} onClose={close}>
   <section className="git-panel" aria-label="Git 프로젝트 가져오기" aria-busy={busy}>
     <p className="git-dialog-intro">{draft.kind === 'branch' ? '선택한 브랜치의 최신 커밋을 가져오고, 비교할 때 자동으로 갱신합니다.' : draft.kind === 'tag' ? '선택한 태그를 가져와 비교와 배포에 사용합니다.' : '지정한 커밋을 가져와 비교와 배포에 사용합니다.'}</p>

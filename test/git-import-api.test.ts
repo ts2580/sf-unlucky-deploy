@@ -84,6 +84,13 @@ describe('Git private API route boundary', { timeout: 30_000 }, () => {
       expect(refs.json()).toEqual({ refs: [{ kind: 'branch', name: 'main', commitSha: sha }] });
       expect(refs.body).not.toContain('owner-api-token');
       expect(fixture.providerCalls.refs).toEqual(['owner-api-token']);
+      const resolution = { ...request, ref: { kind: 'branch', name: 'main' } };
+      expect((await fixture.server.inject({ method: 'POST', url: '/api/v1/git/repositories/resolve', payload: resolution })).statusCode).toBe(401);
+      expect((await fixture.server.inject({ method: 'POST', url: '/api/v1/git/repositories/resolve', headers: { cookie: owner.cookie, origin }, payload: resolution })).statusCode).toBe(403);
+      const resolved = await fixture.server.inject({ method: 'POST', url: '/api/v1/git/repositories/resolve', headers: { cookie: owner.cookie, 'x-sfud-csrf': owner.csrfToken, origin }, payload: resolution });
+      expect(resolved.statusCode, resolved.body).toBe(200);
+      expect(resolved.json()).toEqual({ commitSha: sha });
+      expect(resolved.body).not.toContain('owner-api-token');
 
       const missingCsrf = await fixture.server.inject({ method: 'POST', url: '/api/v1/git/repositories/inspect',
         headers: { cookie: owner.cookie, origin }, payload: request });

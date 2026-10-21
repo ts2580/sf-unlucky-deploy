@@ -40,6 +40,11 @@ export const GitImportRequestSchema = Type.Composite([GitRepositoryRequestSchema
   metadataType: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
   projectRoot: Type.Optional(Type.String({ minLength: 1, maxLength: 2000 })),
 })], { additionalProperties: false });
+export const GitResolveRefRequestSchema = Type.Composite([GitRepositoryRequestSchema, Type.Object({
+  ref: GitImportRequestSchema.properties.ref,
+})], { additionalProperties: false });
+export const GitResolveRefResponseSchema = Type.Object({ commitSha: Type.String({ pattern: '^[0-9a-f]{40}$' }) }, { additionalProperties: false });
+export type GitResolveRefRequest = Static<typeof GitResolveRefRequestSchema>;
 export const GitProjectRootsResponseSchema = Type.Object({ projectRoots: Type.Array(Type.String()), commitSha: Type.String(), repositoryId: Type.String() }, { additionalProperties: false });
 export type GitProjectRootsResponse = Static<typeof GitProjectRootsResponseSchema>;
 const ImportSchema = Type.Object({

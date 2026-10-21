@@ -83,6 +83,14 @@ export class GitImportService {
     return (await this.authorize(input, owner, signal)).repository;
   }
 
+  public async resolveRef(input: Pick<GitImportRequest, 'provider' | 'repositoryPath' | 'connectionId' | 'ref'>, owner: string,
+    signal?: AbortSignal): Promise<{ commitSha: string }> {
+    const { repository, authorization } = await this.authorize(input, owner, signal);
+    const commitSha = await this.providerFor(authorization, input.provider).resolveCommit(repository, validateGitRef(input.ref), authorization?.apiCredential, signal);
+    await authorization?.assertCurrent();
+    return { commitSha };
+  }
+
   private async authorize(input: Pick<GitImportRequest, 'provider' | 'repositoryPath' | 'connectionId'>,
     owner?: string, signal?: AbortSignal): Promise<{ repository: GitRepositoryInfo; authorization?: GitRepositoryAuthorization }> {
     return runGitOperation(this.options.diagnosticsFile, undefined, 'authorize', () => this.authorizeInternal(input, owner, signal));

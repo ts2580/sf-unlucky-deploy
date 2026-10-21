@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest, FastifyError } from 'fastify';
 import { Type } from '@sinclair/typebox';
-import { GitConnectionListResponseSchema, GitConnectionResponseSchema, GitProvidersResponseSchema, GitTokenInputSchema, GitEnvironmentResponseSchema, type GitTokenInput } from '../../api/git-contracts.js';
+import { GitConnectionListResponseSchema, GitConnectionResponseSchema, GitProvidersResponseSchema, GitTokenInputSchema, GitEnvironmentResponseSchema, GitRepositorySelectionSchema, type GitTokenInput } from '../../api/git-contracts.js';
 import { GitCatalogQuerySchema, GitCatalogResponseSchema, type GitCatalogQuery } from '../../api/git-project-contracts.js';
 import type { GitConnection } from '../../storage/git-connection-repository.js';
 import { GitError } from '../../git/git-errors.js';
@@ -9,6 +9,15 @@ import { GitAliasInputSchema } from '../../api/git-contracts.js';
 
 export async function registerGitConnectionRoutes(app: FastifyInstance): Promise<void> {
   const mutation = { csrf: true, roles: ['OPERATOR', 'DEPLOYER', 'ADMIN'] as ('OPERATOR' | 'DEPLOYER' | 'ADMIN')[] };
+  app.post<{ Params: { id: string }; Body: { repositoryPath: string } }>('/api/v1/git/connections/:id/repositories', {
+    schema: { params: Type.Object({ id: Type.String({ format: 'uuid' }) }), body: GitRepositorySelectionSchema,
+      response: { 201: GitConnectionResponseSchema } },
+  }, async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply, mutation);
+    if (session === undefined) return;
+    try { return reply.code(201).send({ connection: publicConnection(await app.sfudRuntime.gitTokens.registerRepository(session.user.id, request.params.id, request.body.repositoryPath)) }); }
+    catch (error) { return tokenFailure(reply, error); }
+  });
   app.patch<{ Params: { id: string }; Body: { alias: string } }>('/api/v1/git/connections/:id/alias', {
     schema: { params: Type.Object({ id: Type.String({ format: 'uuid' }) }), body: GitAliasInputSchema,
       response: { 200: GitConnectionResponseSchema } },

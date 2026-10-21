@@ -3,7 +3,7 @@ import type { GitConnection } from '../../../src/api/git-contracts';
 import type { GitImport, GitRefsResponse } from '../../../src/api/git-project-contracts';
 import type { WorkspaceSource } from '../../../src/api/workspace-contracts';
 import { createImport, errorMessage as gitErrorMessage, importById, inspect as inspectGitRepository,
-  providerNames, refs as gitRefs, selectImportProject } from '../git/api';
+  providerNames, refs as gitRefs, resolveRef, selectImportProject } from '../git/api';
 import { Icon } from '../components/Icon';
 
 export interface GitBranchSourceHandle {
@@ -36,10 +36,11 @@ export const GitBranchSource = forwardRef<GitBranchSourceHandle, {
   const selectedBranch = branches.find((branch) => branch.name === branchInput);
   const branchOptionsId = side === 'source' ? 'git-branch-options' : 'target-git-branch-options';
   const headingId = `${side}-git-branch-heading`;
+  const { id: connectionId, provider, repositoryPath } = connection;
 
   useEffect(() => {
     const controller = new AbortController();
-    const request = { provider: connection.provider, repositoryPath: connection.repositoryPath!, connectionId: connection.id };
+    const request = { provider, repositoryPath: repositoryPath!, connectionId };
     const load = async () => {
       setBranches([]); setBranchInput(''); setError(''); setLoading(true);
       try {
@@ -63,11 +64,11 @@ export const GitBranchSource = forwardRef<GitBranchSourceHandle, {
     };
     void load();
     return () => { controller.abort(); version.current++; };
-  }, [connection]);
+  }, [connectionId, provider, repositoryPath]);
 
   useEffect(() => {
-    onBranchChange(selectedBranch === undefined ? undefined : `${selectedBranch.name}\u0000${selectedBranch.commitSha}`);
-  }, [selectedBranch?.name, selectedBranch?.commitSha, onBranchChange]);
+    onBranchChange(selectedBranch?.name);
+  }, [selectedBranch?.name, onBranchChange]);
 
   useEffect(() => {
     version.current++; setImported(undefined); setPreparing(false); setSelectingProject(false); setError('');
@@ -84,9 +85,12 @@ export const GitBranchSource = forwardRef<GitBranchSourceHandle, {
       setPreparing(true); setError(''); setImported(undefined);
       try {
         assertCurrent();
-        let current = (await createImport({ provider: connection.provider, repositoryPath: connection.repositoryPath!,
-          connectionId: connection.id, ref: { kind: 'branch', name: selectedBranch.name },
-          expectedCommitSha: selectedBranch.commitSha, metadataType: type }, signal)).import;
+        const request = { provider: connection.provider, repositoryPath: connection.repositoryPath!,
+          connectionId: connection.id, ref: { kind: 'branch' as const, name: selectedBranch.name } };
+        const latest = await resolveRef(request, signal);
+        assertCurrent();
+        setBranches((old) => old.map((branch) => branch.name === selectedBranch.name ? { ...branch, commitSha: latest.commitSha } : branch));
+        let current = (await createImport({ ...request, expectedCommitSha: latest.commitSha, metadataType: type }, signal)).import;
         const deadline = Date.now() + 10 * 60_000;
         while (true) {
           assertCurrent(); setImported(current);
@@ -131,7 +135,7 @@ export const GitBranchSource = forwardRef<GitBranchSourceHandle, {
     </label>
     {loading ? <p className="git-branch-loading" role="status" aria-live="polite"><Icon name="refresh" /><span>브랜치 검색 중……</span></p>
       : <p>{branches.length === 0 ? '사용 가능한 브랜치가 없습니다.' : `${branches.length}개 브랜치 · 입력하여 검색할 수 있습니다.`}</p>}
-    {selectedBranch !== undefined && <p className="git-sha">현재 선택: <code>{selectedBranch.name}</code> · 고정할 커밋 <code>{selectedBranch.commitSha}</code></p>}
+    {selectedBranch !== undefined && <p className="git-sha">현재 선택: <code>{selectedBranch.name}</code> · 조회한 커밋 <code>{selectedBranch.commitSha}</code><br />비교 실행 시 최신 커밋을 확인합니다.</p>}
     {imported?.status === 'SELECTING' && <div className="git-roots"><p>가져올 Salesforce DX 프로젝트 루트를 선택하세요. 선택 후 비교를 계속합니다.</p>
       {imported.projectRoots.map((root) => <button className="small-button" type="button" key={root} disabled={selectingProject} onClick={() => void chooseProject(root)}>{root} 선택</button>)}</div>}
     {preparing && imported?.status !== 'SELECTING' && <p className="git-branch-loading" role="status"><Icon name="refresh" /><span>Git 코드 가져오는 중……</span></p>}
