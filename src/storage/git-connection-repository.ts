@@ -43,7 +43,8 @@ export class GitConnectionRepository {
     return rows.map(publicConnection);
   }
 
-  public async save(input: SaveConnection, expected?: { id: string; tokenVersion: number; changeTarget?: boolean }): Promise<GitConnection> {
+  public async save(input: SaveConnection, expected?: { id: string; tokenVersion: number; changeTarget?: boolean },
+    sourceAccount?: { id: string; tokenVersion: number }): Promise<GitConnection> {
     const vault = this.requireVault();
     validateTokens(input.tokens);
     const alias = input.alias === undefined ? undefined : normalizeGitAlias(input.alias);
@@ -55,6 +56,11 @@ export class GitConnectionRepository {
       throw new GitError('GIT_REAUTH_REQUIRED');
     }
     const save = async (db: DatabaseHandle) => {
+      if (sourceAccount !== undefined) {
+        const source = await db.get<ConnectionRow>('SELECT * FROM git_connections WHERE id = ? AND owner_user_id = ?', sourceAccount.id, input.ownerUserId);
+        if (source?.status !== 'ACTIVE' || source.token_version !== sourceAccount.tokenVersion
+          || (source.expires_at !== null && Date.parse(source.expires_at) <= Date.now())) throw new GitError('GIT_REAUTH_REQUIRED');
+      }
       let existing = await db.get<ConnectionRow>(`
         SELECT * FROM git_connections WHERE owner_user_id = ? AND provider = ? AND provider_host = ? AND provider_account_id = ?
       `, input.ownerUserId, input.provider, input.providerHost, input.providerAccountId);

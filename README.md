@@ -25,6 +25,8 @@ Windows x64에서는 SQLite 바이너리를 포함한 번들을 설치할 수 �
 npm install --global --ignore-scripts @trstyq/sf-unlucky-deploy@win32-x64
 ```
 
+Windows 번들은 SQLite native 바이너리를 포함하며 `sqlite3`의 설치 스크립트와 자동 C++ 빌드를 제거했다. 위 명령으로 설치 스크립트 실행을 생략할 수 있다. 일반판은 SQLite 바이너리 설치가 필요하므로 이 옵션을 사용하려면 `win32-x64` 번들을 선택한다.
+
 정식 일반판은 `latest`, 시험판 일반판은 `next`, Windows 번들은 `win32-x64` 채널을 사용한다. 같은 설치 명령을 다시 실행하면 해당 채널의 버전으로 갱신된다.
 
 `--project`에는 `sfdx-project.json`이 있는 로컬 Salesforce DX 프로젝트 경로를 넣는다. 여러 프로젝트는 옵션을 반복해서 등록하고, Git과 Org만 사용할 때는 생략한다.
@@ -81,6 +83,8 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 
 **인증 관리 → Git**에서 **저장소 하나 연결**을 선택하고 제공자, 저장소 Git URL, 읽기 권한이 있는 PAT/API Token을 입력한다. GitHub·GitLab·Bitbucket을 지원한다. 제공자별 토큰 설정과 공개 저장소 가져오기는 [Git 연결 안내](https://github.com/ts2580/sf-unlucky-deploy/blob/main/docs/git-integration.md)를 참고한다.
 
+**계정으로 저장소 목록 조회**를 선택한 경우에도 목록에서 저장소만 선택해 연결한다. 브랜치는 **비교 및 배포** 화면에서 선택한다. 소스·타겟에는 현재 연결된 저장소마다 한 항목만 표시하며, 연결을 삭제하면 과거 브랜치·가져오기 이력은 선택 목록에 남지 않는다.
+
 셀프호스팅 Git에는 `https://gitlab.example.com/group/project.git`처럼 그룹·저장소 경로까지 포함한 전체 HTTPS clone URL을 입력한다. **설정 → 셀프호스팅 Git 허용 IP → 사설 IP 검사**는 기본적으로 꺼져 있다. 관리자가 검사를 켜면 사설·예약 IP는 허용 목록에 등록한 주소만 연결하며, 설정 변경은 즉시 적용되고 재시작 후에도 유지된다.
 
 ### 2. 비교 대상과 범위 선택
@@ -91,6 +95,8 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 4. **2번 메타데이터 검색**에서 타입(예: `ApexClass`, `CustomField`)을 선택하고 **메타데이터 비교**를 누른다. 이때 선택한 Git 브랜치의 코드를 가져온 뒤 비교한다. 저장소에 DX 프로젝트가 여러 개면 프로젝트 루트를 선택하고 비교를 이어간다. **현재 타입 비교 실행**을 끄면 버튼이 **메타데이터 다운로드**로 바뀌고 Source만 가져온다.
 
 같은 방식으로 Git ↔ Git, Git ↔ Org, 로컬 ↔ Org, Org ↔ Org도 비교할 수 있다. 양쪽에 Git을 선택하면 각 브랜치를 고르고, 2번에서 선택한 같은 메타데이터 타입을 비교 실행 시 양쪽에서 가져온다.
+
+새 비교를 실행할 때마다 선택한 브랜치의 최신 커밋을 다시 확인한다. 비교가 완료된 뒤 Dry-run과 배포는 그 비교에서 확정한 커밋을 사용하며, 이후 push는 다음 비교부터 반영된다.
 
 ### 3. 변경 내용 확인
 
