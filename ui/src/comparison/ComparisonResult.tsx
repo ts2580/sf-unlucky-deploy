@@ -1,6 +1,6 @@
 import type { WorkspaceSource } from '../../../src/api/workspace-contracts';
 import { comparisonDisplayWarnings } from '../../../src/reports/comparison-display';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { ComparisonFileDiff } from '../ComparisonFileDiff';
 import { Icon } from '../components/Icon';
@@ -70,6 +70,8 @@ export function ComparisonResultPanel({
   const [identicalLoading, setIdenticalLoading] = useState(false);
   const [filterError, setFilterError] = useState('');
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const resultListRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (resultListRef.current) resultListRef.current.scrollTop = 0; }, [job.id, resultPage, query, statusFilters]);
   const components = expandedResult?.id === job.id ? expandedResult.components : job.result?.components ?? [];
   const identicalMissing = (job.result?.summary.identical ?? 0) > components.filter((item) => item.status === 'IDENTICAL').length;
   const identicalSelected = statusFilters.includes('IDENTICAL');
@@ -149,21 +151,23 @@ export function ComparisonResultPanel({
       {comparisonDisplayWarnings(job.result.warnings).map((warning) => <p className="comparison-warning" key={warning}><Icon name="shield" />{warning}</p>)}
       {deploymentView && !comparisonOnly && !sourceOnly && summary.removed > 0 && <p className="comparison-warning"><Icon name="shield" />TARGET ONLY 항목은 destructive manifest 없이는 target org에서 삭제되지 않습니다.</p>}
       <div className="component-results">
-        {filteredComponents.length === 0
-          ? !identicalLoading && !filterError && <p className="empty-result">{query.trim() !== '' || statusFilters.length > 0 ? '선택한 상태와 검색 조건에 맞는 메타데이터가 없습니다.' : sourceOnly ? 'Source에서 받아온 메타데이터가 없습니다.' : '표시할 차이가 없습니다. 동일 항목은 IDENTICAL을 눌러 확인하세요.'}</p>
-          : visibleComponents.map((component) => <details key={component.key} className={`component-result${deploymentView ? ' component-selectable' : ''}${selectedKeys.has(component.key) ? ' component-selected' : ''}`}>
-              <summary>{deploymentView && <label className={`component-cart-check${component.status === 'REMOVED' || selectionDisabled ? ' component-cart-disabled' : ''}`} onClick={(event) => event.stopPropagation()}>
-                <input
-                  type="checkbox"
-                  aria-label={`${component.fullName} 배포 대상으로 선택`}
-                  checked={selectedKeys.has(component.key)}
-                  disabled={component.status === 'REMOVED' || selectionDisabled}
-                  onChange={(event) => onSelectionChange?.(component, event.target.checked)}
-                />
-                <span aria-hidden="true"><Icon name="check" /></span>
-              </label>}<span className={`component-status status-${component.status.toLowerCase()}`}>{sourceOnly ? 'SOURCE' : deploymentView ? deploymentDiffStatusLabel(component.status) : component.status}</span><div><strong>{component.fullName}</strong><small>{component.type} · 파일 {component.files.length}개{deploymentView && component.status === 'REMOVED' ? ' · 소스에 없어 선택 불가' : ''}</small></div><Icon name="chevron" /></summary>
-              <div className="component-files">{component.files.map((file) => <article key={file.path}><div><code>{file.path}</code><span>{sourceOnly ? 'SOURCE' : file.status}</span></div>{!sourceOnly && <ComparisonFileDiff file={file} sourceLabel={displaySource.label} targetLabel={displayTarget.label} sourceSide={deploymentView ? 'after' : 'before'} />}</article>)}</div>
-            </details>)}
+        <div className="component-results-list" ref={resultListRef} role="region" aria-label="메타데이터 검색 결과 목록" tabIndex={deploymentView ? 0 : undefined}>
+          {filteredComponents.length === 0
+            ? !identicalLoading && !filterError && <p className="empty-result">{query.trim() !== '' || statusFilters.length > 0 ? '선택한 상태와 검색 조건에 맞는 메타데이터가 없습니다.' : sourceOnly ? 'Source에서 받아온 메타데이터가 없습니다.' : '표시할 차이가 없습니다. 동일 항목은 IDENTICAL을 눌러 확인하세요.'}</p>
+            : visibleComponents.map((component) => <details key={component.key} className={`component-result${deploymentView ? ' component-selectable' : ''}${selectedKeys.has(component.key) ? ' component-selected' : ''}`}>
+                <summary>{deploymentView && <label className={`component-cart-check${component.status === 'REMOVED' || selectionDisabled ? ' component-cart-disabled' : ''}`} onClick={(event) => event.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    aria-label={`${component.fullName} 배포 대상으로 선택`}
+                    checked={selectedKeys.has(component.key)}
+                    disabled={component.status === 'REMOVED' || selectionDisabled}
+                    onChange={(event) => onSelectionChange?.(component, event.target.checked)}
+                  />
+                  <span aria-hidden="true"><Icon name="check" /></span>
+                </label>}<span className={`component-status status-${component.status.toLowerCase()}`}>{sourceOnly ? 'SOURCE' : deploymentView ? deploymentDiffStatusLabel(component.status) : component.status}</span><div><strong>{component.fullName}</strong><small>{component.type} · 파일 {component.files.length}개{deploymentView && component.status === 'REMOVED' ? ' · 소스에 없어 선택 불가' : ''}</small></div><Icon name="chevron" /></summary>
+                <div className="component-files">{component.files.map((file) => <article key={file.path}><div><code>{file.path}</code><span>{sourceOnly ? 'SOURCE' : file.status}</span></div>{!sourceOnly && <ComparisonFileDiff file={file} sourceLabel={displaySource.label} targetLabel={displayTarget.label} sourceSide={deploymentView ? 'after' : 'before'} />}</article>)}</div>
+              </details>)}
+        </div>
         {filteredComponents.length > METADATA_RESULTS_PER_PAGE && <nav className="component-pagination" aria-label="메타데이터 검색 결과 페이지">
           <button type="button" className="component-page-previous" onClick={() => setResultPage(Math.max(1, currentResultPage - 1))} disabled={currentResultPage === 1} aria-label="이전 페이지"><Icon name="chevron" />이전</button>
           <div className="component-page-numbers">{visiblePages.map((page) => <button key={page} type="button"
