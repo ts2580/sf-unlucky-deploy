@@ -133,8 +133,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const updateTargetBranch = useCallback((key: string | undefined) => {
     setTargetBranchKey(key); setPreparedGitTarget(undefined); setTargetOrgId('');
   }, []);
-  const [testLevel, setTestLevel] = useState('auto');
-  const [tests, setTests] = useState('');
+  const [configuredTestLevel, setTestLevel] = useState('auto');
+  const [configuredTests, setTests] = useState('');
   const [showIdentical, setShowIdentical] = useState(false);
   const [compareCurrentType, setCompareCurrentType] = useState(true);
   const presetMetadataTypeRef = useRef<{ key: string; value: string } | undefined>(undefined);
@@ -203,6 +203,9 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       && comparisonJob.right.id.startsWith('git:') ? comparisonJob.right.id : ''
     : sourceId;
   const comparisonLimitExceeded = comparisonJob?.result?.comparisonLimit?.exceeded === true;
+  const showApexTestSettings = !comparisonOnly && deploymentCart.some((item) => item.type === 'ApexClass');
+  const testLevel = showApexTestSettings ? configuredTestLevel : 'auto';
+  const tests = showApexTestSettings ? configuredTests : '';
   const cartSelectionKey = deploymentCart.map((item) => item.key).sort().join('\u0001');
   const cartContextKey = [sourceId, targetOrgId, sourceSelectionId, targetSelectionId, packageSelectionKey].join('\u0000');
   const restoredCartRef = useRef<{ contextKey: string; items: DeploymentCartItem[] } | null>(null);
@@ -355,7 +358,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
 
   useEffect(() => {
     if (loadedPreset !== null) { setApexTestClassesLoading(false); setApexTestClassesError(''); return; }
-    if (deploymentSourceId.length === 0 || comparisonOnly) {
+    if (deploymentSourceId.length === 0 || !showApexTestSettings) {
       setApexTestClasses([]);
       setApexTestClassQuery('');
       setApexTestClassesError('');
@@ -383,7 +386,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       })
       .finally(() => { if (!controller.signal.aborted) setApexTestClassesLoading(false); });
     return () => controller.abort();
-  }, [deploymentSourceId, comparisonOnly, loadedPreset]);
+  }, [deploymentSourceId, showApexTestSettings, loadedPreset]);
 
   const source = preparedGitSource?.id === sourceId ? preparedGitSource : workspace?.sources.find((entry) => entry.id === sourceId);
   const executionSource = preparedAction?.source ?? (sourceId.startsWith('git-registered:') && comparisonJob?.status === 'SUCCEEDED' && comparisonJobSelectionKeyRef.current === workflowSelectionKey ? comparisonJob.right : source);
@@ -394,7 +397,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     || (dryRunJob !== null && ['QUEUED', 'DRY_RUN_RUNNING'].includes(dryRunJob.status));
   const deploying = deploymentSubmitting
     || (deploymentJob !== null && ['QUEUED', 'DEPLOYING'].includes(deploymentJob.status));
-  const testNames = tests.split(/[\s,]+/u).map((value) => value.trim()).filter(Boolean);
+  const configuredTestNames = configuredTests.split(/[\s,]+/u).map((value) => value.trim()).filter(Boolean);
+  const testNames = showApexTestSettings ? configuredTestNames : [];
   const selectedTestNames = new Set(testNames);
   const normalizedApexTestClassQuery = apexTestClassQuery.trim().toLocaleLowerCase();
   const filteredApexTestClasses = apexTestClasses.filter((testClass) =>
@@ -689,7 +693,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       ...(source?.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.orgIdentityFingerprint }),
       ...(target?.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.orgIdentityFingerprint }),
       ...(scopeQuery ? { metadataType: scopeQuery } : {}), compareCurrentType, showIdentical, excludedPackageIds,
-      testLevel: testLevel as DeploymentSelection['testLevel'], tests: testNames };
+      testLevel: configuredTestLevel as DeploymentSelection['testLevel'], tests: configuredTestNames };
     try { tabId = sessionStorage.getItem(`sfud:draft-tab:${user.id}`) ?? tabId; sessionStorage.setItem(`sfud:draft-tab:${user.id}`, tabId); saveClientDraft(user.id, tabId, selection); } catch { /* Saving must not prevent navigation to repair the connection. */ }
     let returnPath = `/deploy?restoreTab=${encodeURIComponent(tabId)}`;
     try {
@@ -836,7 +840,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
         ...(source?.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.orgIdentityFingerprint }),
         ...(target?.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.orgIdentityFingerprint }),
         ...(scopeQuery ? { metadataType: scopeQuery } : {}), compareCurrentType, showIdentical,
-        excludedPackageIds, testLevel: testLevel as DeploymentSelection['testLevel'], tests: testNames }} onApply={applyPreset} />
+        excludedPackageIds, testLevel: configuredTestLevel as DeploymentSelection['testLevel'], tests: configuredTestNames }} onApply={applyPreset} />
       <DeploymentPresets canApply={!comparing && !dryRunning && !deploying} canSave={canRun && !comparing && !dryRunning && !deploying} selection={{ sourceId, targetId: targetOrgId,
         ...(source?.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.orgIdentityFingerprint }),
         ...(target?.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.orgIdentityFingerprint }),
@@ -925,7 +929,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
             comparisonOnly={comparisonOnly}
           />}
 
-          {!comparisonOnly && <section className="workflow-panel" aria-labelledby="test-heading">
+          {showApexTestSettings && <section className="workflow-panel" aria-labelledby="test-heading">
             <div className="panel-heading"><span className="step-number">03</span><div><h2 id="test-heading">Apex 테스트 설정</h2></div><span className="auto-badge">{testLevel.toUpperCase()}</span></div>
             <div className="select-row">
               <label><span>테스트 수준</span><select value={testLevel} onChange={(event) => changeTestLevel(event.target.value)}><option value="auto">Auto · 권장</option><option value="RunSpecifiedTests">RunSpecifiedTests</option><option value="RunLocalTests">RunLocalTests</option><option value="RunAllTestsInOrg">RunAllTestsInOrg</option><option value="RunRelevantTests">RunRelevantTests</option><option value="NoTestRun">NoTestRun</option></select></label>

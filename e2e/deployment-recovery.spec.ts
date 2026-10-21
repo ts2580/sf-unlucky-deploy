@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { createWebServer } from '../src/web/server/app.js';
+import type { DeploymentSelection } from '../src/api/deployment-preset-contracts.js';
 const source = { id: 'project:fixture', kind: 'local', label: 'fixture-project' };
 const target = { id: 'org:target', kind: 'org', label: 'target', username: 'target@example.com', maskedOrgId: '00D00…001', orgIdentityFingerprint: 'b'.repeat(64) };
 const selection = { sourceId: source.id, targetId: target.id, metadataType: 'ApexClass', compareCurrentType: true, showIdentical: false, excludedPackageIds: [], testLevel: 'auto', tests: [] };
@@ -13,6 +14,74 @@ async function mockWorkspace(page: Page) {
   await page.route('**/api/v1/comparisons', (route) => route.fulfill({ json: route.request().method() === 'GET' ? { jobs: [] } : { job: { id: 'comparison-fixture', status: 'SUCCEEDED', scope: 'all', metadataType: 'CustomObject', manifest: 'CustomObject', left: target, right: source, result: { summary: { added: 1, removed: 0, modified: 0, identical: 0, total: 1, different: 1 }, warnings: [], components: [{ ...component, key: 'CustomObject:Sample__c', status: 'ADDED', files: [] }] } } } }));
 }
 async function login(page: Page) { await page.getByLabel('접속 비밀번호').fill('recovery-test-password'); await page.getByRole('button', { name: '접속', exact: true }).click(); }
+for (const width of [1440, 390]) {
+  test(`초안 복원 후 빈 배포 대상의 자동 저장·새로고침·설정 이동에도 Apex 테스트 설정을 보존한다 (${width}px)`, async ({ page }) => {
+    const app = await createWebServer({ host: '127.0.0.1', port: 0, localMode: true, accessPassword: 'recovery-test-password', databasePath: ':memory:', sfClient: { async runJson() { return { result: { nonScratchOrgs: [] } }; } } });
+    let saved: DeploymentSelection | undefined;
+    const writes: DeploymentSelection[] = [];
+    const draft = { id: 'apex-draft', tabId: '', expiresAt: '2099-01-01T00:00:00Z', updatedAt: '2026-10-22T00:00:00Z' };
+    const configured = { testLevel: 'RunSpecifiedTests', tests: ['First_Test', 'Second_Test'] };
+    try {
+      const address = await app.listen({ host: '127.0.0.1', port: 0 });
+      await page.setViewportSize({ width, height: 900 }); await mockWorkspace(page);
+      await page.route('**/api/v1/deployment-drafts', (route) => {
+        if (route.request().method() === 'PUT') {
+          const body = route.request().postDataJSON(); draft.tabId = body.tabId; saved = body.selection;
+          writes.push(body.selection); return route.fulfill({ json: draft });
+        }
+        return route.fulfill({ json: { drafts: saved === undefined ? [] : [draft] } });
+      });
+      await page.route('**/api/v1/deployment-drafts/apex-draft/resolve', (route) => route.fulfill({ json: { draft, resolved: {
+        preset: { id: draft.id, name: 'Apex 초안', schemaVersion: 1, createdAt: draft.updatedAt, updatedAt: draft.updatedAt },
+        selection: saved, source, target, warnings: [], preparationRequired: false,
+      } } }));
+      await page.route('**/api/v1/comparisons', (route) => {
+        if (route.request().method() === 'GET') return route.fulfill({ json: { jobs: [] } });
+        return route.fulfill({ json: { job: { id: 'apex-comparison', status: 'SUCCEEDED', scope: 'all', metadataType: 'ApexClass', manifest: 'ApexClass', left: target, right: source,
+          result: { summary: { added: 2, removed: 0, modified: 0, identical: 0, total: 2, different: 2 }, warnings: [],
+            components: [{ type: 'ApexClass', fullName: 'Hello', key: 'ApexClass:Hello', status: 'ADDED', files: [] },
+              { ...component, key: 'CustomObject:Sample__c', status: 'ADDED', files: [] }] } } } });
+      });
+      await page.route('**/api/v1/deployments/dry-run', (route) => route.fulfill({ status: 400,
+        json: { error: { code: 'INVALID_SOURCE', message: '프로젝트 연결을 확인하세요.' } } }));
+      await page.goto(`${address}/deploy`); await login(page);
+      await page.getByRole('button', { name: '메타데이터 비교', exact: true }).click();
+      await page.getByLabel('Hello 배포 대상으로 선택').check();
+      await page.getByLabel('테스트 수준').selectOption(configured.testLevel);
+      await page.getByLabel('테스트 클래스 직접 입력').fill('First_Test, Second_Test');
+      await expect.poll(() => saved).toMatchObject(configured);
+      expect(saved).not.toHaveProperty('components');
+
+      await page.reload();
+      await page.getByRole('button', { name: '이전 선택 복원', exact: true }).click();
+      await expect(page.getByText('선택된 배포 대상이 없습니다', { exact: true })).toBeVisible();
+      await expect(page.getByRole('region', { name: 'Apex 테스트 설정', exact: true })).toHaveCount(0);
+      // Force another autosave while the restored draft has no selected components.
+      await page.getByRole('checkbox', { name: '동일 항목 표시' }).check();
+      await expect.poll(() => saved?.showIdentical).toBe(true);
+      expect(saved).toMatchObject(configured);
+      await page.reload();
+      await page.getByRole('button', { name: '이전 선택 복원', exact: true }).click();
+      await page.getByRole('button', { name: '메타데이터 비교', exact: true }).click();
+      await page.getByLabel('Hello 배포 대상으로 선택').check();
+      await expect(page.getByLabel('테스트 수준')).toHaveValue(configured.testLevel);
+      await expect(page.getByLabel('테스트 클래스 직접 입력')).toHaveValue('First_Test, Second_Test');
+
+      // The explicit draft saved before navigating to connection settings must also retain them.
+      await page.getByLabel('Hello 배포 대상으로 선택').uncheck();
+      await page.getByLabel('Sample__c 배포 대상으로 선택').check();
+      await page.getByRole('button', { name: '배포 대상 Dry-run', exact: true }).click();
+      const writesBeforeSettings = writes.length;
+      await page.route('**/settings?return=*', (route) => route.fulfill({ contentType: 'text/html', body: '<p>설정</p>' }));
+      await page.getByRole('button', { name: '연결·프로젝트 설정 확인', exact: true }).click();
+      await expect(page).toHaveURL(/\/settings\?return=/u);
+      expect(writes.length).toBeGreaterThan(writesBeforeSettings);
+      expect(saved).toMatchObject(configured);
+      const fallback = await page.evaluate(() => Object.entries(localStorage).filter(([key]) => key.startsWith('sfud:draft-fallback:v1:')).map(([, value]) => JSON.parse(value).selection));
+      expect(fallback).toContainEqual(expect.objectContaining(configured));
+    } finally { await page.context().close(); await app.close(); }
+  });
+}
 test('refresh preserves prior tab draft until explicit restore and never submits deployment', async ({ page }) => {
   const app = await createWebServer({ host: '127.0.0.1', port: 0, localMode: true, accessPassword: 'recovery-test-password', databasePath: ':memory:', sfClient: { async runJson() { return { result: { nonScratchOrgs: [] } }; } } });
   const posts: string[] = []; const writes: unknown[] = [];
