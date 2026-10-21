@@ -10,7 +10,8 @@ export async function readNpmTarball(npmCli, filename, selectedPath) {
   let matches = 0;
   await tar.t({
     file: path.resolve(filename), strict: true, noResume: true,
-    onReadEntry(entry) {
+    // tar 6 uses onentry; tar 7 accepts it as an alias for onReadEntry.
+    onentry(entry) {
       entries.push(entry.path);
       if (selectedPath !== undefined && entry.path === selectedPath) {
         matches++;
