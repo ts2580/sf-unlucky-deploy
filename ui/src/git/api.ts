@@ -1,7 +1,7 @@
 import { GitConnectionListResponseSchema, GitProvidersResponseSchema,
   type GitConnectionListResponse, type GitProvidersResponse, type GitProviderId } from '../../../src/api/git-contracts';
 import { GitProjectRootsResponseSchema, type GitProjectRootsResponse, GitCatalogResponseSchema, GitImportListResponseSchema, GitImportRequestSchema, GitImportResponseSchema,
-  GitRepositoryRequestSchema, GitRepositoryResponseSchema, GitRefsRequestSchema, GitRefsResponseSchema,
+  GitRepositoryRequestSchema, GitRepositoryResponseSchema, GitRefsRequestSchema, GitRefsResponseSchema, GitResolveRefRequestSchema, GitResolveRefResponseSchema, type GitResolveRefRequest,
   type GitCatalogPage, type GitCatalogQuery, type GitImportListResponse, type GitImportRequestBody, type GitImportResponse,
   type GitRepositoryRequest, type GitRepositoryResponse, type GitRefsRequest, type GitRefsResponse } from '../../../src/api/git-project-contracts';
 import { apiRequest } from '../api-client';
@@ -16,6 +16,8 @@ export const refs = (body: GitRefsRequest, signal?: AbortSignal) => apiRequest<G
   { method: 'POST', csrf: true, body, signal, requestSchema: GitRefsRequestSchema, responseSchema: GitRefsResponseSchema });
 export const createImport = (body: GitImportRequestBody, signal?: AbortSignal) => apiRequest<GitImportResponse, GitImportRequestBody>('/api/v1/git/imports',
   { method: 'POST', csrf: true, body, signal, requestSchema: GitImportRequestSchema, responseSchema: GitImportResponseSchema });
+export const resolveRef = (body: GitResolveRefRequest, signal?: AbortSignal) => apiRequest<{ commitSha: string }, GitResolveRefRequest>('/api/v1/git/repositories/resolve',
+  { method: 'POST', csrf: true, body, signal, requestSchema: GitResolveRefRequestSchema, responseSchema: GitResolveRefResponseSchema });
 export const importById = (id: string, signal?: AbortSignal) => apiRequest<GitImportResponse>(`/api/v1/git/imports/${encodeURIComponent(id)}`,
   { signal, responseSchema: GitImportResponseSchema });
 export const selectImportProject = (id: string, projectRoot: string, signal?: AbortSignal) => apiRequest<{ accepted: true }, { projectRoot: string }>(

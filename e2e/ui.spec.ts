@@ -66,9 +66,7 @@ test('큰 화면의 작업 공간을 활용하고 좁은 화면에서는 패널�
   await expect(page.locator('.content > .page-stack > :first-child')).toHaveAttribute('aria-labelledby', 'workflow-status-heading');
   const approval = page.getByRole('region', { name: 'Target 바로 배포' });
   await expect(approval).toContainText('Source 테스트 자동 선택 후 검증·배포합니다.');
-  await page.getByLabel('테스트 수준').selectOption('NoTestRun');
-  await expect(approval).toContainText('NoTestRun 배포 · 프로덕션 org에서 거부될 수 있습니다.');
-  await page.getByLabel('테스트 수준').selectOption('auto');
+  await expect(page.getByRole('region', { name: 'Apex 테스트 설정' })).toHaveCount(0);
   await expect(approval).toContainText('선택한 Salesforce org에 실제 반영됩니다. 브라우저를 닫아도 배포는 계속됩니다.');
   await expect(page.getByText('TARGET ONLY는 선택할 수 없습니다.')).toBeVisible();
   await page.setViewportSize({ width: 1280, height: 900 });
@@ -521,7 +519,7 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   await expect(page.locator('#salesforce-deploy-metadata-types option')).toHaveCount(3);
   await expect(page.getByText('전체 메타데이터', { exact: true })).toHaveCount(0);
   await expect(page.getByText('3개 metadata type 검색 가능 · source와 target의 합집합')).toBeVisible();
-  const comparisonOptions = page.getByRole('region', { name: '메타데이터 검색' });
+  const comparisonOptions = page.getByRole('region', { name: '메타데이터 검색', exact: true });
   const comparisonButton = comparisonOptions.locator('.comparison-run-button');
   await expect(comparisonButton).toHaveAccessibleName('메타데이터 비교');
   await expect(comparisonButton).toHaveClass(/button-primary/u);
@@ -537,27 +535,22 @@ test('실제 비교 API 흐름의 대기와 결과를 화면에 표시한다', a
   const identicalToggle = comparisonOptions.locator('.option-toggle').filter({ hasText: '동일 항목 표시' });
   const desktopCurrentTypeToggleBox = await currentTypeToggle.boundingBox();
   const desktopIdenticalToggleBox = await identicalToggle.boundingBox();
-  const desktopApexTestOptionsBox = await apexTestOptions.boundingBox();
+  await expect(apexTestOptions).toHaveCount(0);
   expect(desktopComparisonButtonBox).not.toBeNull();
   expect(desktopCurrentTypeToggleBox).not.toBeNull();
   expect(desktopIdenticalToggleBox).not.toBeNull();
-  expect(desktopApexTestOptionsBox).not.toBeNull();
   expect(desktopComparisonButtonBox!.y).toBeGreaterThan(desktopCurrentTypeToggleBox!.y + desktopCurrentTypeToggleBox!.height);
   expect(desktopComparisonButtonBox!.y).toBeGreaterThan(desktopIdenticalToggleBox!.y + desktopIdenticalToggleBox!.height);
   expect(desktopIdenticalToggleBox!.x + desktopIdenticalToggleBox!.width).toBeLessThan(desktopComparisonButtonBox!.x);
-  expect(desktopComparisonButtonBox!.y + desktopComparisonButtonBox!.height).toBeLessThan(desktopApexTestOptionsBox!.y);
   await page.setViewportSize({ width: 390, height: 844 });
   const mobileComparisonButtonBox = await comparisonButton.boundingBox();
   const mobileCurrentTypeToggleBox = await currentTypeToggle.boundingBox();
   const mobileIdenticalToggleBox = await identicalToggle.boundingBox();
-  const mobileApexTestOptionsBox = await apexTestOptions.boundingBox();
   expect(mobileComparisonButtonBox).not.toBeNull();
   expect(mobileCurrentTypeToggleBox).not.toBeNull();
   expect(mobileIdenticalToggleBox).not.toBeNull();
-  expect(mobileApexTestOptionsBox).not.toBeNull();
   expect(mobileCurrentTypeToggleBox!.y + mobileCurrentTypeToggleBox!.height).toBeLessThan(mobileIdenticalToggleBox!.y);
   expect(mobileIdenticalToggleBox!.y + mobileIdenticalToggleBox!.height).toBeLessThan(mobileComparisonButtonBox!.y);
-  expect(mobileComparisonButtonBox!.y + mobileComparisonButtonBox!.height).toBeLessThan(mobileApexTestOptionsBox!.y);
   const workflowStatus = page.getByRole('region', { name: '작업 현황' });
   await expect(workflowStatus).toBeVisible();
   await expect(workflowStatus.getByText('실시간 연결')).toBeVisible();
@@ -719,7 +712,7 @@ for (const width of [1440, 390]) {
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
     page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
-    const registered = { id: 'git-registered:limit-fixture', kind: 'local', location: 'git', label: 'owner/repo · main', detail: '등록 브랜치' };
+    const registered = { id: 'git-connection:11111111-1111-4111-8111-111111111111', kind: 'local', location: 'git', label: 'owner/repo', detail: '등록 저장소' };
     const fixed = { ...registered, id: 'git:fixed-limit-source', provenance: {
       provider: 'github', host: 'github.com', repositoryId: 'fixture', repositoryPath: `team/${'billing-project-'.repeat(8)}`,
       refType: 'branch', refName: 'main', commitSha: 'a'.repeat(40), projectRoot: `packages/${'nested-directory-'.repeat(8)}`,
@@ -736,7 +729,15 @@ for (const width of [1440, 390]) {
           files: [{ path: 'classes/Hello.cls', kind: 'text', status: 'SOURCE' }] }],
       } };
     await page.route('**/api/v1/workspace', (route) => route.fulfill({ json: { orgs: [], projects: [], sources: [registered, target] } }));
-    await page.route('**/api/v1/git/connections', (route) => route.fulfill({ json: { connections: [] } }));
+    const bound = { id: registered.id.slice('git-connection:'.length), provider: 'github', providerHost: 'github.com', providerAccountId: 'fixture', repositoryPath: fixed.provenance.repositoryPath,
+      displayName: 'owner/repo', status: 'ACTIVE', grantedPermissions: [], createdAt: '2026-10-04T00:00:00Z', updatedAt: '2026-10-04T00:00:00Z' };
+    await page.route('**/api/v1/git/connections', (route) => route.fulfill({ json: { connections: [bound], tokenStorage: 'ready' } }));
+    await page.route('**/api/v1/git/repositories/inspect', (route) => route.fulfill({ json: { repository: { provider: 'github', host: 'github.com', repositoryPath: bound.repositoryPath, cloneUrl: `https://github.com/${bound.repositoryPath}.git`, repositoryId: 'fixture', private: true, defaultBranch: 'main' } } }));
+    await page.route('**/api/v1/git/repositories/refs', (route) => route.fulfill({ json: { refs: [{ kind: 'branch', name: 'main', commitSha: fixed.provenance.commitSha }] } }));
+    await page.route('**/api/v1/git/repositories/resolve', (route) => route.fulfill({ json: { commitSha: fixed.provenance.commitSha } }));
+    await page.route('**/api/v1/git/imports', (route) => route.fulfill({ status: 202, json: { import: { id: 'fixed-limit-source', provider: 'github', repositoryPath: bound.repositoryPath,
+      ref: { kind: 'branch', name: 'main' }, expectedCommitSha: fixed.provenance.commitSha, status: 'READY', projectRoots: ['.'], sizeBytes: 100,
+      createdAt: '2026-10-04T00:00:00Z', updatedAt: '2026-10-04T00:00:00Z', source: fixed } } }));
     await page.route('**/api/v1/metadata-types**', (route) => route.fulfill({ json: { metadataTypes: [{ name: 'ApexClass', directoryName: 'classes' }] } }));
     await page.route('**/api/v1/apex-test-classes**', (route) => route.fulfill({ json: { testClasses: [] } }));
     await page.route('**/api/v1/comparisons**', (route) => {
@@ -754,7 +755,8 @@ for (const width of [1440, 390]) {
       await route.fulfill({ status: 202, json: { job: { ...dryRunFixture('APPROVAL_PENDING'), source: fixed, comparisonLimit: limit } } });
     });
     await login(page, '/deploy');
-    await expect(page.getByLabel('DESIRED SOURCE 비교 소스')).toHaveValue(registered.id);
+    await page.getByLabel('DESIRED SOURCE 비교 소스').selectOption(registered.id);
+    await expect(page.getByLabel('브랜치 검색 및 선택')).toHaveValue('main');
     await page.getByRole('button', { name: '메타데이터 비교' }).click();
     await expect(page.getByText('비교 제한 초과 · 배포 목록 준비 완료')).toBeVisible();
     await expect(page.getByText(/비교 대상 파일 2,001개/)).toBeVisible();
@@ -922,26 +924,7 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.getByRole('complementary', { name: '배포 대상' }))
     .toContainText('target · target@example.com · 00D00…001');
   const directTestInput = page.getByLabel('테스트 클래스 직접 입력');
-  // 배포 항목 선택이나 직접 입력 포커스 없이 소스의 후보를 먼저 표시한다.
-  await expect(page.getByRole('region', { name: 'Apex 테스트 클래스 선택' })
-    .getByRole('checkbox', { name: 'Hello_Test' })).toBeVisible();
-  await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeDisabled();
-  await directTestInput.fill('Hello_Test, ord');
-  const directTestSuggestions = page.getByRole('listbox', { name: 'source 테스트 클래스 검색 결과' });
-  const orderSuggestion = directTestSuggestions.getByRole('option', { name: 'Order_Test' });
-  await expect(orderSuggestion).toBeVisible();
-  await expect(directTestSuggestions.getByRole('option', { name: 'Hello_Test' })).toHaveCount(0);
-  await directTestInput.press('Tab');
-  await expect(orderSuggestion).toBeFocused();
-  await orderSuggestion.press('Enter');
-  await expect(directTestInput).toHaveValue('Hello_Test, Order_Test');
-  await expect(directTestInput).toHaveAttribute('aria-expanded', 'false');
-  await expect(directTestSuggestions).toHaveCount(0);
-  await directTestInput.fill('ExternalOnly_Test');
-  await expect(directTestInput).toHaveValue('ExternalOnly_Test');
-  await expect(page.getByText('일치하는 source Apex 클래스가 없습니다.')).toHaveCount(0);
-  await expect(directTestInput).toHaveAttribute('aria-expanded', 'false');
-  await directTestInput.clear();
+  await expect(page.getByRole('region', { name: 'Apex 테스트 설정' })).toHaveCount(0);
   await page.getByRole('button', { name: '메타데이터 비교' }).click();
   const metadataLoadingButton = page.getByRole('button', { name: '메타데이터 비교 중……' });
   await expect(metadataLoadingButton).toBeVisible();
@@ -949,14 +932,11 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await expect(page.locator('.comparison-progress')).toHaveCount(0);
   await expect(page.getByText('NEW', { exact: true }).first()).toBeVisible({ timeout: 5_000 });
   await expect(page.getByRole('heading', { name: 'fixture-project → target' })).toBeVisible();
-  const searchPanelBox = await page.getByRole('region', { name: '메타데이터 검색' }).boundingBox();
+  const searchPanelBox = await page.getByRole('region', { name: '메타데이터 검색', exact: true }).boundingBox();
   const searchResultBox = await page.locator('.comparison-result').first().boundingBox();
-  const testPanelBox = await page.getByRole('region', { name: 'Apex 테스트 설정' }).boundingBox();
   expect(searchPanelBox).not.toBeNull();
   expect(searchResultBox).not.toBeNull();
-  expect(testPanelBox).not.toBeNull();
   expect(searchResultBox!.y).toBeGreaterThan(searchPanelBox!.y + searchPanelBox!.height);
-  expect(searchResultBox!.y + searchResultBox!.height).toBeLessThan(testPanelBox!.y);
   const metadataResults = page.locator('.component-results');
   await expect(metadataResults.locator('.component-result')).toHaveCount(20);
   const resultPagination = page.getByRole('navigation', { name: '메타데이터 검색 결과 페이지' });
@@ -975,6 +955,32 @@ test('Salesforce dry-run의 실행 상태와 검증 결과를 화면에 표시�
   await resultPagination.getByRole('button', { name: '이전 페이지' }).click();
   await resultPagination.getByRole('button', { name: '이전 페이지' }).click();
   await page.getByLabel('NewClass 배포 대상으로 선택').check();
+  await expect(page.getByRole('region', { name: 'Apex 테스트 클래스 선택' })
+    .getByRole('checkbox', { name: 'Hello_Test' })).toBeVisible();
+  await directTestInput.fill('Hello_Test, ord');
+  const directTestSuggestions = page.getByRole('listbox', { name: 'source 테스트 클래스 검색 결과' });
+  const orderSuggestion = directTestSuggestions.getByRole('option', { name: 'Order_Test' });
+  await expect(orderSuggestion).toBeVisible();
+  await expect(directTestSuggestions.getByRole('option', { name: 'Hello_Test' })).toHaveCount(0);
+  await directTestInput.press('Tab');
+  await expect(orderSuggestion).toBeFocused();
+  await orderSuggestion.press('Enter');
+  await expect(directTestInput).toHaveValue('Hello_Test, Order_Test');
+  await expect(directTestInput).toHaveAttribute('aria-expanded', 'false');
+  await expect(directTestSuggestions).toHaveCount(0);
+  await directTestInput.fill('ExternalOnly_Test');
+  await expect(directTestInput).toHaveValue('ExternalOnly_Test');
+  await expect(page.getByText('일치하는 source Apex 클래스가 없습니다.')).toHaveCount(0);
+  await expect(directTestInput).toHaveAttribute('aria-expanded', 'false');
+  await directTestInput.clear();
+  const testPanelBox = await page.getByRole('region', { name: 'Apex 테스트 설정' }).boundingBox();
+  expect(testPanelBox).not.toBeNull();
+  const resultToTestsGap = await page.evaluate(() => {
+    const result = document.querySelector('.comparison-result')!.getBoundingClientRect();
+    const tests = document.querySelector('[aria-labelledby="test-heading"]')!.getBoundingClientRect();
+    return tests.top - result.bottom;
+  });
+  expect(resultToTestsGap).toBeGreaterThanOrEqual(0);
   await expect(page.getByLabel('OldClass 배포 대상으로 선택')).toBeDisabled();
   await expect(page.getByLabel('배포 대상').getByText('NewClass', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '배포 대상 Dry-run' })).toBeVisible();

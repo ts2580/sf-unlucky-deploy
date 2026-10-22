@@ -35,6 +35,9 @@ export const GitTokenInputSchema = Type.Object({
   repositoryPath: Type.Optional(Type.String({ minLength: 1, maxLength: 2000 })),
 }, { additionalProperties: false });
 export type GitTokenInput = Static<typeof GitTokenInputSchema>;
+export const GitRepositorySelectionSchema = Type.Object({
+  repositoryPath: Type.String({ minLength: 1, maxLength: 2000 }),
+}, { additionalProperties: false });
 export const GitConnectionResponseSchema = Type.Object({ connection: GitConnectionSchema }, { additionalProperties: false });
 export const GitEnvironmentResponseSchema = Type.Object({ results: Type.Array(Type.Object({
   provider: GitProviderIdSchema, connection: Type.Optional(GitConnectionSchema), errorCode: Type.Optional(Type.String()),

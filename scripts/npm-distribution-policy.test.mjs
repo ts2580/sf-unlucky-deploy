@@ -12,6 +12,26 @@ import { assertPublicationAllowed, assertSamePublishedArtifact, classifyRegistry
 import { getReleasePolicy } from './release-policy.mjs';
 import { assertWindowsBundleArchive, assertWindowsX64Binary } from './windows-bundle-policy.mjs';
 import { packageSmokeCapabilities } from './package-smoke-policy.mjs';
+import { readNpmTarball } from './npm-tar.mjs';
+
+test('npm 파서는 Windows 번들의 빈 유니코드 PAX 항목을 보존하고 없는 항목과 손상 파일을 거부한다', { timeout: 5000 }, async () => {
+  // Independent Python tarfile PAX fixture reproducing @fastify/send's snowman path.
+  const fixture = Buffer.from('H4sIAAAAAAACA+3VwUrEMBAG4Jx9ipKzZJLY7oIg7tGjbyDBTt2626Q0qVbEky/h8/kkVl1UCoLIrqD+32WGucxhmJnWna/cBVP7GtVlDF5smR7N8vwljqZR67x4z5/rxsxsITItfkAfk+vG9uJ/upXeNSwPZVUPqe9Y7ssr7mId/FgzSist7/YE/FWKFC1O3XDCruRuNz0+2fu3nTdmuv/aGiuyAfu/c/N51rq0PNrcf/Kh5LMmlP2aIy0qF1Nd3VBkX1LimGhzJiJFH66zx4d7qn3Jg1qmZo078ft8b+7HH6a+hf8/za3NiwP8fwAAAAAAAAAAAAAAAAAAgK96Au7zWS4AKAAA', 'base64');
+  const directory = await mkdtemp(path.join(tmpdir(), 'sfud-pax-'));
+  const file = path.join(directory, 'unicode.tgz');
+  const npmCli = process.env.npm_execpath;
+  assert.ok(npmCli, 'npm run test:npm-policy로 고정 npm 파서 검사 실행');
+  try {
+    await writeFile(file, fixture);
+    const unicode = 'package/node_modules/@fastify/send/test/fixtures/snow ☃/index.html';
+    assert.deepEqual(await readNpmTarball(npmCli, file), ['package/package.json', unicode]);
+    assert.equal((await readNpmTarball(npmCli, file, unicode)).length, 0);
+    assert.equal(JSON.parse((await readNpmTarball(npmCli, file, 'package/package.json')).toString('utf8')).version, '1.0.0');
+    await assert.rejects(readNpmTarball(npmCli, file, 'package/missing'), /정확히 하나/u);
+    await writeFile(file, fixture.subarray(0, 70));
+    await assert.rejects(readNpmTarball(npmCli, file));
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test('고정된 이전 번들은 지원 명령으로 검사하고 현재 원본의 init·stop 누락은 거부한다', () => {
   const legacy = 'Salesforce\nCommands:\n  config\n  ui [options]\n';

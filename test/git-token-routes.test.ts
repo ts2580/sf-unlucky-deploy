@@ -24,6 +24,61 @@ afterEach(async () => {
 });
 
 describe('Git PAT/API token 연결 라우트', { timeout: 30_000 }, () => {
+  it.each(['github', 'gitlab', 'bitbucket'] as const)('%s 계정에서 저장소만 연결하고 중복 등록·삭제·권한을 처리한다', async (provider) => {
+    const fixture = await createFixture();
+    try {
+      const owner = await bootstrap(fixture.server);
+      const token = 'account-selection-secret';
+      const registered = await fixture.server.inject({ method: 'POST', url: '/api/v1/git/connections', headers: headers(owner),
+        payload: { provider, token, ...(provider === 'bitbucket' ? { apiUsername: 'owner@example.com' } : {}) } });
+      expect(registered.statusCode, registered.body).toBe(201);
+      const account = registered.json().connection;
+      const url = `/api/v1/git/connections/${account.id}/repositories`;
+      const payload = { repositoryPath: 'owner/project' };
+      expect((await fixture.server.inject({ method: 'POST', url, payload })).statusCode).toBe(401);
+      expect((await fixture.server.inject({ method: 'POST', url, headers: { cookie: owner.cookie }, payload })).statusCode).toBe(403);
+      for (const role of ['ADMIN', 'VIEWER'] as const) {
+        const user = await fixture.server.sfudRuntime.auth.createManagedUser({ actorUserId: owner.userId, email: `selection-${role}@example.com`, displayName: role, role, password });
+        const session = await login(fixture.server, user.email);
+        expect((await fixture.server.inject({ method: 'POST', url, headers: headers(session), payload })).statusCode).toBe(role === 'ADMIN' ? 404 : 403);
+      }
+      const selected = await fixture.server.inject({ method: 'POST', url, headers: headers(owner), payload });
+      expect(selected.statusCode, selected.body).toBe(201);
+      const repository = selected.json().connection;
+      expect(repository).toMatchObject({ provider, repositoryPath: 'owner/project', status: 'ACTIVE' });
+      expect(repository.id).not.toBe(account.id);
+      expect(selected.body).not.toContain(token);
+      expect(fixture.apiCalls).toHaveLength(1);
+      expect(fixture.remoteCalls).toEqual(['owner/project']);
+      const repeated = await fixture.server.inject({ method: 'POST', url, headers: headers(owner), payload });
+      expect(repeated.json().connection.id).toBe(repository.id);
+      const listed = await fixture.server.sfudRuntime.gitConnections.list(owner.userId);
+      expect(listed.filter((entry) => entry.repositoryPath !== undefined)).toHaveLength(1);
+      expect((await fixture.server.sfudRuntime.gitConnections.readCredentials(owner.userId, repository.id)).tokens.accessToken).toBe(token);
+      expect((await fixture.server.sfudRuntime.gitConnections.readCredentials(owner.userId, account.id)).connection.repositoryPath).toBeUndefined();
+      expect(await fixture.server.sfudRuntime.store.database.get('SELECT COUNT(*) count FROM git_imports')).toEqual({ count: 0 });
+      await fixture.server.inject({ method: 'DELETE', url: `/api/v1/git/connections/${repository.id}`, headers: headers(owner) });
+      expect((await fixture.server.sfudRuntime.gitConnections.list(owner.userId)).filter((entry) => entry.repositoryPath !== undefined)).toEqual([]);
+      const foreignHost = await fixture.server.inject({ method: 'POST', url, headers: headers(owner), payload: { repositoryPath: 'https://git.internal.example/owner/project.git' } });
+      expect(foreignHost.statusCode).toBe(404);
+    } finally { await fixture.close(); }
+  });
+
+  it('계정 저장소 연결을 검증하는 중 원본 계정을 삭제하면 저장하지 않는다', async () => {
+    const fixture = await createFixture();
+    try {
+      const owner = await bootstrap(fixture.server);
+      const account = await fixture.server.sfudRuntime.gitTokens.register(owner.userId, { provider: 'github', token: 'race-selection-token' });
+      const gate = fixture.blockNextProviderCall();
+      const pending = fixture.server.inject({ method: 'POST', url: `/api/v1/git/connections/${account.id}/repositories`, headers: headers(owner), payload: { repositoryPath: 'owner/project' } });
+      await gate.started;
+      await fixture.server.sfudRuntime.gitConnections.disconnect(owner.userId, account.id);
+      gate.release();
+      expect((await pending).statusCode).toBe(400);
+      expect(await fixture.server.sfudRuntime.gitConnections.list(owner.userId)).toEqual([]);
+    } finally { await fixture.close(); }
+  });
+
   it('저장소 별칭은 소유자만 변경하며 URL·credential·tokenVersion을 보존하고 토큰 교체 후 유지한다', async () => {
     const fixture = await createFixture();
     try {
@@ -502,6 +557,10 @@ async function createFixture(options: { environment?: NodeJS.ProcessEnv; key?: b
   } });
   const remote = { lsRemote: vi.fn(async (options: { repository: { repositoryPath: string } }) => {
     remoteCalls.push(options.repository.repositoryPath);
+    if (blockNext) {
+      blockNext = false; startedResolve?.();
+      await new Promise<void>((resolve) => { releaseResolve = resolve; });
+    }
     return Buffer.from(`ref: refs/heads/main\tHEAD\n${'a'.repeat(40)}\trefs/heads/main\n`);
   }) };
   const environment = { ...(options.environment ?? {}) };

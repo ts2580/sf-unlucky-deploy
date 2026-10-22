@@ -133,8 +133,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   const updateTargetBranch = useCallback((key: string | undefined) => {
     setTargetBranchKey(key); setPreparedGitTarget(undefined); setTargetOrgId('');
   }, []);
-  const [testLevel, setTestLevel] = useState('auto');
-  const [tests, setTests] = useState('');
+  const [configuredTestLevel, setTestLevel] = useState('auto');
+  const [configuredTests, setTests] = useState('');
   const [showIdentical, setShowIdentical] = useState(false);
   const [compareCurrentType, setCompareCurrentType] = useState(true);
   const presetMetadataTypeRef = useRef<{ key: string; value: string } | undefined>(undefined);
@@ -203,6 +203,9 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       && comparisonJob.right.id.startsWith('git:') ? comparisonJob.right.id : ''
     : sourceId;
   const comparisonLimitExceeded = comparisonJob?.result?.comparisonLimit?.exceeded === true;
+  const showApexTestSettings = !comparisonOnly && deploymentCart.some((item) => item.type === 'ApexClass');
+  const testLevel = showApexTestSettings ? configuredTestLevel : 'auto';
+  const tests = showApexTestSettings ? configuredTests : '';
   const cartSelectionKey = deploymentCart.map((item) => item.key).sort().join('\u0001');
   const cartContextKey = [sourceId, targetOrgId, sourceSelectionId, targetSelectionId, packageSelectionKey].join('\u0000');
   const restoredCartRef = useRef<{ contextKey: string; items: DeploymentCartItem[] } | null>(null);
@@ -242,18 +245,26 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
   }, []);
 
   useEffect(() => {
-    const controller = new AbortController();
-    getGitConnections(controller.signal)
+    let controller: AbortController;
+    const refreshConnections = () => {
+      controller?.abort(); controller = new AbortController();
+      const current = controller;
+      void getGitConnections(current.signal)
       .then((response) => {
-        if (!controller.signal.aborted) setGitConnections(response.connections.filter((connection) => connection.repositoryPath !== undefined));
+        if (!current.signal.aborted) {
+          const next = response.connections.filter((connection) => connection.repositoryPath !== undefined);
+          setGitConnections((old) => JSON.stringify(old) === JSON.stringify(next) ? old : next);
+        }
       })
       .catch((caught: unknown) => {
         if (caught instanceof DOMException && caught.name === 'AbortError') return;
-        // Git connections are supplementary here. Keep comparison of existing sources available.
-        if (!controller.signal.aborted) setGitConnections([]);
+        // Retain the last successful list during a transient refresh failure.
       })
-      .finally(() => { if (!controller.signal.aborted) setGitConnectionsLoading(false); });
-    return () => controller.abort();
+      .finally(() => { if (!current.signal.aborted) setGitConnectionsLoading(false); });
+    };
+    refreshConnections();
+    window.addEventListener('focus', refreshConnections);
+    return () => { controller.abort(); window.removeEventListener('focus', refreshConnections); };
   }, []);
 
   useEffect(() => {
@@ -355,7 +366,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
 
   useEffect(() => {
     if (loadedPreset !== null) { setApexTestClassesLoading(false); setApexTestClassesError(''); return; }
-    if (deploymentSourceId.length === 0 || comparisonOnly) {
+    if (deploymentSourceId.length === 0 || !showApexTestSettings) {
       setApexTestClasses([]);
       setApexTestClassQuery('');
       setApexTestClassesError('');
@@ -383,7 +394,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       })
       .finally(() => { if (!controller.signal.aborted) setApexTestClassesLoading(false); });
     return () => controller.abort();
-  }, [deploymentSourceId, comparisonOnly, loadedPreset]);
+  }, [deploymentSourceId, showApexTestSettings, loadedPreset]);
 
   const source = preparedGitSource?.id === sourceId ? preparedGitSource : workspace?.sources.find((entry) => entry.id === sourceId);
   const executionSource = preparedAction?.source ?? (sourceId.startsWith('git-registered:') && comparisonJob?.status === 'SUCCEEDED' && comparisonJobSelectionKeyRef.current === workflowSelectionKey ? comparisonJob.right : source);
@@ -394,7 +405,8 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     || (dryRunJob !== null && ['QUEUED', 'DRY_RUN_RUNNING'].includes(dryRunJob.status));
   const deploying = deploymentSubmitting
     || (deploymentJob !== null && ['QUEUED', 'DEPLOYING'].includes(deploymentJob.status));
-  const testNames = tests.split(/[\s,]+/u).map((value) => value.trim()).filter(Boolean);
+  const configuredTestNames = configuredTests.split(/[\s,]+/u).map((value) => value.trim()).filter(Boolean);
+  const testNames = showApexTestSettings ? configuredTestNames : [];
   const selectedTestNames = new Set(testNames);
   const normalizedApexTestClassQuery = apexTestClassQuery.trim().toLocaleLowerCase();
   const filteredApexTestClasses = apexTestClasses.filter((testClass) =>
@@ -689,7 +701,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
       ...(source?.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.orgIdentityFingerprint }),
       ...(target?.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.orgIdentityFingerprint }),
       ...(scopeQuery ? { metadataType: scopeQuery } : {}), compareCurrentType, showIdentical, excludedPackageIds,
-      testLevel: testLevel as DeploymentSelection['testLevel'], tests: testNames };
+      testLevel: configuredTestLevel as DeploymentSelection['testLevel'], tests: configuredTestNames };
     try { tabId = sessionStorage.getItem(`sfud:draft-tab:${user.id}`) ?? tabId; sessionStorage.setItem(`sfud:draft-tab:${user.id}`, tabId); saveClientDraft(user.id, tabId, selection); } catch { /* Saving must not prevent navigation to repair the connection. */ }
     let returnPath = `/deploy?restoreTab=${encodeURIComponent(tabId)}`;
     try {
@@ -727,19 +739,16 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     const ids = [...new Set([selection.sourceId, ...(selection.compareCurrentType ? [selection.targetId] : [])].filter((item) => item.startsWith('org:')))].sort().join(',');
     setPackageSelection({ sourceIds: ids, ids: selection.excludedPackageIds });
   };
-  const deploySources: WorkspaceSource[] = [
-    ...[preparedGitSource, preparedGitTarget].filter((item, index, sources): item is WorkspaceSource => item !== undefined
+  // Explicitly loaded presets retain their exact sources; ordinary pickers show connected repositories only.
+  const restoredSources = [preparedGitSource, preparedGitTarget].filter((item, index, sources): item is WorkspaceSource => item !== undefined
+      && (item.location !== 'git' || loadedPreset !== null)
       && (item.id === sourceSelectionId || item.id === targetSelectionId)
-      && !(workspace?.sources ?? []).some((source) => source.id === item.id)
-      && sources.findIndex((source) => source?.id === item.id) === index),
-    ...(workspace?.sources ?? []).filter((source, index, sources) => {
-      const provenance = source.provenance;
-      if (source.location !== 'git' || provenance === undefined) return true;
-      if (gitConnections.some((connection) => connection.status === 'ACTIVE' && connection.provider === provenance.provider
-        && connection.providerHost === provenance.host && connection.repositoryPath === provenance.repositoryPath)) return false;
-      return sources.findIndex((entry) => entry.provenance?.provider === provenance.provider
-        && entry.provenance?.host === provenance.host && entry.provenance?.repositoryPath === provenance.repositoryPath) === index;
-    }),
+      && sources.findIndex((source) => source?.id === item.id) === index);
+  const deploySources: WorkspaceSource[] = workspace === null ? [] : [
+    ...restoredSources,
+    ...(workspace?.sources ?? []).filter((source) => (source.location !== 'git'
+      || (loadedPreset !== null && (source.id === sourceSelectionId || source.id === targetSelectionId)))
+      && !restoredSources.some((item) => item.id === source.id)),
     ...gitConnections
       .filter((connection) => connection.status === 'ACTIVE' && connection.repositoryPath !== undefined)
       .map((connection) => ({
@@ -747,32 +756,51 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
         kind: 'local' as const,
         location: 'git' as const,
         label: connection.alias ?? connection.repositoryPath!,
-        detail: `${providerNames[connection.provider]} · 브랜치 선택`,
+        detail: `${providerNames[connection.provider]} · ${connection.providerHost} · ${connection.repositoryPath} · 브랜치 선택`,
       })),
   ];
+  const sourcesForSelection = (selectionId: string) => deploySources.filter((source) => source.location !== 'git'
+    || source.id.startsWith(gitConnectionSourcePrefix) || source.id === selectionId);
   useEffect(() => {
-    const previous = workspace?.sources.find((entry) => entry.id === sourceSelectionId);
+    if (gitConnectionsLoading || loadedPreset !== null) return;
+    if (sourceSelectionId.startsWith(gitConnectionSourcePrefix)) {
+      if (!gitConnections.some((entry) => `${gitConnectionSourcePrefix}${entry.id}` === sourceSelectionId && entry.status === 'ACTIVE')) {
+        setSourceSelectionId(''); setSourceId(''); setPreparedGitSource(undefined); setSourceBranchKey(undefined);
+      }
+      return;
+    }
+    const previous = preparedGitSource?.id === sourceSelectionId ? preparedGitSource : workspace?.sources.find((entry) => entry.id === sourceSelectionId);
     const provenance = previous?.provenance;
-    if (previous?.location !== 'git' || provenance === undefined) return;
+    if (previous?.location !== 'git') return;
+    if (provenance === undefined) { setSourceSelectionId(''); setSourceId(''); setPreparedGitSource(undefined); return; }
     const connection = gitConnections.find((entry) => entry.status === 'ACTIVE' && entry.provider === provenance.provider
       && entry.providerHost === provenance.host && entry.repositoryPath === provenance.repositoryPath);
     if (connection !== undefined) {
       setSourceSelectionId(`${gitConnectionSourcePrefix}${connection.id}`);
       setSourceId('');
-    }
-  }, [workspace, gitConnections, sourceSelectionId]);
+    } else { setSourceSelectionId(''); setSourceId(''); setPreparedGitSource(undefined); }
+  }, [workspace, gitConnections, gitConnectionsLoading, loadedPreset, sourceSelectionId, preparedGitSource]);
   useEffect(() => {
-    const previous = workspace?.sources.find((entry) => entry.id === targetSelectionId);
+    if (gitConnectionsLoading || loadedPreset !== null) return;
+    if (targetSelectionId.startsWith(gitConnectionSourcePrefix)) {
+      if (!gitConnections.some((entry) => `${gitConnectionSourcePrefix}${entry.id}` === targetSelectionId && entry.status === 'ACTIVE')) {
+        setTargetSelectionId(''); setTargetOrgId(''); setPreparedGitTarget(undefined); setTargetBranchKey(undefined);
+      }
+      return;
+    }
+    const previous = preparedGitTarget?.id === targetSelectionId ? preparedGitTarget : workspace?.sources.find((entry) => entry.id === targetSelectionId);
     const provenance = previous?.provenance;
-    if (previous?.location !== 'git' || provenance === undefined) return;
+    if (previous?.location !== 'git') return;
+    if (provenance === undefined) { setTargetSelectionId(''); setTargetOrgId(''); setPreparedGitTarget(undefined); return; }
     const connection = gitConnections.find((entry) => entry.status === 'ACTIVE' && entry.provider === provenance.provider
       && entry.providerHost === provenance.host && entry.repositoryPath === provenance.repositoryPath);
     if (connection !== undefined) {
       setTargetSelectionId(`${gitConnectionSourcePrefix}${connection.id}`);
       setTargetOrgId(''); setPreparedGitTarget(undefined); setCompareCurrentType(true);
-    }
-  }, [workspace, gitConnections, targetSelectionId]);
+    } else { setTargetSelectionId(''); setTargetOrgId(''); setPreparedGitTarget(undefined); }
+  }, [workspace, gitConnections, gitConnectionsLoading, loadedPreset, targetSelectionId, preparedGitTarget]);
   const selectDeploymentTarget = (value: string) => {
+    if (value === targetSelectionId) return;
     setLoadedPreset(null); actionSourcesRef.current = null;
     presetMetadataTypeRef.current = undefined; presetPackageIdsRef.current = undefined;
     setTargetSelectionId(value);
@@ -784,6 +812,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
     }
   };
   const selectDeploymentSource = (value: string) => {
+    if (value === sourceSelectionId) return;
     setLoadedPreset(null); actionSourcesRef.current = null;
     presetMetadataTypeRef.current = undefined; presetPackageIdsRef.current = undefined;
     setSourceSelectionId(value);
@@ -836,7 +865,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
         ...(source?.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.orgIdentityFingerprint }),
         ...(target?.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.orgIdentityFingerprint }),
         ...(scopeQuery ? { metadataType: scopeQuery } : {}), compareCurrentType, showIdentical,
-        excludedPackageIds, testLevel: testLevel as DeploymentSelection['testLevel'], tests: testNames }} onApply={applyPreset} />
+        excludedPackageIds, testLevel: configuredTestLevel as DeploymentSelection['testLevel'], tests: configuredTestNames }} onApply={applyPreset} />
       <DeploymentPresets canApply={!comparing && !dryRunning && !deploying} canSave={canRun && !comparing && !dryRunning && !deploying} selection={{ sourceId, targetId: targetOrgId,
         ...(source?.orgIdentityFingerprint === undefined ? {} : { expectedSourceIdentityFingerprint: source.orgIdentityFingerprint }),
         ...(target?.orgIdentityFingerprint === undefined ? {} : { expectedTargetIdentityFingerprint: target.orgIdentityFingerprint }),
@@ -848,9 +877,9 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
           <section className="workflow-panel deploy-source-panel" aria-labelledby="deploy-source-heading">
             <div className="panel-heading"><span className="step-number">01</span><div><h2 id="deploy-source-heading">소스와 타겟</h2></div><span className="panel-state">{workspace === null ? '조회 중' : 'DEPLOY VIEW'}</span></div>
             <div className="deploy-source-grid">
-              <WorkspaceSourceSelect side="DESIRED SOURCE" value={sourceSelectionId} sources={deploySources} onChange={selectDeploymentSource} tone="violet" />
+              <WorkspaceSourceSelect side="DESIRED SOURCE" value={sourceSelectionId} sources={sourcesForSelection(sourceSelectionId)} onChange={selectDeploymentSource} tone="violet" />
               <div className="direction-marker"><span>{comparisonOnly ? '비교 대상' : '배포 대상'}</span><Icon name="arrow" /></div>
-              <WorkspaceSourceSelect side="TARGET" value={targetSelectionId} sources={deploySources.filter((entry) => entry.kind === 'org' || entry.location === 'git')} onChange={selectDeploymentTarget} tone="blue" />
+              <WorkspaceSourceSelect side="TARGET" value={targetSelectionId} sources={sourcesForSelection(targetSelectionId).filter((entry) => entry.kind === 'org' || entry.location === 'git')} onChange={selectDeploymentTarget} tone="blue" />
             </div>
             {gitConnectionsLoading && <p className="settings-message">등록된 Git 저장소를 불러오는 중……</p>}
             {selectedGitConnection !== undefined && <GitBranchSource key={`source-${selectedGitConnection.id}`}
@@ -925,7 +954,7 @@ export function DeploymentPage({ user }: { user: ApiUser }) {
             comparisonOnly={comparisonOnly}
           />}
 
-          {!comparisonOnly && <section className="workflow-panel" aria-labelledby="test-heading">
+          {showApexTestSettings && <section className="workflow-panel" aria-labelledby="test-heading">
             <div className="panel-heading"><span className="step-number">03</span><div><h2 id="test-heading">Apex 테스트 설정</h2></div><span className="auto-badge">{testLevel.toUpperCase()}</span></div>
             <div className="select-row">
               <label><span>테스트 수준</span><select value={testLevel} onChange={(event) => changeTestLevel(event.target.value)}><option value="auto">Auto · 권장</option><option value="RunSpecifiedTests">RunSpecifiedTests</option><option value="RunLocalTests">RunLocalTests</option><option value="RunAllTestsInOrg">RunAllTestsInOrg</option><option value="RunRelevantTests">RunRelevantTests</option><option value="NoTestRun">NoTestRun</option></select></label>

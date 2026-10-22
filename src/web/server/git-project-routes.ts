@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { Type } from '@sinclair/typebox';
-import { GitProjectRootsResponseSchema, GitImportListResponseSchema, GitImportRequestSchema, GitImportResponseSchema,
+import { GitProjectRootsResponseSchema, GitImportListResponseSchema, GitImportRequestSchema, GitImportResponseSchema, GitResolveRefRequestSchema, GitResolveRefResponseSchema, type GitResolveRefRequest,
   GitRefsRequestSchema, GitRepositoryRequestSchema, GitRepositoryResponseSchema, GitRefsResponseSchema, type GitImportRequestBody, type GitRefsRequest,
   type GitRepositoryRequest } from '../../api/git-project-contracts.js';
 import { GitError } from '../../git/git-errors.js';
@@ -12,6 +12,14 @@ const mutation = { csrf: true, roles: ['OPERATOR', 'DEPLOYER', 'ADMIN'] as ('OPE
 const params = Type.Object({ id: Type.String({ format: 'uuid' }) });
 
 export async function registerGitProjectRoutes(app: FastifyInstance): Promise<void> {
+  app.post<{ Body: GitResolveRefRequest }>('/api/v1/git/repositories/resolve', {
+    schema: { body: GitResolveRefRequestSchema, response: { 200: GitResolveRefResponseSchema } },
+  }, async (request, reply) => {
+    const session = await requireAuthenticatedSession(app, request, reply, mutation);
+    if (session === undefined) return;
+    try { return await app.sfudRuntime.gitImports.resolveRef(request.body, session.user.id); }
+    catch (error) { return sendError(reply, error); }
+  });
   app.patch<{ Params: { id: string }; Body: { alias: string } }>('/api/v1/git/registrations/:id/alias', {
     schema: { params, body: GitAliasInputSchema },
   }, async (request, reply) => {
