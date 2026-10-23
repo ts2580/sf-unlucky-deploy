@@ -1,8 +1,8 @@
-import type { WorkspaceSource } from '../../../src/api/workspace-contracts';
-import { comparisonDisplayWarnings } from '../../../src/reports/comparison-display';
+import type { WorkspaceSource } from '../../../src/contracts/workspace-contracts';
+import { comparisonDisplayWarnings } from '../../../src/contracts/comparison-display';
 import { useEffect, useState } from 'react';
 
-import { ComparisonFileDiff } from '../ComparisonFileDiff';
+import { ComparisonFileDiff } from './ComparisonFileDiff';
 import { Icon } from '../components/Icon';
 import type { ComparisonComponent, ComparisonJobResponse } from './api';
 import { getComparisonJob } from './api';

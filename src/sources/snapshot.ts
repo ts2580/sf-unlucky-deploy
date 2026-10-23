@@ -1,10 +1,14 @@
-import type { WorkspaceSource } from '../api/workspace-contracts.js';
+import type { SourceDescriptor as WorkspaceSource } from './model.js';
+import type { MetadataTypeDescriptor } from './model.js';
+import type { SourceSpec } from './model.js';
+import type { MetadataSnapshot } from './model.js';
+
 import { copyFile, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 import { SfudError } from '../core/errors.js';
-import type { MetadataTypeDescriptor } from '../metadata/component-resolver.js';
+
 import {
   ensureEmptyDirectory,
   findPackageRoot,
@@ -13,8 +17,8 @@ import {
   sha256File,
   writeJson,
 } from '../core/files.js';
-import type { SfClient } from '../salesforce/sf-client.js';
-import type { SourceSpec } from './source-spec.js';
+import type { SfClient } from '../salesforce/public.js';
+
 
 export interface SnapshotOptions {
   provenance?: NonNullable<WorkspaceSource['provenance']>;
@@ -29,18 +33,6 @@ export interface SnapshotOptions {
   metadataTypes?: MetadataTypeDescriptor[];
   empty?: boolean;
   signal?: AbortSignal;
-}
-
-export interface MetadataSnapshot {
-  provenance?: NonNullable<WorkspaceSource['provenance']>;
-  source: SourceSpec;
-  packageRoot: string;
-  manifestPath: string;
-  manifestSha256: string;
-  payloadSha256: string;
-  payloadDigestVersion?: 2;
-  createdAt: string;
-  metadataTypes?: MetadataTypeDescriptor[];
 }
 
 export async function createSnapshot(options: SnapshotOptions): Promise<MetadataSnapshot> {

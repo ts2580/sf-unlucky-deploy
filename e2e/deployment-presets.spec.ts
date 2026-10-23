@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { Value } from '@sinclair/typebox/value';
-import { SaveDeploymentPresetSchema } from '../src/api/deployment-preset-contracts.js';
+import { SaveDeploymentPresetSchema } from '../src/contracts/deployment-preset-contracts.js';
 import { createWebServer } from '../src/web/server/app.js';
 
 for (const width of [1440, 768, 390]) {

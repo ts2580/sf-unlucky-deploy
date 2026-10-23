@@ -5,7 +5,7 @@ import type {
   DeploymentJobEnvelope,
   DeploymentJobListResponse,
   ExecuteDeploymentRequest,
-} from '../../../src/api/deployment-contracts';
+} from '../../../src/contracts/deployment-contracts';
 import {
   CreateDirectDeploymentRequestSchema,
   CreateDryRunRequestSchema,
@@ -13,7 +13,7 @@ import {
   DeploymentJobListResponseSchema,
   DeploymentJobResponseSchema,
   ExecuteDeploymentRequestSchema,
-} from '../../../src/api/deployment-contracts';
+} from '../../../src/contracts/deployment-contracts';
 import { apiRequest } from '../api-client';
 
 export function listDeploymentJobs(signal?: AbortSignal): Promise<DeploymentJobListResponse> {

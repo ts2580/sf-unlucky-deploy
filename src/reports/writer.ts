@@ -2,7 +2,7 @@ import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { writeJson } from '../core/files.js';
-import type { ComparisonResult } from '../metadata/comparator.js';
+import type { ComparisonResult } from '../metadata/public.js';
 import { renderHtmlReport } from './html.js';
 import { renderMarkdownReport } from './markdown.js';
 

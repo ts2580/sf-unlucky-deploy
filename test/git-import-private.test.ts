@@ -12,12 +12,12 @@ import type { ApiCredential } from '../src/git/git-credential-provider.js';
 import type { GitProvider, GitRepositoryInfo } from '../src/git/git-provider.js';
 import { connectionRepositoryPath, normalizeRepository, type GitProviderId, type GitRepositoryAddress } from '../src/git/git-repository.js';
 import { GitRegistrationService } from '../src/git/git-registration-service.js';
-import { GitConnectionRepository } from '../src/storage/git-connection-repository.js';
-import { GitImportRepository } from '../src/storage/git-import-repository.js';
-import { openSqliteStore, type SqliteStore } from '../src/storage/sqlite-store.js';
-import { TokenVault } from '../src/git/token-vault.js';
-import { UserRepository, type SfudUser } from '../src/storage/user-repository.js';
-import { ManagedProjectService } from '../src/web/server/managed-project-service.js';
+import { GitConnectionRepository } from '../src/git/storage/git-connection-repository.js';
+import { GitImportRepository } from '../src/git/storage/git-import-repository.js';
+import { openSqliteStore, type SqliteStore } from '../src/app/sqlite-store.js';
+import { TokenVault } from '../src/core/token-vault.js';
+import { UserRepository, type SfudUser } from '../src/auth/user-repository.js';
+import { ManagedProjectService } from '../src/sources/managed-project-service.js';
 
 const stores: SqliteStore[] = [];
 const roots: string[] = [];

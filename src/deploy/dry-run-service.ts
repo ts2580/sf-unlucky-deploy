@@ -1,30 +1,31 @@
+import type { SourceDescriptor as WorkspaceSource } from '../sources/model.js';
 import { deploymentFailureCode } from './deployment-error.js';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { assertGitMetadataScope } from '../sources/git-metadata-scope.js';
-import { immutableSourceSnapshot } from '../sources/source-provenance.js';
+import { assertGitMetadataScope } from '../sources/public.js';
+import { immutableSourceSnapshot } from '../sources/public.js';
 
-import type { UserSettingsRepository } from '../storage/user-settings-repository.js';
-import type { OrgExecutionAccessRepository } from '../storage/org-execution-access-repository.js';
-import { runDeployCommand } from '../commands/deploy.js';
+import type { UserSettingsReader } from '../settings/public.js';
+import type { OrgExecutionAccessRepository } from './org-execution-access-repository.js';
+import { executeDeployment } from './execute-deployment.js';
 import { SfudError } from '../core/errors.js';
-import { redactSensitiveText, type SfClient } from '../salesforce/sf-client.js';
-import type { WorkspaceSource } from '../api/workspace-contracts.js';
-import type { AllowedProject, WorkspaceService } from '../web/server/workspace-service.js';
+import { redactSensitiveText, type SfClient } from '../salesforce/public.js';
+
+import type { AllowedProject, WorkspacePort } from '../sources/ports.js';
 import { DeploymentCoordinator, ReconciliationRequiredError } from './deployment-coordinator.js';
 import { DeploymentJobRepository, type DeploymentJob } from './deployment-job-repository.js';
 import { assertDeploymentOrgIdentities } from './org-identity-verifier.js';
-import { orgIdentityFingerprint, type OrgIdentitySnapshot } from './org-identity.js';
+import { orgIdentityFingerprint, type OrgIdentitySnapshot } from '../salesforce/public.js';
 import {
   normalizeSelectedComponents,
   type SelectedMetadataComponent,
   writeSelectedManifest,
-} from './selected-manifest.js';
+} from '../metadata/public.js';
 import type { RequestedTestLevel } from './test-plan.js';
 import { ExternalDeploymentStateUnknownError } from './salesforce-deployment.js';
 import { DeploymentAdmissionLimiter } from './deployment-admission-limiter.js';
 import type { DeploymentAdmissionRepository } from './deployment-admission-repository.js';
-import type { JobQueueReservation } from './single-job-queue.js';
+import type { JobQueueReservation } from '../jobs/public.js';
 
 const TEST_LEVELS: RequestedTestLevel[] = [
   'auto',
@@ -86,10 +87,10 @@ export class DryRunService {
   public constructor(
     private readonly jobs: DeploymentJobRepository,
     private readonly coordinator: DeploymentCoordinator,
-    private readonly workspace: WorkspaceService,
+    private readonly workspace: WorkspacePort,
     private readonly sfClient: SfClient,
     private readonly runsDirectory: string,
-    private readonly settings?: UserSettingsRepository,
+    private readonly settings?: UserSettingsReader,
     private readonly durableAdmission?: DeploymentAdmissionRepository,
     private readonly orgExecutionAccess?: OrgExecutionAccessRepository,
     private readonly assertRunStorageCapacity?: () => Promise<void>,
@@ -173,7 +174,7 @@ export class DryRunService {
       try {
         await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
         const settings = await this.settings?.get(input.createdBy);
-        const result = await runDeployCommand({
+        const result = await executeDeployment({
           maximumComparisonFiles: settings?.maximumComparisonFiles ?? 2000,
           from: prepared.source,
           to: prepared.targetAlias,
@@ -191,11 +192,9 @@ export class DryRunService {
           ...(input.tests.length === 0 ? {} : { minimumCoverage: 75 }),
           wait: input.waitMinutes,
           strict: input.strict,
-          color: false,
         }, {
           cwd: prepared.project.realPath,
           sfClient: this.sfClient,
-          stdout: () => undefined,
           signal,
           ...(job.sourceSnapshot === undefined ? {} : { sourceSnapshot: job.sourceSnapshot }),
           beforeDeploymentSubmit: async (phase, payload) => {
@@ -339,7 +338,7 @@ export class DryRunService {
       try {
         await assertDeploymentOrgIdentities(job, this.jobs, this.workspace);
         const settings = await this.settings?.get(input.createdBy);
-        const result = await runDeployCommand({
+        const result = await executeDeployment({
           maximumComparisonFiles: settings?.maximumComparisonFiles ?? 2000,
           from: prepared.source,
           to: prepared.targetAlias,
@@ -351,18 +350,15 @@ export class DryRunService {
             : { manifest: prepared.manifestPath }),
           reportDir: path.join(this.runsDirectory, job.id, 'output'),
           execute: true,
-          skipDryRun: input.testLevel === 'NoTestRun',
-          ...(tests.length === 0 ? {} : { minimumCoverage: 75 }),
+          skipDryRun: true,
           testLevel: input.testLevel,
           tests,
           testClassSuffix: input.testClassSuffix,
           wait: input.waitMinutes,
           strict: input.strict,
-          color: false,
         }, {
           cwd: prepared.project.realPath,
           sfClient: this.sfClient,
-          stdout: () => undefined,
           signal,
           ...(job.sourceSnapshot === undefined ? {} : { sourceSnapshot: job.sourceSnapshot }),
           beforeDeploymentSubmit: async (phase, payload) => {

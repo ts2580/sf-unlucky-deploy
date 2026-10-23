@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
-import { requireAuthenticatedSession } from './auth-routes.js';
+import { requireAuthenticatedSession } from './auth-http.js';
 
 /** One-release tombstones for clients that still use the retired folder-upload API. */
 export async function registerProjectUploadRoutes(app: FastifyInstance): Promise<void> {

@@ -1,9 +1,9 @@
 import { GitConnectionListResponseSchema, GitProvidersResponseSchema,
-  type GitConnectionListResponse, type GitProvidersResponse, type GitProviderId } from '../../../src/api/git-contracts';
+  type GitConnectionListResponse, type GitProvidersResponse, type GitProviderId } from '../../../src/contracts/git-contracts';
 import { GitProjectRootsResponseSchema, type GitProjectRootsResponse, GitCatalogResponseSchema, GitImportListResponseSchema, GitImportRequestSchema, GitImportResponseSchema,
   GitRepositoryRequestSchema, GitRepositoryResponseSchema, GitRefsRequestSchema, GitRefsResponseSchema, GitResolveRefRequestSchema, GitResolveRefResponseSchema, type GitResolveRefRequest,
   type GitCatalogPage, type GitCatalogQuery, type GitImportListResponse, type GitImportRequestBody, type GitImportResponse,
-  type GitRepositoryRequest, type GitRepositoryResponse, type GitRefsRequest, type GitRefsResponse } from '../../../src/api/git-project-contracts';
+  type GitRepositoryRequest, type GitRepositoryResponse, type GitRefsRequest, type GitRefsResponse } from '../../../src/contracts/git-project-contracts';
 import { apiRequest } from '../api-client';
 
 export const providerNames: Record<GitProviderId, string> = { github: 'GitHub', gitlab: 'GitLab', bitbucket: 'Bitbucket' };

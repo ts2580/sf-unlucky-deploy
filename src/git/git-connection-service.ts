@@ -1,5 +1,5 @@
 import { GitError } from './git-errors.js';
-import { GitConnectionRepository } from '../storage/git-connection-repository.js';
+import { GitConnectionRepository } from './storage/git-connection-repository.js';
 
 /** PATs are user-issued: expiry requires replacement, never an OAuth refresh. */
 export class GitConnectionService {

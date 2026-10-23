@@ -1,11 +1,11 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest, FastifyError } from 'fastify';
 import { Type } from '@sinclair/typebox';
-import { GitConnectionListResponseSchema, GitConnectionResponseSchema, GitProvidersResponseSchema, GitTokenInputSchema, GitEnvironmentResponseSchema, GitRepositorySelectionSchema, type GitTokenInput } from '../../api/git-contracts.js';
-import { GitCatalogQuerySchema, GitCatalogResponseSchema, type GitCatalogQuery } from '../../api/git-project-contracts.js';
-import type { GitConnection } from '../../storage/git-connection-repository.js';
-import { GitError } from '../../git/git-errors.js';
-import { requireAuthenticatedSession } from './auth-routes.js';
-import { GitAliasInputSchema } from '../../api/git-contracts.js';
+import { GitConnectionListResponseSchema, GitConnectionResponseSchema, GitProvidersResponseSchema, GitTokenInputSchema, GitEnvironmentResponseSchema, GitRepositorySelectionSchema, type GitTokenInput } from '../../contracts/git-contracts.js';
+import { GitCatalogQuerySchema, GitCatalogResponseSchema, type GitCatalogQuery } from '../../contracts/git-project-contracts.js';
+import type { GitConnection } from '../../git/composition.js';
+import { GitError } from '../../git/composition.js';
+import { requireAuthenticatedSession } from './auth-http.js';
+import { GitAliasInputSchema } from '../../contracts/git-contracts.js';
 
 export async function registerGitConnectionRoutes(app: FastifyInstance): Promise<void> {
   const mutation = { csrf: true, roles: ['OPERATOR', 'DEPLOYER', 'ADMIN'] as ('OPERATOR' | 'DEPLOYER' | 'ADMIN')[] };

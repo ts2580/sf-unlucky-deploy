@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { DeploymentJobResponse } from '../../../src/api/deployment-contracts';
+import type { DeploymentJobResponse } from '../../../src/contracts/deployment-contracts';
 import { deploymentErrorGuidance, sanitizedErrorDetails } from './error-guidance';
 
 export function ErrorGuidance({ job, errorCode, errorMessage, onSettings }: { job?: DeploymentJobResponse; errorCode?: string; errorMessage?: string; onSettings?: (path?: '/auth' | '/settings') => void }) {

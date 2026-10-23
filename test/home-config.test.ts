@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runWindowsPowerShell } from '../src/config/windows-powershell.js';
-import { TokenVault } from '../src/git/token-vault.js';
+import { TokenVault } from '../src/core/token-vault.js';
 
 import {
   getHomeConfigPaths,

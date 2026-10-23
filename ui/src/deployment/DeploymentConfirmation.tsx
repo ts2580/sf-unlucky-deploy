@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { WorkspaceSource } from '../../../src/api/workspace-contracts';
+import type { WorkspaceSource } from '../../../src/contracts/workspace-contracts';
 import { ConnectionDialog } from '../components/ConnectionDialog';
 
 interface Props {
@@ -18,6 +18,7 @@ export function DeploymentConfirmation(props: Props) {
   return <ConnectionDialog title="실제 배포 내용 확인" busy={props.busy ?? false} onClose={props.onCancel}>
     <section className="deployment-confirmation-summary" aria-label="배포 직전 요약">
       <p><strong>{props.mode === 'direct' ? '직접 배포' : '검증 후 승인 배포'}</strong></p>
+      {props.mode === 'direct' && <p>사전 Dry-run 없이 선택한 테스트 수준으로 바로 배포합니다.</p>}
       <h3>Source</h3><p>{props.source.label}</p>
       {props.source.provenance ? <dl>
         <dt>저장소</dt><dd>{/^https:\/\//u.test(props.source.provenance.repositoryPath) ? props.source.provenance.repositoryPath : `${props.source.provenance.host}/${props.source.provenance.repositoryPath}`}</dd>

@@ -1,4 +1,4 @@
-import type { ApiUser, ApiUserRole } from '../../../src/web/shared/api';
+import type { ApiUser, ApiUserRole } from '../../../src/contracts/web-api';
 import { apiRequest } from '../api-client';
 
 export interface AdminUser extends ApiUser {

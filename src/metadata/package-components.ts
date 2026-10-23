@@ -1,11 +1,11 @@
 import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
-import type { PackageComponent } from '../api/package-contracts.js';
+import type { PackageComponent } from '../contracts/package-contracts.js';
 import { SfudError } from '../core/errors.js';
 import { findPackageRoot, listFiles } from '../core/files.js';
 import { withRequestWorkspace } from '../core/request-workspace.js';
-import type { SfClient } from '../salesforce/sf-client.js';
+import type { SfClient } from '../salesforce/public.js';
 import { childMetadataTypes } from './child-metadata-types.js';
 import { readXmlStream } from './xml-stream.js';
 

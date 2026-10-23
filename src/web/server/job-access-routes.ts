@@ -1,7 +1,7 @@
 import { Type, type Static } from '@sinclair/typebox';
 import type { FastifyInstance } from 'fastify';
 import { SfudError } from '../../core/errors.js';
-import { requireAuthenticatedSession } from './auth-routes.js';
+import { requireAuthenticatedSession } from './auth-http.js';
 
 const ParamsSchema = Type.Object({
   type: Type.Union([Type.Literal('comparison'), Type.Literal('deployment')]),

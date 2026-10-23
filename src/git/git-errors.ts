@@ -1,3 +1,4 @@
+import { SourceProviderError } from '../sources/ports.js';
 export type GitErrorCode =
   | 'INVALID_GIT_ALIAS'
   | 'GIT_REPOSITORY_URL_REQUIRED'
@@ -45,10 +46,10 @@ const messages: Record<GitErrorCode, string> = {
 };
 
 // Never include provider bodies, Git stderr, URLs with credentials or local paths.
-export class GitError extends Error {
+export class GitError extends SourceProviderError {
   public retryAfterSeconds?: number;
   public constructor(public readonly code: GitErrorCode) {
-    super(messages[code]);
+    super(code, messages[code]);
     this.name = 'GitError';
   }
 }

@@ -1,4 +1,4 @@
-import type { DeploymentJobResponse } from '../../../src/api/deployment-contracts.js';
+import type { DeploymentJobResponse } from '../../../src/contracts/deployment-contracts.js';
 
 type Diagnostics = NonNullable<NonNullable<DeploymentJobResponse['progress']>['diagnostics']>;
 export interface ErrorGuidance { fact: string; suggestion: string; settings?: boolean; destination?: '/auth' | '/settings' }

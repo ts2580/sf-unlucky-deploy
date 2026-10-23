@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderComparisonMarkdown, renderFileDiffMarkdown } from './markdown-download';
-import type { ComparisonFileDifference } from '../ComparisonFileDiff';
+import type { ComparisonFileDifference } from './ComparisonFileDiff';
 import type { ComparisonJobResponse } from './api';
 
 describe('Markdown diff 다운로드 내용', () => {

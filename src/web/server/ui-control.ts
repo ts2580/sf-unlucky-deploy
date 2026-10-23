@@ -3,7 +3,7 @@ import { lstat, readdir, unlink } from 'node:fs/promises';
 import { createConnection, createServer, type Socket } from 'node:net';
 import path from 'node:path';
 
-import { createPrivateHomeFile, getHomeConfigPaths, readPrivateHomeFile } from '../../config/user-config.js';
+import { createPrivateHomeFile, getHomeConfigPaths, readPrivateHomeFile } from '../../config/composition.js';
 import { SfudError } from '../../core/errors.js';
 
 interface UiRecord {

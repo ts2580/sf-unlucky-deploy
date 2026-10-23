@@ -2,8 +2,8 @@ import { GitRegisteredBranches } from './GitRegisteredBranches';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type { ApiUser } from '../auth/api';
 import { GitAliasInputSchema, GitConnectionResponseSchema, GitTokenInputSchema, GitEnvironmentResponseSchema, GitRepositorySelectionSchema,
-  type GitConnection, type GitProvidersResponse, type GitProviderId, type GitTokenInput } from '../../../src/api/git-contracts';
-import type { GitImport } from '../../../src/api/git-project-contracts';
+  type GitConnection, type GitProvidersResponse, type GitProviderId, type GitTokenInput } from '../../../src/contracts/git-contracts';
+import type { GitImport } from '../../../src/contracts/git-project-contracts';
 import { apiRequest } from '../api-client';
 import { connections, errorMessage, providerNames, providers } from './api';
 import { GitImportDialog } from './GitImportDialog';

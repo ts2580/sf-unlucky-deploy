@@ -1,8 +1,8 @@
-import type { JobSourceSnapshot } from '../sources/source-provenance.js';
+import type { JobSourceSnapshot } from '../sources/public.js';
 import { randomUUID } from 'node:crypto';
-import { initializeJobAccess, jobVisibilitySql } from '../storage/job-access-repository.js';
+import { initializeJobAccess, jobVisibilitySql } from '../jobs/public.js';
 
-import type { ComparisonResult, ComparisonSummary } from '../metadata/comparator.js';
+import type { ComparisonResult, ComparisonSummary } from '../metadata/public.js';
 import type { DatabaseExecutor, DatabaseHandle } from '../storage/database-executor.js';
 import {
   readCompressedJsonArtifact,

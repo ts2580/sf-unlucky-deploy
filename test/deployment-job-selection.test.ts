@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createWebServer } from '../src/web/server/app.js';
-import { resolveJobSelection } from '../src/web/server/deployment-selection-resolver.js';
+import { resolveJobSelection } from '../src/app/deployment-selection-resolver.js';
 
 describe('new selection from a deployment job', () => {
   it('restores only configuration, scopes access and revalidates Org identities without submitting deployments', async () => {

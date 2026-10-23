@@ -7,14 +7,14 @@ import { pathToFileURL } from 'node:url';
 import { GitCache } from '../src/git/git-cache.js';
 import { GitImportService } from '../src/git/git-import-service.js';
 import { GitRegistrationService } from '../src/git/git-registration-service.js';
-import { GitImportRepository } from '../src/storage/git-import-repository.js';
+import { GitImportRepository } from '../src/git/storage/git-import-repository.js';
 import { GitObjectStore } from '../src/git/git-object-store.js';
 import { GitMaterializer } from '../src/git/git-materializer.js';
 import { normalizeRepository } from '../src/git/git-repository.js';
 import type { GitProvider } from '../src/git/git-provider.js';
 import type { GitFetchOptions } from '../src/git/git-client.js';
-import { createWebRuntime } from '../src/web/server/runtime.js';
-import { SingleJobQueue } from '../src/deploy/single-job-queue.js';
+import { createWebRuntime } from '../src/app/runtime.js';
+import { SingleJobQueue } from '../src/jobs/single-job-queue.js';
 import type { SfClient } from '../src/salesforce/sf-client.js';
 import { writeFixtureFiles } from './support/files.js';
 import { GitError } from '../src/git/git-errors.js';
@@ -81,8 +81,8 @@ async function fixture() {
     const imports = new GitImportService(new GitImportRepository(runtime.store.database), runtime.workspace.managedProjects,
       { cache, providers: { github: provider, gitlab: provider, bitbucket: provider }, client: { fetch } });
     const registrations = new GitRegistrationService(runtime.store.database, imports);
-    runtime.gitImports = imports; runtime.workspace.gitImports = imports;
-    runtime.gitRegistrations = registrations; runtime.workspace.gitRegistrations = registrations;
+    runtime.gitImports = imports;
+    runtime.gitRegistrations = registrations;
     return { imports, registrations };
   };
   let services = configure();

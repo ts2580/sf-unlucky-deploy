@@ -1,7 +1,7 @@
 import { apiRequest } from '../api-client';
 import { useEffect, useRef, useState } from 'react';
-import type { GitConnection, GitProviderId, GitProvidersResponse } from '../../../src/api/git-contracts';
-import type { GitRepositoryResponse, GitRefsResponse, GitImport } from '../../../src/api/git-project-contracts';
+import type { GitConnection, GitProviderId, GitProvidersResponse } from '../../../src/contracts/git-contracts';
+import type { GitRepositoryResponse, GitRefsResponse, GitImport } from '../../../src/contracts/git-project-contracts';
 import { GitRepositoryPicker } from './GitRepositoryPicker';
 import { createImport, errorMessage, inspect, providerNames, projectRoots, refs } from './api';
 import { ConnectionDialog } from '../components/ConnectionDialog';

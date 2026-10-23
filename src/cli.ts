@@ -2,7 +2,7 @@
 
 import { createProgram } from './program.js';
 import { SfudError } from './core/errors.js';
-import { loadHomeConfiguration, shouldLoadHomeConfiguration } from './config/user-config.js';
+import { loadHomeConfiguration, shouldLoadHomeConfiguration } from './config/composition.js';
 
 try {
   const program = createProgram();

@@ -1,4 +1,4 @@
-import type { ComparisonResult, FileDifference } from '../metadata/comparator.js';
+import type { ComparisonResult, FileDifference } from '../metadata/public.js';
 
 export function renderMarkdownReport(result: ComparisonResult): string {
   const lines = [

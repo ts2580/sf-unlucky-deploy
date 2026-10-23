@@ -1,0 +1,374 @@
+import type { JobSourceSnapshot } from '../sources/public.js';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+
+import { SfudError } from '../core/errors.js';
+import { salesforceWaitCommandTimeoutMs } from '../core/deadline.js';
+import { sha256DirectoryV2, writeJson } from '../core/files.js';
+import { withRequestWorkspace } from '../core/request-workspace.js';
+import {
+  selectApexTestPlan,
+  type ApexTestPlan,
+  type RequestedTestLevel,
+} from './test-plan.js';
+import { payloadApexCoverageInventory, requireMinimumApexCoverage } from './test-coverage.js';
+import { compareSnapshots, type ComparisonResult } from '../metadata/public.js';
+import { generateDeployableManifest } from '../metadata/public.js';
+import { writeComparisonReports, type ReportPaths } from '../reports/public.js';
+import {
+  ProcessSfClient,
+  sanitizeSfOutput,
+  type SfClient,
+} from '../salesforce/public.js';
+import {
+  runAsyncSalesforceDeployment,
+  type SalesforceDeploymentProgress,
+} from './salesforce-deployment.js';
+import { parseSourceSpec } from '../sources/public.js';
+import { createSnapshot } from '../sources/public.js';
+import { createRunContext, writeRunMetadata } from '../sources/public.js';
+import { settledSnapshots } from '../sources/public.js';
+
+export interface ExecuteDeploymentOptions {
+  maximumComparisonFiles?: number;
+  from: string;
+  to: string;
+  manifest?: string;
+  allMetadata?: boolean;
+  metadataType?: string;
+  reportDir?: string;
+  dryRun?: boolean;
+  execute?: boolean;
+  skipDryRun?: boolean;
+  minimumCoverage?: number;
+  testLevel?: RequestedTestLevel;
+  tests?: string[];
+  testClassSuffix?: string;
+  wait?: number;
+  strict?: boolean;
+}
+
+export interface ExecuteDeploymentDependencies {
+  onPrepared?: (result: { comparison: ComparisonResult; reports: ReportPaths; testPlan: ApexTestPlan }) => void;
+  sourceSnapshot?: JobSourceSnapshot;
+  cwd?: string;
+  sfClient?: SfClient;
+  requestWorkspacePath?: string;
+  beforeDeploymentSubmit?: (phase: 'DRY_RUN' | 'DEPLOY', payload: {
+    payloadChecksum: string; runDirectory: string;
+  }) => Promise<void> | void;
+  onDeploymentSubmitted?: (deploymentId: string, phase: 'DRY_RUN' | 'DEPLOY') => Promise<void> | void;
+  onDeploymentProgress?: (progress: SalesforceDeploymentProgress) => Promise<void> | void;
+  onDeploymentPersistenceError?: (
+    stage: 'submission' | 'progress',
+    error: unknown,
+    phase: 'DRY_RUN' | 'DEPLOY',
+  ) => Promise<void> | void;
+  signal?: AbortSignal;
+}
+
+export interface ExecuteDeploymentResult {
+  comparison: ComparisonResult;
+  payloadSha256: string;
+  payloadDigestVersion: 2;
+  reports: ReportPaths;
+  runDirectory: string;
+  dryRunResult?: unknown;
+  deployResult?: unknown;
+  executed: boolean;
+  testPlan: ApexTestPlan;
+  persistenceWarnings?: string[];
+}
+
+export async function executeDeployment(
+  options: ExecuteDeploymentOptions,
+  dependencies: ExecuteDeploymentDependencies = {},
+): Promise<ExecuteDeploymentResult> {
+  validateDeployOptions(options);
+  const cwd = dependencies.cwd ?? process.cwd();
+  const sfClient = dependencies.sfClient ?? new ProcessSfClient();
+  if (dependencies.requestWorkspacePath === undefined) {
+    return await withRequestWorkspace(cwd, async (requestWorkspacePath) =>
+      executeDeployment(options, { ...dependencies, cwd, sfClient, requestWorkspacePath }));
+  }
+  const commandProjectPath = dependencies.requestWorkspacePath;
+  const source = parseSourceSpec(options.from, cwd);
+  const targetAlias = normalizeTargetAlias(options.to);
+  const targetSource = parseSourceSpec(`org:${targetAlias}`, cwd);
+  const snapshotWaitMinutes = options.wait ?? 60;
+  const snapshotCommandTimeoutMs = salesforceWaitCommandTimeoutMs(snapshotWaitMinutes);
+  const context = await createRunContext(cwd, options.reportDir, 'deploy');
+  const generatedManifest = options.allMetadata === true || options.metadataType !== undefined
+    ? await generateDeployableManifest({
+      sources: [targetSource, source],
+      ...(options.metadataType === undefined ? {} : { metadataTypes: [options.metadataType] }),
+      outputDirectory: path.join(context.rootDirectory, 'generated-manifest'),
+      commandProjectPath,
+      sfClient,
+      ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
+    })
+    : undefined;
+  const manifestPath = generatedManifest?.manifestPath
+    ?? path.resolve(cwd, options.manifest ?? 'manifest/package.xml');
+  const sourceManifests = generatedManifest?.sourceManifests;
+  await writeRunMetadata(context, 'deploy', targetSource, source.displayName, manifestPath, dependencies.sourceSnapshot);
+
+  const [targetSnapshot, sourceSnapshot] = await settledSnapshots([
+    createSnapshot({
+      source: targetSource,
+      manifestPath,
+      ...(sourceManifests === undefined ? {} : {
+        retrievalManifestPath: sourceManifests[0]!.manifestPath,
+      }),
+      outputDir: context.leftSnapshotDirectory,
+      commandProjectPath,
+      sfClient,
+      waitMinutes: options.wait ?? 60,
+      commandTimeoutMs: snapshotCommandTimeoutMs,
+      ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
+      ...(sourceManifests?.[0]?.empty === true ? { empty: true } : {}),
+      ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
+    }),
+    createSnapshot({
+      source,
+      ...(dependencies.sourceSnapshot?.source?.provenance === undefined ? {} : { provenance: dependencies.sourceSnapshot.source.provenance }),
+      manifestPath,
+      ...(sourceManifests === undefined ? {} : {
+        retrievalManifestPath: sourceManifests[1]!.manifestPath,
+      }),
+      outputDir: context.rightSnapshotDirectory,
+      commandProjectPath,
+      sfClient,
+      waitMinutes: options.wait ?? 60,
+      commandTimeoutMs: snapshotCommandTimeoutMs,
+      ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
+      ...(sourceManifests?.[1]?.empty === true ? { empty: true } : {}),
+      ...(generatedManifest === undefined ? {} : { metadataTypes: generatedManifest.metadataTypes }),
+    }),
+  ]);
+
+  const comparison = await compareSnapshots(targetSnapshot, sourceSnapshot, {
+    ...(options.maximumComparisonFiles === undefined ? {} : { maximumFiles: options.maximumComparisonFiles }),
+    strict: options.strict ?? false,
+    ...(options.metadataType === undefined ? {} : { metadataType: options.metadataType }),
+  });
+  if (comparison.summary.removed > 0) {
+    comparison.warnings.push(
+      'TARGET ONLY는 target에만 존재하는 차이이며 destructive manifest 없이는 실제로 삭제되지 않습니다.',
+    );
+  }
+  // generated manifest의 source-only retrieval 결과가 이미 sourceSnapshot에 고정되어 있다.
+  // 여기서 다시 retrieve하면 비교한 본문과 제출 본문이 달라질 수 있다.
+  const deploymentSnapshot = sourceSnapshot;
+  const testPlan = await selectApexTestPlan(
+    deploymentSnapshot.packageRoot,
+    options.testLevel ?? 'auto',
+    options.tests ?? [],
+    options.testClassSuffix ?? '_Test',
+  );
+  const reports = await writeComparisonReports(comparison, context.reportDirectory);
+  await writeJson(path.join(context.logsDirectory, 'test-plan.json'), testPlan);
+  dependencies.onPrepared?.({ comparison, reports, testPlan });
+
+  await assertPayloadUnchanged(deploymentSnapshot.packageRoot, deploymentSnapshot.payloadSha256);
+  const deployArgs = buildDeployArgs(deploymentSnapshot.packageRoot, targetAlias, testPlan);
+  const coverageInventory = options.minimumCoverage === undefined
+    ? undefined
+    : payloadApexCoverageInventory(await readFile(path.join(deploymentSnapshot.packageRoot, 'package.xml'), 'utf8'), testPlan.tests);
+  const payloadEmpty = generatedManifest?.sourceManifests[1]?.empty === true;
+  const persistenceWarnings: string[] = [];
+  const dryRunResult = options.skipDryRun === true
+    ? undefined
+    : payloadEmpty
+      ? emptyDeploymentResult(true)
+      : sanitizeSfOutput(await runDeploymentRequest(
+        sfClient,
+        [...deployArgs, '--dry-run'],
+        targetAlias,
+        commandProjectPath,
+        options.wait,
+        'DRY_RUN',
+        async (phase) => { await dependencies.beforeDeploymentSubmit?.(phase, {
+          payloadChecksum: deploymentSnapshot.payloadSha256, runDirectory: context.rootDirectory,
+        }); },
+        dependencies.onDeploymentSubmitted,
+        dependencies.onDeploymentProgress,
+        dependencies.onDeploymentPersistenceError,
+        dependencies.signal,
+      ));
+  if (dryRunResult !== undefined) {
+    try {
+      await writeJson(path.join(context.logsDirectory, 'dry-run.json'), dryRunResult);
+    } catch (error) {
+      persistenceWarnings.push(artifactWarning('dry-run', error));
+    }
+  }
+  if (options.minimumCoverage !== undefined) {
+    // This is an app policy layered over Salesforce validation. Restrict it to
+    // explicitly selected payload members so unrelated org coverage cannot block.
+    // Wildcard manifests have no exact local inventory and rely on Salesforce.
+    if (coverageInventory !== undefined && coverageInventory.length > 0) {
+      requireMinimumApexCoverage(dryRunResult, options.minimumCoverage, coverageInventory);
+    }
+  }
+
+  let deployResult: unknown;
+  if (options.execute) {
+    await assertPayloadUnchanged(deploymentSnapshot.packageRoot, deploymentSnapshot.payloadSha256);
+    deployResult = payloadEmpty
+      ? emptyDeploymentResult(false)
+      : sanitizeSfOutput(await runDeploymentRequest(
+        sfClient,
+        deployArgs,
+        targetAlias,
+        commandProjectPath,
+        options.wait,
+        'DEPLOY',
+        async (phase) => { await dependencies.beforeDeploymentSubmit?.(phase, {
+          payloadChecksum: deploymentSnapshot.payloadSha256, runDirectory: context.rootDirectory,
+        }); },
+        dependencies.onDeploymentSubmitted,
+        dependencies.onDeploymentProgress,
+        dependencies.onDeploymentPersistenceError,
+        dependencies.signal,
+      ));
+    try {
+      await writeJson(path.join(context.logsDirectory, 'deploy.json'), deployResult);
+    } catch (error) {
+      persistenceWarnings.push(artifactWarning('deploy', error));
+    }
+  }
+
+  const result: ExecuteDeploymentResult = {
+    comparison,
+    payloadSha256: deploymentSnapshot.payloadSha256,
+    payloadDigestVersion: 2,
+    reports,
+    runDirectory: context.rootDirectory,
+    ...(dryRunResult === undefined ? {} : { dryRunResult }),
+    ...(deployResult === undefined ? {} : { deployResult }),
+    executed: options.execute ?? false,
+    testPlan,
+    ...(persistenceWarnings.length === 0 ? {} : { persistenceWarnings }),
+  };
+  return result;
+}
+
+function artifactWarning(phase: 'dry-run' | 'deploy', error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return `${phase} Salesforce 결과 파일 저장 실패: ${message}`;
+}
+
+function emptyDeploymentResult(checkOnly: boolean): unknown {
+  return {
+    status: 0,
+    result: {
+      status: 'Succeeded',
+      checkOnly,
+      empty: true,
+      message: '배포할 source 메타데이터가 없어 Salesforce 요청을 생략했습니다.',
+    },
+  };
+}
+
+async function runDeploymentRequest(
+  sfClient: SfClient,
+  args: readonly string[],
+  targetAlias: string,
+  cwd: string,
+  waitMinutes = 60,
+  phase: 'DRY_RUN' | 'DEPLOY',
+  beforeSubmit?: (phase: 'DRY_RUN' | 'DEPLOY') => Promise<void> | void,
+  onSubmitted?: (deploymentId: string, phase: 'DRY_RUN' | 'DEPLOY') => Promise<void> | void,
+  onProgress?: (progress: SalesforceDeploymentProgress) => Promise<void> | void,
+  onPersistenceError?: (
+    stage: 'submission' | 'progress',
+    error: unknown,
+    phase: 'DRY_RUN' | 'DEPLOY',
+  ) => Promise<void> | void,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  return await runAsyncSalesforceDeployment({
+    sfClient,
+    startArgs: args,
+    targetAlias,
+    cwd,
+    waitMinutes,
+    phase,
+    ...(beforeSubmit === undefined ? {} : {
+      beforeSubmit: async () => { await beforeSubmit(phase); },
+    }),
+    ...(onSubmitted === undefined ? {} : {
+      onSubmitted: async (deploymentId: string) => { await onSubmitted(deploymentId, phase); },
+    }),
+    ...(onProgress === undefined ? {} : { onProgress }),
+    ...(onPersistenceError === undefined ? {} : {
+      onPersistenceError: async (stage: 'submission' | 'progress', error: unknown) => {
+        await onPersistenceError(stage, error, phase);
+      },
+    }),
+    ...(signal === undefined ? {} : { signal }),
+  });
+}
+
+function buildDeployArgs(
+  metadataDirectory: string,
+  targetAlias: string,
+  testPlan: ApexTestPlan,
+): string[] {
+  const args = [
+    'project',
+    'deploy',
+    'start',
+    '--target-org',
+    targetAlias,
+    '--metadata-dir',
+    metadataDirectory,
+    '--test-level',
+    testPlan.level,
+  ];
+  for (const testName of testPlan.tests) {
+    args.push('--tests', testName);
+  }
+  return args;
+}
+
+function validateDeployOptions(options: ExecuteDeploymentOptions): void {
+  if (options.dryRun && options.execute) {
+    throw new SfudError('INVALID_ARGUMENT', '--dry-run과 --execute는 함께 사용할 수 없습니다.');
+  }
+  if (options.skipDryRun === true && options.execute !== true) {
+    throw new SfudError('INVALID_ARGUMENT', 'dry-run 생략은 실제 배포 실행에서만 사용할 수 있습니다.');
+  }
+  if (options.minimumCoverage !== undefined
+    && (!Number.isFinite(options.minimumCoverage) || options.minimumCoverage < 0 || options.minimumCoverage > 100)) {
+    throw new SfudError('INVALID_ARGUMENT', '최소 Apex 테스트 커버리지는 0부터 100 사이여야 합니다.');
+  }
+  if (options.skipDryRun === true && options.minimumCoverage !== undefined) {
+    throw new SfudError('INVALID_ARGUMENT', '커버리지 검증과 dry-run 생략을 함께 사용할 수 없습니다.');
+  }
+  if (options.wait !== undefined && (!Number.isInteger(options.wait) || options.wait < 1)) {
+    throw new SfudError('INVALID_ARGUMENT', '--wait는 1 이상의 정수여야 합니다.');
+  }
+  if (options.allMetadata !== true && options.metadataType === undefined && options.manifest === undefined) {
+    throw new SfudError('INVALID_ARGUMENT', 'manifest 또는 전체 metadata 범위가 필요합니다.');
+  }
+}
+
+async function assertPayloadUnchanged(packageRoot: string, expectedSha256: string): Promise<void> {
+  const actualSha256 = await sha256DirectoryV2(packageRoot);
+  if (actualSha256 !== expectedSha256) {
+    throw new SfudError(
+      'PAYLOAD_CHANGED',
+      `비교 이후 staging payload가 변경되어 배포를 중단했습니다. expected=${expectedSha256} actual=${actualSha256}`,
+    );
+  }
+}
+
+function normalizeTargetAlias(value: string): string {
+  const alias = (value.startsWith('org:') ? value.slice('org:'.length) : value).trim();
+  if (alias.length === 0 || /[\u0000-\u001f]/u.test(alias)) {
+    throw new SfudError('INVALID_ARGUMENT', '대상 org 별칭이 비어 있습니다.');
+  }
+  return alias;
+}

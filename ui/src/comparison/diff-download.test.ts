@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderComparisonDownload, renderFileDiffDownload } from './diff-download';
 import type { ComparisonJobResponse } from './api';
-import type { ComparisonFileDifference } from '../ComparisonFileDiff';
+import type { ComparisonFileDifference } from './ComparisonFileDiff';
 
 const file: ComparisonFileDifference = {
   path: 'classes/한글.cls', status: 'MODIFIED', kind: 'xml', unifiedDiff: '@@ -1 +1 @@\n-"이전", 값\n+새 값',

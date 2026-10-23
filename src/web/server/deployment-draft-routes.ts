@@ -1,9 +1,9 @@
 import { Type, type TSchema } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 import type { FastifyInstance } from 'fastify';
-import { SaveDeploymentDraftSchema, DeploymentDraftSchema, DeploymentDraftListSchema, ResolvedDeploymentDraftSchema, type SaveDeploymentDraft } from '../../api/deployment-draft-contracts.js';
-import { requireAuthenticatedSession } from './auth-routes.js';
-import { captureSelection, resolveSavedSelection } from './deployment-selection-resolver.js';
+import { SaveDeploymentDraftSchema, DeploymentDraftSchema, DeploymentDraftListSchema, ResolvedDeploymentDraftSchema, type SaveDeploymentDraft } from '../../contracts/deployment-draft-contracts.js';
+import { requireAuthenticatedSession } from './auth-http.js';
+import { captureSelection, resolveSavedSelection } from '../../app/deployment-selection-resolver.js';
 const params = Type.Object({ id: Type.String({ minLength: 1, maxLength: 200 }) }, { additionalProperties: false });
 const validatorCompiler = ({ schema }: { schema: unknown }) => (data: unknown) => Value.Check(schema as TSchema, data) ? { value: data } : { error: new Error('선택 초안 요청이 계약과 일치하지 않습니다.') };
 const mutation = { csrf: true, roles: ['OPERATOR', 'DEPLOYER', 'ADMIN'] as ('OPERATOR' | 'DEPLOYER' | 'ADMIN')[] };

@@ -3,7 +3,7 @@ import { access, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { WorkspaceSource } from '../src/api/workspace-contracts.js';
+import type { WorkspaceSource } from '../src/contracts/workspace-contracts.js';
 import { GitMaterializer } from '../src/git/git-materializer.js';
 import { GitObjectStore, type GitObjectReader, type GitTreeEntry } from '../src/git/git-object-store.js';
 import { assertGitMetadataScope } from '../src/sources/git-metadata-scope.js';

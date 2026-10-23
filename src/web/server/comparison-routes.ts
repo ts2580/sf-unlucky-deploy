@@ -1,18 +1,18 @@
 import type { FastifyInstance } from 'fastify';
 import { Type } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
-import { SavedDeploymentComponentSchema } from '../../api/deployment-preset-contracts.js';
-import type { SelectedMetadataComponent } from '../../deploy/selected-manifest.js';
-import { WorkspaceResponseSchema } from '../../api/workspace-contracts.js';
-import { orgIdentityFingerprint } from '../../deploy/org-identity.js';
+import { SavedDeploymentComponentSchema } from '../../contracts/deployment-preset-contracts.js';
+import type { SelectedMetadataComponent } from '../../metadata/composition.js';
+import { WorkspaceResponseSchema } from '../../contracts/workspace-contracts.js';
+import { orgIdentityFingerprint } from '../../salesforce/composition.js';
 import { SfudError } from '../../core/errors.js';
 
-import type { ComparisonJob } from '../../compare/comparison-job-repository.js';
-import { redactSensitiveText } from '../../salesforce/sf-client.js';
-import { hasTestClassSuffix } from '../../deploy/test-plan.js';
-import { requireAuthenticatedSession } from './auth-routes.js';
-import { maskOrgId } from './workspace-service.js';
-import { validateExcludedPackageIds } from '../../metadata/package-exclusion.js';
+import type { ComparisonJob } from '../../compare/composition.js';
+import { redactSensitiveText } from '../../salesforce/composition.js';
+import { hasTestClassSuffix } from '../../deploy/composition.js';
+import { requireAuthenticatedSession } from './auth-http.js';
+import { maskOrgId } from '../../sources/composition.js';
+import { validateExcludedPackageIds } from '../../metadata/composition.js';
 
 interface CreateComparisonBody {
   excludedPackageIds?: string[];

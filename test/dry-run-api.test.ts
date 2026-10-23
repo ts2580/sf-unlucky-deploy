@@ -8,7 +8,7 @@ import { GitError } from '../src/git/git-errors.js';
 import { deploymentErrorGuidance } from '../ui/src/deployment/error-guidance.js';
 import { SfudError } from '../src/core/errors.js';
 import { SfCommandFailedError, type SfClient, type SfRunOptions } from '../src/salesforce/sf-client.js';
-import { openSqliteStore } from '../src/storage/sqlite-store.js';
+import { openSqliteStore } from '../src/app/sqlite-store.js';
 import { createWebServer } from '../src/web/server/app.js';
 import { writeFixtureFiles } from './support/files.js';
 
@@ -575,8 +575,8 @@ describe('dry-run API', () => {
     }
   });
 
-  it.each(['RunLocalTests', 'RunAllTestsInOrg', 'RunRelevantTests'] as const)(
-    '직접 배포에서 선택한 %s를 check-only와 실제 배포에 유지한다', async (testLevel) => {
+  it.each(['auto', 'RunLocalTests', 'RunAllTestsInOrg', 'RunRelevantTests'] as const)(
+    '직접 배포는 사전 검증 없이 선택한 %s로 한 번만 제출한다', async (testLevel) => {
     const fixture = await createFixture(new DryRunSfClient());
     try {
       const auth = await bootstrap(fixture.server);
@@ -599,22 +599,30 @@ describe('dry-run API', () => {
 
       expect(await fixture.server.sfudRuntime.deploymentJobs.getRequired(jobId)).toMatchObject({
         kind: 'DEPLOY', status: 'SUCCEEDED',
-        testPlan: { level: testLevel, tests: [], selection: 'configured' },
+        testPlan: testLevel === 'auto'
+          ? { level: 'RunSpecifiedTests', tests: ['Hello_Test'], selection: 'suffix' }
+          : { level: testLevel, tests: [], selection: 'configured' },
       });
       const deployCalls = deploymentStartCalls(fixture.client.calls);
-      expect(deployCalls).toHaveLength(2);
-      expect(deployCalls[0]!.args).toContain('--dry-run');
-      expect(deployCalls[1]!.args).not.toContain('--dry-run');
-      for (const call of deployCalls) {
-        expect(call.args).toEqual(expect.arrayContaining(['--test-level', testLevel]));
-        expect(call.args).not.toContain('--tests');
-      }
+      expect(deployCalls).toHaveLength(1);
+      expect(deployCalls[0]!.args).not.toContain('--dry-run');
+      expect(deployCalls[0]!.args).toEqual(expect.arrayContaining([
+        '--test-level', testLevel === 'auto' ? 'RunSpecifiedTests' : testLevel,
+      ]));
+      if (testLevel === 'auto') {
+        expect(deployCalls[0]!.args).toEqual(expect.arrayContaining(['--tests', 'Hello_Test']));
+      } else expect(deployCalls[0]!.args).not.toContain('--tests');
+      const job = await fixture.server.sfudRuntime.deploymentJobs.getRequired(jobId);
+      expect(job.dryRunResult).toBeUndefined();
+      expect(await fixture.server.sfudRuntime.deploymentJobs.attempts.current(jobId)).toMatchObject({
+        operation: 'DEPLOY', deploymentId: '0Af-deploy', submissionState: 'TERMINAL',
+      });
     } finally {
       await fixture.close();
     }
   });
 
-  it('테스트 선택 직접 배포는 75% 커버리지를 확인한 뒤 실행한다', async () => {
+  it('지정 테스트 직접 배포는 사전 검증 없이 테스트를 실제 배포에 전달한다', async () => {
     const fixture = await createFixture(new DryRunSfClient('none', 80));
     try {
       const auth = await bootstrap(fixture.server);
@@ -643,9 +651,8 @@ describe('dry-run API', () => {
         testPlan: { level: 'RunSpecifiedTests', tests: ['CoverageSpec'] },
       } });
       const deployCalls = deploymentStartCalls(fixture.client.calls);
-      expect(deployCalls).toHaveLength(2);
-      expect(deployCalls[0]!.args).toContain('--dry-run');
-      expect(deployCalls[1]!.args).not.toContain('--dry-run');
+      expect(deployCalls).toHaveLength(1);
+      expect(deployCalls[0]!.args).not.toContain('--dry-run');
       for (const call of deployCalls) {
         expect(call.args).toEqual(expect.arrayContaining([
           '--test-level', 'RunSpecifiedTests', '--tests', 'CoverageSpec',
@@ -656,8 +663,8 @@ describe('dry-run API', () => {
     }
   });
 
-  it('테스트 선택 직접 배포는 커버리지 75% 미만이면 실제 반영 전에 실패한다', async () => {
-    const fixture = await createFixture(new DryRunSfClient('none', 74));
+  it('직접 배포의 Salesforce 테스트 실패를 기록하고 다시 제출하지 않는다', async () => {
+    const fixture = await createFixture(new DryRunSfClient('reported'));
     try {
       const auth = await bootstrap(fixture.server);
       const workspace = (await fixture.server.inject({
@@ -678,11 +685,11 @@ describe('dry-run API', () => {
 
       expect(await fixture.server.sfudRuntime.deploymentJobs.getRequired(jobId)).toMatchObject({
         status: 'FAILED', errorCode: 'JOB_EXECUTION_FAILED',
-        errorMessage: expect.stringMatching(/74%.*75% 미만/u),
+        errorMessage: expect.stringContaining('CryptoUtil_Test'),
       });
       const deployCalls = deploymentStartCalls(fixture.client.calls);
       expect(deployCalls).toHaveLength(1);
-      expect(deployCalls[0]!.args).toContain('--dry-run');
+      expect(deployCalls[0]!.args).not.toContain('--dry-run');
     } finally {
       await fixture.close();
     }

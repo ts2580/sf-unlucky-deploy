@@ -4,11 +4,11 @@ import path from 'node:path';
 import { open } from 'sqlite';
 import sqlite3 from 'sqlite3';
 import { describe, expect, it } from 'vitest';
-import { openSqliteStore } from '../src/storage/sqlite-store.js';
-import { applyMigrations } from '../src/storage/migrations.js';
-import { UserRepository } from '../src/storage/user-repository.js';
-import { DeploymentPresetRepository, type SavedDeploymentSelection } from '../src/storage/deployment-preset-repository.js';
-import { DeploymentDraftRepository } from '../src/storage/deployment-draft-repository.js';
+import { openSqliteStore } from '../src/app/sqlite-store.js';
+import { applyMigrations } from '../src/app/migrations.js';
+import { UserRepository } from '../src/auth/user-repository.js';
+import { DeploymentPresetRepository, type SavedDeploymentSelection } from '../src/deploy/deployment-preset-repository.js';
+import { DeploymentDraftRepository } from '../src/deploy/deployment-draft-repository.js';
 
 const selection: SavedDeploymentSelection = {
   options: { compareCurrentType: true, showIdentical: false, excludedPackageIds: [], testLevel: 'auto', tests: [] },

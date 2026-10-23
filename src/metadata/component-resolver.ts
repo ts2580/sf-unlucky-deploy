@@ -14,11 +14,7 @@ interface MetadataTypeRule {
   suffix?: string;
 }
 
-export interface MetadataTypeDescriptor {
-  directoryName: string;
-  xmlName: string;
-  suffix?: string;
-}
+import type { MetadataTypeDescriptor } from '../sources/model.js';
 
 const TYPE_RULES: Readonly<Record<string, MetadataTypeRule>> = {
   applications: { type: 'CustomApplication', suffix: '.app' },

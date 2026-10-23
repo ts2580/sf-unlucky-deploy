@@ -2,8 +2,8 @@ import { Type, type Static } from '@sinclair/typebox';
 import type { FastifyInstance } from 'fastify';
 
 import { SfudError } from '../../core/errors.js';
-import { normalizeSalesforceOrgId } from '../../salesforce/org-identifier.js';
-import { requireAuthenticatedSession } from './auth-routes.js';
+import { normalizeSalesforceOrgId } from '../../salesforce/composition.js';
+import { requireAuthenticatedSession } from './auth-http.js';
 
 const ParamsSchema = Type.Object({
   orgId: Type.String({ pattern: '^00D[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$' }),

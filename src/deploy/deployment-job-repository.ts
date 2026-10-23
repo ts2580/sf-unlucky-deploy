@@ -1,16 +1,18 @@
+import { readUserAccess } from '../auth/public.js';
 import { randomUUID } from 'node:crypto';
-import { assertJobAccess, initializeJobAccess, jobVisibilitySql } from '../storage/job-access-repository.js';
+import { assertJobAccess, initializeJobAccess, jobVisibilitySql } from '../jobs/public.js';
 
 import { SfudError } from '../core/errors.js';
 import type { DatabaseExecutor, DatabaseHandle } from '../storage/database-executor.js';
 import { writeCompressedJsonArtifact } from '../storage/json-artifact.js';
 import { runInImmediateTransaction } from '../storage/transaction.js';
-import type { ComparisonResult } from '../metadata/comparator.js';
+import type { ComparisonResult } from '../metadata/public.js';
 import type { ApexTestPlan } from './test-plan.js';
 import { apexCoverageSummary } from './test-coverage.js';
 import type { SalesforceDeploymentProgress } from './salesforce-deployment.js';
 import { hydrateArtifacts } from './deployment-artifacts.js';
 import { DeploymentAttemptRepository } from './deployment-attempt-repository.js';
+import { DeploymentStateMachine } from './deployment-state-machine.js';
 import {
   mapDeploymentJob,
   type DeploymentJobRow, type RemoteDeploymentStatus, type DeploymentJobStatus, type DeploymentExecutionMode,
@@ -42,19 +44,9 @@ const DEPLOYMENT_JOB_SUMMARY_COLUMNS = `
   test_coverage, execution_evidence, execution_mode, reused_validation_id, execution_reason
 `;
 
-const ALLOWED_TRANSITIONS: Record<DeploymentJobStatus, ReadonlySet<DeploymentJobStatus>> = {
-  QUEUED: new Set(['DRY_RUN_RUNNING', 'DEPLOYING', 'FAILED']),
-  DRY_RUN_RUNNING: new Set(['APPROVAL_PENDING', 'FAILED', 'RECONCILE_REQUIRED']),
-  APPROVAL_PENDING: new Set(),
-  VALIDATED_PENDING_EXECUTION: new Set(['FAILED']),
-  DEPLOYING: new Set(['SUCCEEDED', 'FAILED', 'RECONCILE_REQUIRED']),
-  SUCCEEDED: new Set(),
-  FAILED: new Set(),
-  RECONCILE_REQUIRED: new Set(['APPROVAL_PENDING', 'VALIDATED_PENDING_EXECUTION', 'SUCCEEDED', 'FAILED']),
-};
-
 export class DeploymentJobRepository {
   public readonly attempts: DeploymentAttemptRepository;
+  private readonly stateMachine = new DeploymentStateMachine();
   public constructor(
     private readonly database: DatabaseExecutor,
     private readonly now: () => string = () => new Date().toISOString(),
@@ -188,10 +180,7 @@ export class DeploymentJobRepository {
         }
         return { job: mapDeploymentJob(existing), created: false };
       }
-      const deployer = await transaction.get<{ role: string; disabled_at: string | null }>(
-        'SELECT role, disabled_at FROM users WHERE id = ?',
-        input.createdBy,
-      );
+      const deployer = await readUserAccess(transaction, input.createdBy);
       if (
         deployer === undefined
         || deployer.disabled_at !== null
@@ -313,7 +302,8 @@ export class DeploymentJobRepository {
   ): Promise<DeploymentJob> {
     await runInImmediateTransaction(this.database, async (transaction) => {
       const current = await getRequired(transaction, id);
-      assertTransition(current, nextStatus);
+      const timestamp = this.now();
+      const next = this.stateMachine.transition(current, nextStatus, timestamp, details.completedAt);
       if (details.attemptId !== undefined || details.attemptVersion !== undefined) {
         if (details.attemptId === undefined || details.attemptVersion === undefined) {
           throw new SfudError('INVALID_JOB_STATE', '완료 전환에 attempt ID와 버전이 함께 필요합니다.');
@@ -327,14 +317,6 @@ export class DeploymentJobRepository {
           throw new SfudError('INVALID_JOB_STATE', '완료 저장 전에 Salesforce attempt가 변경되었습니다.');
         }
       }
-      const timestamp = this.now();
-      const startedAt = nextStatus === 'DRY_RUN_RUNNING' || nextStatus === 'DEPLOYING'
-        ? timestamp
-        : current.startedAt ?? null;
-      const completedAt = nextStatus === 'APPROVAL_PENDING' || nextStatus === 'VALIDATED_PENDING_EXECUTION'
-        || nextStatus === 'SUCCEEDED' || nextStatus === 'FAILED'
-        ? details.completedAt ?? timestamp
-        : null;
       const result = await transaction.run(`
         UPDATE deployment_jobs
         SET status = ?, updated_at = ?, started_at = ?, completed_at = ?,
@@ -344,10 +326,10 @@ export class DeploymentJobRepository {
             persistence_warning = COALESCE(?, persistence_warning)
         WHERE id = ? AND status = ?
       `,
-        nextStatus,
+        next.status,
         timestamp,
-        startedAt,
-        completedAt,
+        next.startedAt,
+        next.completedAt,
         details.salesforceDeploymentId ?? null,
         details.errorCode ?? null,
         details.errorMessage ?? null,
@@ -468,10 +450,7 @@ export class DeploymentJobRepository {
           throw new SfudError('APPROVAL_DENIED', 'dry-run 배포 아티팩트가 완전하지 않습니다.');
         }
 
-        const approver = await transaction.get<{ role: string; disabled_at: string | null }>(
-          'SELECT role, disabled_at FROM users WHERE id = ?',
-          input.approvedBy,
-        );
+        const approver = await readUserAccess(transaction, input.approvedBy);
         if (
           approver === undefined
           || approver.disabled_at !== null
@@ -759,9 +738,7 @@ export class DeploymentJobRepository {
       input.comparisonResult.summary.identical,
       input.comparisonResult.summary.total,
       input.comparisonResult.summary.different,
-      input.dryRunResult === undefined
-        ? null
-        : apexCoverageSummary(input.dryRunResult)?.minimumPercentage ?? null,
+      apexCoverageSummary(input.deploymentResult)?.minimumPercentage ?? null,
       timestamp,
       input.id);
       if (result.changes !== 1) {
@@ -849,16 +826,14 @@ export class DeploymentJobRepository {
 
   public async assertAccess(id: string, userId: string): Promise<void> {
     await assertJobAccess(this.database, 'deployment', id, userId, 'EXECUTE');
-    const user = await this.database.get<{ role: string }>('SELECT role FROM users WHERE id = ?', userId);
+    const user = await readUserAccess(this.database, userId);
     if (user === undefined || !['DEPLOYER', 'ADMIN'].includes(user.role)) {
       throw new SfudError('APPROVAL_DENIED', '실제 배포 권한이 없습니다.');
     }
   }
 
   public async assertAdministrator(userId: string): Promise<void> {
-    const user = await this.database.get<{ role: string; disabled_at: string | null }>(
-      'SELECT role, disabled_at FROM users WHERE id = ?', userId,
-    );
+    const user = await readUserAccess(this.database, userId);
     if (user?.role !== 'ADMIN' || user.disabled_at !== null) {
       throw new SfudError('APPROVAL_DENIED', '관리자 권한이 필요합니다.');
     }
@@ -894,21 +869,6 @@ async function getRequired(database: DatabaseHandle, id: string): Promise<Deploy
     throw new SfudError('INVALID_ARGUMENT', `배포 작업을 찾을 수 없습니다: ${id}`);
   }
   return mapDeploymentJob(row);
-}
-
-function assertTransition(job: DeploymentJob, nextStatus: DeploymentJobStatus): void {
-  if (!ALLOWED_TRANSITIONS[job.status].has(nextStatus)) {
-    throw new SfudError(
-      'INVALID_JOB_STATE',
-      `허용되지 않은 배포 상태 전이입니다: ${job.status} → ${nextStatus}`,
-    );
-  }
-  if (job.kind === 'DRY_RUN' && nextStatus === 'DEPLOYING') {
-    throw new SfudError('INVALID_JOB_STATE', 'dry-run 작업은 DEPLOYING 상태로 전이할 수 없습니다.');
-  }
-  if (job.kind === 'DEPLOY' && nextStatus === 'DRY_RUN_RUNNING') {
-    throw new SfudError('INVALID_JOB_STATE', '실제 배포 작업은 DRY_RUN_RUNNING 상태로 전이할 수 없습니다.');
-  }
 }
 
 function assertChecksum(value: string): void {

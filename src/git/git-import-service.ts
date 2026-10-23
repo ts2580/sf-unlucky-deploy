@@ -1,11 +1,14 @@
+import type { SourceProject as WorkspaceProject, SourceDescriptor as WorkspaceSource } from '../sources/model.js';
+import type { ManagedProjectStore } from '../sources/public.js';
+import type { GitImportRequest } from '../contracts/git-source-binding.js';
 import { selectedGitEntries, validateGitProjectConfiguration } from './git-project-validator.js';
 import type { GitCache } from './git-cache.js';
 import { requireGitMetadataType } from './git-metadata-selection.js';
 import path from 'node:path';
 import { rm } from 'node:fs/promises';
-import type { WorkspaceProject, WorkspaceSource } from '../api/workspace-contracts.js';
-import { GitImportRepository, type GitImportRecord, type GitImportRequest } from '../storage/git-import-repository.js';
-import { ManagedProjectQuotaError, ManagedProjectService, type ManagedProject } from '../web/server/managed-project-service.js';
+
+import { GitImportRepository, type GitImportRecord} from './storage/git-import-repository.js';
+import { ManagedProjectQuotaError, type ManagedProject } from '../sources/public.js';
 import { GitClient, type GitFetchOptions } from './git-client.js';
 import { GitError } from './git-errors.js';
 import { GitMaterializer } from './git-materializer.js';
@@ -64,7 +67,7 @@ export class GitImportService {
   private closed = false;
 
   public constructor(private readonly history: GitImportRepository,
-    private readonly projects: ManagedProjectService, private readonly options: Options = {}) {
+    private readonly projects: ManagedProjectStore, private readonly options: Options = {}) {
     this.cache = options.cache;
     this.providers = options.providers ?? { github: new GithubProvider(), gitlab: new GitlabProvider(), bitbucket: new BitbucketProvider() };
     this.client = options.client ?? new GitClient();
@@ -132,7 +135,7 @@ export class GitImportService {
     if (ownerCount + (this.admissions.get(owner) ?? 0) >= 3
       || this.entries.size + [...this.admissions.values()].reduce((a, b) => a + b, 0) >= 20) throw new GitError('GIT_QUOTA_EXCEEDED');
     this.admissions.set(owner, (this.admissions.get(owner) ?? 0) + 1);
-    let allocation: Awaited<ReturnType<ManagedProjectService['begin']>> | undefined;
+    let allocation: Awaited<ReturnType<ManagedProjectStore['begin']>> | undefined;
     try {
       if (input.connectionId !== undefined) {
         if (this.access === undefined) throw new GitError('PROVIDER_NOT_CONFIGURED');

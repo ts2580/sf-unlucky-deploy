@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { apiRequest } from '../api-client';
-import { DeploymentPresetListSchema, DeploymentPresetSummarySchema, ResolvedDeploymentPresetSchema, SaveDeploymentPresetSchema, type SaveDeploymentPreset, type DeploymentPresetSummary, type DeploymentSelection, type ResolvedDeploymentPreset } from '../../../src/api/deployment-preset-contracts';
+import { DeploymentPresetListSchema, DeploymentPresetSummarySchema, ResolvedDeploymentPresetSchema, SaveDeploymentPresetSchema, type SaveDeploymentPreset, type DeploymentPresetSummary, type DeploymentSelection, type ResolvedDeploymentPreset } from '../../../src/contracts/deployment-preset-contracts';
 export function DeploymentPresets({ selection, canSave, canApply, onApply }: { selection: DeploymentSelection; canSave: boolean; canApply: boolean; onApply: (value: ResolvedDeploymentPreset) => void }) {
   const latest = useRef({ fingerprint: JSON.stringify(selection), canApply });
   latest.current = { fingerprint: JSON.stringify(selection), canApply };

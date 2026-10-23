@@ -1,4 +1,4 @@
-import type { ApiUser, AuthSessionResponse, AuthStatusResponse } from '../../../src/web/shared/api';
+import type { ApiUser, AuthSessionResponse, AuthStatusResponse } from '../../../src/contracts/web-api';
 import { apiRequest } from '../api-client';
 
 export interface AuthRequest {

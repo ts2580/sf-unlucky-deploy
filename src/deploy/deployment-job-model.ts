@@ -1,9 +1,9 @@
-import type { JobSourceSnapshot } from '../sources/source-provenance.js';
-import type { ComparisonResult, ComparisonSummary } from '../metadata/comparator.js';
+import type { JobSourceSnapshot } from '../sources/public.js';
+import type { ComparisonResult, ComparisonSummary } from '../metadata/public.js';
 import type { ApexTestPlan, RequestedTestLevel } from './test-plan.js';
-import type { SelectedMetadataComponent } from './selected-manifest.js';
+import type { SelectedMetadataComponent } from '../metadata/public.js';
 import type { SalesforceDeploymentProgress } from './salesforce-deployment.js';
-import type { OrgIdentitySnapshot } from './org-identity.js';
+import type { OrgIdentitySnapshot } from '../salesforce/public.js';
 
 export type DeploymentJobKind = 'DRY_RUN' | 'DEPLOY';
 export type DeploymentScope = 'MANIFEST' | 'ALL';

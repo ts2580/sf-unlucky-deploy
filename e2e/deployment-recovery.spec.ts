@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { createWebServer } from '../src/web/server/app.js';
-import type { DeploymentSelection } from '../src/api/deployment-preset-contracts.js';
+import type { DeploymentSelection } from '../src/contracts/deployment-preset-contracts.js';
 const source = { id: 'project:fixture', kind: 'local', label: 'fixture-project' };
 const target = { id: 'org:target', kind: 'org', label: 'target', username: 'target@example.com', maskedOrgId: '00D00…001', orgIdentityFingerprint: 'b'.repeat(64) };
 const selection = { sourceId: source.id, targetId: target.id, metadataType: 'ApexClass', compareCurrentType: true, showIdentical: false, excludedPackageIds: [], testLevel: 'auto', tests: [] };

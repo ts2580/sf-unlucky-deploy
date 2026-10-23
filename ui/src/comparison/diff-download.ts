@@ -1,4 +1,4 @@
-import type { ComparisonFileDifference } from '../ComparisonFileDiff';
+import type { ComparisonFileDifference } from './ComparisonFileDiff';
 import type { ComparisonComponent, ComparisonJobResponse } from './api';
 import { renderComparisonMarkdown, renderFileDiffMarkdown, type DiffContext } from './markdown-download';
 

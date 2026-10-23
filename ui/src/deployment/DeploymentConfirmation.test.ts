@@ -2,7 +2,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import { DeploymentConfirmation } from './DeploymentConfirmation';
-import type { WorkspaceSource } from '../../../src/api/workspace-contracts';
+import type { WorkspaceSource } from '../../../src/contracts/workspace-contracts';
 
 const source: WorkspaceSource = { id: 'git:fixture', kind: 'local', location: 'git', label: '업무 계정', provenance: {
   provider: 'github', host: 'github.com', repositoryId: '1', repositoryPath: 'team/billing', refType: 'branch', refName: 'main',
