@@ -19,7 +19,7 @@ import { runSetup } from './config/composition.js';
 import { formatDoctorReport, runDoctor } from './config/composition.js';
 import { stopWebUi } from './web/server/ui-control.js';
 
-export const CLI_VERSION = '0.9.0';
+export const CLI_VERSION = '0.9.0-rc.1';
 
 export interface ProgramDependencies extends CommandDependencies, DeployCommandDependencies {}
 
