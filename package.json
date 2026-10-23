@@ -1,6 +1,6 @@
 {
   "name": "@trstyq/sf-unlucky-deploy",
-  "version": "0.9.0",
+  "version": "0.9.0-rc.1",
   "description": "Git·로컬 프로젝트·Salesforce Org의 메타데이터를 비교하는 CLI와 웹 UI",
   "private": false,
   "packageManager": "npm@11.20.0",
