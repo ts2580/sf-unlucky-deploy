@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 
-import { redactSensitiveText } from '../../salesforce/sf-client.js';
-import { requireAuthenticatedSession } from './auth-routes.js';
+import { redactSensitiveText } from '../../salesforce/composition.js';
+import { requireAuthenticatedSession } from './auth-http.js';
 
 interface UpdateSettingsBody {
   testClassSuffix?: unknown;

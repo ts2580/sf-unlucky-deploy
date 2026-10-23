@@ -1,10 +1,11 @@
+import { executeDeployment } from '../src/deploy/execute-deployment.js';
 import { access, mkdtemp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { runDeployCommand } from '../src/commands/deploy.js';
+import { runDeployCommand } from '../src/app/cli-operations.js';
 import { SfudError } from '../src/core/errors.js';
 import type { SfClient, SfRunOptions } from '../src/salesforce/sf-client.js';
 import { removeDirectoriesAfterTest, writeFixtureFiles } from './support/files.js';
@@ -13,6 +14,22 @@ describe('deploy command', () => {
   const temporaryDirectories: string[] = [];
 
   afterEach(async () => removeDirectoriesAfterTest(temporaryDirectories));
+
+  it('실행 모듈은 표준 출력 없이 준비 이벤트와 직접 배포 결과를 반환한다', async () => {
+    const fixture = await createDeployFixture(temporaryDirectories);
+    const client = new DeployFixtureSfClient();
+    const prepared = vi.fn();
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      const result = await executeDeployment({ from: `local:${fixture.projectPath}`, to: 'target',
+        manifest: fixture.manifestPath, reportDir: fixture.runDirectory, execute: true, skipDryRun: true,
+      }, { cwd: fixture.projectPath, sfClient: client, onPrepared: prepared });
+      expect(result.executed).toBe(true);
+      expect(prepared).toHaveBeenCalledOnce();
+      expect(deploymentStartCalls(client.calls)).toHaveLength(1);
+      expect(stdout).not.toHaveBeenCalled();
+    } finally { stdout.mockRestore(); }
+  });
 
   it('비교 한도를 넘으면 diff를 생략하고 같은 payload의 검증·배포를 계속한다', async () => {
     const fixture = await createDeployFixture(temporaryDirectories);

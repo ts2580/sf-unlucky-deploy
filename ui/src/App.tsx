@@ -1,13 +1,13 @@
-import { JobResume } from './deployment/JobResume';
-import type { WorkspaceResponse } from '../../src/api/workspace-contracts';
+import { JobResume } from './workflows/JobResume';
+import type { WorkspaceResponse } from '../../src/contracts/workspace-contracts';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
-import type { DeploymentJobResponse } from '../../src/api/deployment-contracts';
+import type { DeploymentJobResponse } from '../../src/contracts/deployment-contracts';
 import type {
   DiagnosticsResponse,
   HealthResponse as PublicHealthResponse,
-} from '../../src/web/shared/api';
-import { AdminAccessDenied, AdminPage } from './admin/AdminPage';
+} from '../../src/contracts/web-api';
+import { AdminAccessDenied, AdminPage } from './admin/public';
 import { apiRequest } from './api-client';
 import {
   getAuthStatus,
@@ -15,15 +15,15 @@ import {
   type ApiUser,
   type AuthStatusResponse,
 } from './auth/api';
-import { AuthLoading, AuthScreen } from './auth/AuthPage';
+import { AuthLoading, AuthScreen } from './auth/public';
 import { listComparisonJobs, type ComparisonJobResponse } from './comparison/api';
 import { listDeploymentJobs } from './deployment/api';
-import { DeploymentPage } from './deployment/DeploymentPage';
+import { DeploymentWorkflow } from './workflows/DeploymentWorkflow';
 import { Icon, type IconName } from './components/Icon';
 import { PageIntro } from './components/PageIntro';
-import { GitSettings } from './git/GitSettings';
-import { GitAllowedIps } from './git/GitAllowedIps';
-import { SalesforceConnections } from './auth/SalesforceConnections';
+import { GitSettings } from './git/public';
+import { GitAllowedIps } from './git/public';
+import { SalesforceConnections } from './auth/public';
 
 type HealthResponse = PublicHealthResponse
   & Partial<Omit<DiagnosticsResponse, keyof PublicHealthResponse>>;
@@ -321,7 +321,7 @@ export function App() {
           </>}
           {currentPage === 'deploy' && (new URLSearchParams(window.location.search).get('job')
             ? <JobResume key={`${auth.user.id}-${window.location.search}`} user={auth.user} jobId={new URLSearchParams(window.location.search).get('job')!} resource={new URLSearchParams(window.location.search).get('resource') === 'comparison' ? 'comparison' : 'deployment'} />
-            : <DeploymentPage key={auth.user.id} user={auth.user} />)}
+            : <DeploymentWorkflow key={auth.user.id} user={auth.user} />)}
           {currentPage === 'runs' && <RunsPage runs={recentRuns} comparisons={recentComparisons} deployments={recentDeployments} />}
           {['auth', 'settings'].includes(currentPage) && /^\/deploy\?(?:draft|restoreTab|job)=[a-zA-Z0-9-]+$/u.test(new URLSearchParams(window.location.search).get('return') ?? '') && <a className="button button-secondary" href={new URLSearchParams(window.location.search).get('return')!}>배포 선택으로 돌아가기</a>}
           {currentPage === 'auth' && <div className="page-stack"><PageIntro kicker="CONNECTIONS" title="Salesforce와 Git 인증을 관리합니다." /><div className="settings-grid"><SalesforceConnections /><GitSettings key={auth.user.id} user={auth.user} section="connections" /></div></div>}

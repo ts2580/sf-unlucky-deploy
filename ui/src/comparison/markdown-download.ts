@@ -1,4 +1,4 @@
-import type { ComparisonFileDifference } from '../ComparisonFileDiff';
+import type { ComparisonFileDifference } from './ComparisonFileDiff';
 import type { ComparisonComponent, ComparisonJobResponse } from './api';
 
 export interface DiffContext { sourceLabel: string; targetLabel: string; sourceSide: 'before' | 'after' }

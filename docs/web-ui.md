@@ -250,12 +250,12 @@ desired source는 `--project`로 등록한 서버 프로젝트, Git에서 가져
 payload와 SHA-256을 고정한다. 성공한 Dry-run 뒤 실제 배포하면 서버가 동일 payload SHA-256을
 다시 확인한다.
 
-Dry-run 없이 바로 실제 배포할 수도 있다. 이 경우에도 화면에서 선택한 테스트 수준을 check-only와
-실제 배포에 동일하게 적용한다. `auto`는 명시 테스트, staging의 접미사 테스트, `RunLocalTests`
-fallback 순서로 결정한다. 테스트 클래스를 명시했다면 `RunSpecifiedTests` check-only 응답에 보고된
-각 Apex 클래스·트리거의 라인 커버리지가 모두 75% 이상일 때만 실제 배포한다. `NoTestRun`을
-명시적으로 선택한 경우에만 check-only를 생략한다. 프로덕션 org처럼 `NoTestRun`을 허용하지 않는
-대상은 Salesforce가 거부하며 실패 상태로 기록된다.
+Dry-run 없이 **실제 배포**를 누르면 사전 check-only를 생략하고 한 번의 실제 배포 요청을 제출한다.
+화면에서 선택한 테스트 수준과 테스트 클래스는 실제 배포 명령에 그대로 적용한다. `auto`는 명시
+테스트, staging의 접미사 테스트, `RunLocalTests` fallback 순서로 결정한다. Salesforce가 실제
+배포 중 테스트 실패나 커버리지 오류를 반환하면 해당 배포를 실패로 기록한다.
+별도로 Dry-run을 실행한 경우에는 기존 check-only와 커버리지 검사를 적용하며, 성공 후 승인
+배포는 동일 payload·대상·테스트 계획과 검증 ID를 확인해 Quick Deploy를 선택한다.
 `DEPLOYER` 또는 `ADMIN` 사용자가 대상 org 별칭과 `실제 배포` 확인 문구를 정확히 입력해야 실제
 배포 버튼이 활성화된다.
 
@@ -278,6 +278,11 @@ ID를 함께 표시한다. 서버는 토큰·client ID·키 경로·로컬 절�
 
 `SFUD_QUICK_DEPLOY_ENABLED=false`로 새 Quick Deploy 제출만 즉시 차단할 수 있다. 이 경우
 일반 배포로 자동 재제출하지 않으며, 이미 Salesforce에 제출한 attempt의 조회·재확인은 계속 가능하다.
+
+배포 상태 전이표, 작업 종류별 전이 제약과 시작·완료 시각 계산은 `DeploymentStateMachine`이
+관리한다. Repository는 DB에서 읽은 현재 상태로 전이를 요청하고, 같은 트랜잭션에서 현재 상태와
+attempt 버전을 확인해 저장한다. 상태 머신은 DB·큐·Salesforce 호출이나 별도의 가변 상태를 갖지 않는다.
+기존 상태값과 API·DB 표현, 재시작·재확인·과거 검증 완료 작업의 복구 전이는 유지한다.
 
 기본 비교 범위는 **전체 배포 가능 메타데이터 (SF CLI)**다. 서버가 LEFT와 RIGHT 각각의
 manifest를 동적으로 생성하고 합집합을 사용하므로 로컬 프로젝트의 `package.xml`에 의존하지

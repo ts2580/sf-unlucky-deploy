@@ -3,7 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { createWebServer } from '../src/web/server/app.js';
-import { WorkflowEventHub } from '../src/web/server/workflow-events.js';
+import { WorkflowEventHub } from '../src/app/workflow-events.js';
 
 const servers: Awaited<ReturnType<typeof createWebServer>>[] = [];
 

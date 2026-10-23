@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { JobQueueCapacityError, SingleJobQueue } from '../src/deploy/single-job-queue.js';
+import { JobQueueCapacityError, SingleJobQueue } from '../src/jobs/single-job-queue.js';
 import { currentSalesforceConnectionPin, currentSalesforceUserId, pinSalesforceConnection, runAsSalesforceUser } from '../src/salesforce/user-context.js';
 
 describe('단일 배포 작업 큐', () => {

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { createWebServer } from '../src/web/server/app.js';
-import type { WorkspaceSource } from '../src/api/workspace-contracts.js';
+import type { WorkspaceSource } from '../src/contracts/workspace-contracts.js';
 
 for (const width of [1440, 390]) {
   test(`저장한 Git 소스·타겟만 정확하게 표시하고 일반 선택으로 돌아오면 이력을 숨긴다 (${width}px)`, async ({ page }) => {

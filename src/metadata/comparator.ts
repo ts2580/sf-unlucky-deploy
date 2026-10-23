@@ -1,3 +1,4 @@
+import type { MetadataSnapshot } from '../sources/model.js';
 import { createHash } from 'node:crypto';
 import { isUtf8 } from 'node:buffer';
 import { open, readFile, stat } from 'node:fs/promises';
@@ -7,7 +8,7 @@ import { createTwoFilesPatch } from 'diff';
 
 import { SfudError } from '../core/errors.js';
 import { sha256File } from '../core/files.js';
-import type { MetadataSnapshot } from '../sources/snapshot.js';
+
 import { resolveMetadataComponents, type MetadataComponent } from './component-resolver.js';
 import { compareXml, type XmlChange } from './xml-diff.js';
 import { hasXmlSemanticPolicy } from './xml-semantics.js';

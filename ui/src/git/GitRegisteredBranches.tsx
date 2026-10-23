@@ -1,5 +1,6 @@
+import type { GitRegistration } from '../../../src/contracts/git-source-binding.js';
 import { useEffect, useState } from 'react';
-import type { GitRegistration } from '../../../src/git/git-registration-service';
+
 import { apiRequest } from '../api-client';
 import { errorMessage } from './api';
 import { GitAliasEditor } from './GitAliasEditor';

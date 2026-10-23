@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { AuthInfo } from '@salesforce/core';
-import { isOrgIdentifier } from '../../salesforce/org-identifier.js';
+import { isOrgIdentifier } from '../../salesforce/composition.js';
 
 const OAUTH_COOKIE = 'sfud_sf_oauth';
 const ATTEMPT_TTL_MS = 5 * 60_000;

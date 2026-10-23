@@ -9,10 +9,10 @@ import { GitRepositoryCatalog } from '../src/git/git-repository-catalog.js';
 import type { GitProviderId } from '../src/git/git-repository.js';
 import type { ProviderHttpClient, ProviderHttpOptions, ProviderHttpResponse } from '../src/git/git-network.js';
 import { ProviderApi } from '../src/git/providers/provider-api.js';
-import { TokenVault } from '../src/git/token-vault.js';
-import { GitConnectionRepository } from '../src/storage/git-connection-repository.js';
-import { openSqliteStore } from '../src/storage/sqlite-store.js';
-import { UserRepository, type SfudUser } from '../src/storage/user-repository.js';
+import { TokenVault } from '../src/core/token-vault.js';
+import { GitConnectionRepository } from '../src/git/storage/git-connection-repository.js';
+import { openSqliteStore } from '../src/app/sqlite-store.js';
+import { UserRepository, type SfudUser } from '../src/auth/user-repository.js';
 import { createWebServer } from '../src/web/server/app.js';
 
 const password = 'correct horse battery staple';

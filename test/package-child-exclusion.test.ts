@@ -1,10 +1,11 @@
+import type { MetadataSnapshot } from '../src/sources/model.js';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { sha256Directory } from '../src/core/files.js';
 import { compareSnapshots, type CompareOptions } from '../src/metadata/comparator.js';
-import type { MetadataSnapshot } from '../src/sources/snapshot.js';
+
 import { writeFixtureFiles } from './support/files.js';
 
 const roots: string[] = [];

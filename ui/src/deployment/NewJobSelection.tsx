@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { apiRequest } from '../api-client';
-import { ResolvedDeploymentPresetSchema, type ResolvedDeploymentPreset } from '../../../src/api/deployment-preset-contracts';
+import { ResolvedDeploymentPresetSchema, type ResolvedDeploymentPreset } from '../../../src/contracts/deployment-preset-contracts';
 export function NewJobSelection({ jobId, enabled, selectionFingerprint, onApply }: { jobId: string; enabled: boolean; selectionFingerprint: string; onApply: (value: ResolvedDeploymentPreset) => void }) {
   const [resolved, setResolved] = useState<ResolvedDeploymentPreset>(); const [message, setMessage] = useState(''); const [busy, setBusy] = useState(false);
   const latest = useRef({ enabled, selectionFingerprint }); latest.current = { enabled, selectionFingerprint };

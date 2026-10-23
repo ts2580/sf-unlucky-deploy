@@ -1,8 +1,8 @@
 import { readClientDraft, saveClientDraft, removeClientDraft } from './client-draft';
 import { useEffect, useRef, useState } from 'react';
 import { apiRequest } from '../api-client';
-import { DeploymentDraftListSchema, DeploymentDraftSchema, ResolvedDeploymentDraftSchema, SaveDeploymentDraftSchema, type DeploymentDraft, type SaveDeploymentDraft } from '../../../src/api/deployment-draft-contracts';
-import type { DeploymentSelection, ResolvedDeploymentPreset } from '../../../src/api/deployment-preset-contracts';
+import { DeploymentDraftListSchema, DeploymentDraftSchema, ResolvedDeploymentDraftSchema, SaveDeploymentDraftSchema, type DeploymentDraft, type SaveDeploymentDraft } from '../../../src/contracts/deployment-draft-contracts';
+import type { DeploymentSelection, ResolvedDeploymentPreset } from '../../../src/contracts/deployment-preset-contracts';
 import { createIdempotencyKey } from './idempotency-key';
 
 interface RecoverySelection { tabId: string; draftId?: string; selection?: DeploymentSelection }

@@ -1,9 +1,10 @@
+import type { MetadataTypeDescriptor } from '../sources/model.js';
 import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 
 import { SfudError } from '../core/errors.js';
 import { listFiles } from '../core/files.js';
-import type { MetadataTypeDescriptor } from './component-resolver.js';
+
 
 interface ProjectConfiguration {
   packageDirectories?: Array<{ path?: unknown }>;

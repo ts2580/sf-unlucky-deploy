@@ -1,5 +1,5 @@
 import type { GitFetchCredential } from './git-credential-bridge.js';
-import type { GitTokens } from '../storage/git-connection-repository.js';
+import type { GitTokens } from './storage/git-connection-repository.js';
 import type { GitProviderId } from './git-repository.js';
 import { GitError } from './git-errors.js';
 

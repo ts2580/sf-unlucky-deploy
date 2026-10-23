@@ -1,10 +1,11 @@
+import type { MetadataSnapshot } from '../src/sources/model.js';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { compareSnapshots } from '../src/metadata/comparator.js';
 import { belongsToPackage, resolvePackageExclusion, listInstalledPackages, validateExcludedPackageIds } from '../src/metadata/package-exclusion.js';
-import type { MetadataSnapshot } from '../src/sources/snapshot.js';
+
 import { removeDirectoriesAfterTest, writeFixtureFiles } from './support/files.js';
 
 describe('installed package exclusion', () => {

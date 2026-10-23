@@ -1,10 +1,10 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 
-import { UserAdministrationError } from '../../auth/auth-service.js';
-import type { UserRole } from '../../storage/user-repository.js';
-import { redactSensitiveText } from '../../salesforce/sf-client.js';
-import { requireAuthenticatedSession } from './auth-routes.js';
-import { GitAllowedIpInputSchema, GitAllowedIpListResponseSchema, GitPrivateIpCheckInputSchema } from '../../api/git-contracts.js';
+import { UserAdministrationError } from '../../auth/composition.js';
+import type { UserRole } from '../../auth/composition.js';
+import { redactSensitiveText } from '../../salesforce/composition.js';
+import { requireAuthenticatedSession } from './auth-http.js';
+import { GitAllowedIpInputSchema, GitAllowedIpListResponseSchema, GitPrivateIpCheckInputSchema } from '../../contracts/git-contracts.js';
 
 interface CreateUserBody {
   email?: string;

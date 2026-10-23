@@ -2,9 +2,9 @@ import { access, chmod, mkdir, mkdtemp, rm, utimes } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ManagedProjectService } from '../src/web/server/managed-project-service.js';
-import { scavengeStaleProjectRoots } from '../src/web/server/workspace-service.js';
-import { WorkspaceService } from '../src/web/server/workspace-service.js';
+import { ManagedProjectService } from '../src/sources/managed-project-service.js';
+import { scavengeStaleProjectRoots } from '../src/sources/workspace-service.js';
+import { WorkspaceService } from '../src/sources/workspace-service.js';
 import type { SfClient } from '../src/salesforce/sf-client.js';
 
 const roots: string[] = [];

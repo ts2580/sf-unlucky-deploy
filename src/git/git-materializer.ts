@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import type { Ignore } from 'ignore';
 import { GitError } from './git-errors.js';
 import type { GitObjectReader, GitTreeEntry } from './git-object-store.js';
-import { gitMetadataTypes } from '../api/git-metadata-types.js';
+import { gitMetadataTypes } from '../contracts/git-metadata-types.js';
 import { discoverGitProjects, selectedGitEntries, validateGitProjectConfiguration } from './git-project-validator.js';
 import { gitPackageDirectories, metadataGitEntries } from './git-metadata-selection.js';
 

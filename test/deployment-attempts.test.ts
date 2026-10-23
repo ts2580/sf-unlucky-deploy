@@ -3,10 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DeploymentJobRepository } from '../src/deploy/deployment-job-repository.js';
 import { DeploymentCoordinator } from '../src/deploy/deployment-coordinator.js';
 import { DeploymentService } from '../src/deploy/deployment-service.js';
-import { SingleJobQueue } from '../src/deploy/single-job-queue.js';
-import { openSqliteStore, type SqliteStore } from '../src/storage/sqlite-store.js';
-import { UserRepository } from '../src/storage/user-repository.js';
-import type { WorkspaceService } from '../src/web/server/workspace-service.js';
+import { SingleJobQueue } from '../src/jobs/single-job-queue.js';
+import { openSqliteStore, type SqliteStore } from '../src/app/sqlite-store.js';
+import { UserRepository } from '../src/auth/user-repository.js';
+import type { WorkspaceService } from '../src/sources/workspace-service.js';
 import type { SfClient } from '../src/salesforce/sf-client.js';
 
 const stores: SqliteStore[] = [];

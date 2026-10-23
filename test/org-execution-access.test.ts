@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { normalizeSalesforceOrgId } from '../src/salesforce/org-identifier.js';
-import { OrgExecutionAccessRepository } from '../src/storage/org-execution-access-repository.js';
-import { openSqliteStore, type SqliteStore } from '../src/storage/sqlite-store.js';
-import { UserRepository } from '../src/storage/user-repository.js';
+import { OrgExecutionAccessRepository } from '../src/deploy/org-execution-access-repository.js';
+import { openSqliteStore, type SqliteStore } from '../src/app/sqlite-store.js';
+import { UserRepository } from '../src/auth/user-repository.js';
 
 const stores: SqliteStore[] = [];
 afterEach(async () => { await Promise.all(stores.splice(0).map((store) => store.close())); });

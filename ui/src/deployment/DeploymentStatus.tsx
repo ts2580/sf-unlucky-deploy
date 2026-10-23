@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-import type { DeploymentJobResponse } from '../../../src/api/deployment-contracts';
+import type { DeploymentJobResponse } from '../../../src/contracts/deployment-contracts';
 import type { ComparisonJobResponse } from '../comparison/api';
 import { ErrorGuidance } from './ErrorGuidance';
 import { sanitizedErrorDetails } from './error-guidance';

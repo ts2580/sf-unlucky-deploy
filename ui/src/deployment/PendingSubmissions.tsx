@@ -1,7 +1,7 @@
 import { DeploymentConfirmation } from './DeploymentConfirmation';
 import { useEffect, useState } from 'react';
 import { apiRequest } from '../api-client';
-import { DeploymentSubmissionLookupSchema, type DeploymentJobResponse } from '../../../src/api/deployment-contracts';
+import { DeploymentSubmissionLookupSchema, type DeploymentJobResponse } from '../../../src/contracts/deployment-contracts';
 import { listPending, completePending, dismissPending, type PendingSubmission, settleRejectedPending } from './pending-submissions';
 import { startDirectDeployment, startDryRun } from './api';
 export function PendingSubmissions({ owner, canRetry, canDeploy, onFound }: { owner: string; canRetry: boolean; canDeploy: boolean; onFound: (job: DeploymentJobResponse) => void }) {

@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import { GitAliasInputSchema } from '../../../src/api/git-contracts';
+import { GitAliasInputSchema } from '../../../src/contracts/git-contracts';
 import { apiRequest } from '../api-client';
 import { errorMessage } from './api';
 

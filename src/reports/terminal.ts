@@ -5,7 +5,7 @@ import type {
   ComponentDifference,
   DifferenceStatus,
   FileDifference,
-} from '../metadata/comparator.js';
+} from '../metadata/public.js';
 
 export interface TerminalReportOptions {
   detail?: boolean;

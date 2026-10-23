@@ -9,7 +9,7 @@ import {
   prepareRunStorage,
   runStoragePolicyFromEnvironment,
 } from '../src/storage/run-storage.js';
-import { createRunContext } from '../src/commands/run-context.js';
+import { createRunContext } from '../src/sources/run-context.js';
 
 const roots: string[] = [];
 

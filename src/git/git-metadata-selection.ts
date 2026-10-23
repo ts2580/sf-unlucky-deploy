@@ -1,4 +1,4 @@
-import { gitMetadataTypes, type GitMetadataType } from '../api/git-metadata-types.js';
+import { gitMetadataTypes, type GitMetadataType } from '../contracts/git-metadata-types.js';
 import { GitError } from './git-errors.js';
 import type { GitTreeEntry } from './git-object-store.js';
 

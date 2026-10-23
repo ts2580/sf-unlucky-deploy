@@ -1,4 +1,4 @@
-import type { GitConnectionRepository } from '../storage/git-connection-repository.js';
+import type { GitConnectionRepository } from './storage/git-connection-repository.js';
 import type { GitConnectionService } from './git-connection-service.js';
 import { credentialProviderFor, providerApiCredential, type ApiCredential, type GitCredentialProvider } from './git-credential-provider.js';
 import { GitError } from './git-errors.js';

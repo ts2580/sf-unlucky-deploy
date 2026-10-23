@@ -5,13 +5,13 @@ import path from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { createWebRuntime, type WebRuntime } from '../src/web/server/runtime.js';
+import { createWebRuntime, type WebRuntime } from '../src/app/runtime.js';
 import { GitImportService } from '../src/git/git-import-service.js';
 import { GitClient, type GitFetchOptions } from '../src/git/git-client.js';
 import type { GitObjectReader } from '../src/git/git-object-store.js';
 import type { GitProvider } from '../src/git/git-provider.js';
 import { normalizeRepository } from '../src/git/git-repository.js';
-import { GitImportRepository } from '../src/storage/git-import-repository.js';
+import { GitImportRepository } from '../src/git/storage/git-import-repository.js';
 import type { SfClient } from '../src/salesforce/sf-client.js';
 
 const commitSha = '1'.repeat(40);
@@ -80,7 +80,7 @@ describe('Git import runtime restart recovery', { timeout: 30_000 }, () => {
       });
       injectedImports = imports;
       first.gitImports = imports;
-      first.workspace.gitImports = imports;
+
 
       const ready = await imports.create(owner.user.id, request);
       await vi.waitFor(async () => expect((await history.get(ready.id, owner.user.id)).status).toBe('READY'));

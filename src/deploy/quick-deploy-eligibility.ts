@@ -1,6 +1,6 @@
 import type { DeploymentAttempt } from './deployment-attempt-repository.js';
 import type { DeploymentJob } from './deployment-job-model.js';
-import { sameOrgIdentity } from './org-identity.js';
+import { sameOrgIdentity } from '../salesforce/public.js';
 
 export type DeploymentExecutionMode =
   | 'QUICK_DEPLOY'

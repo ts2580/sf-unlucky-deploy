@@ -6,11 +6,11 @@ import { open } from 'sqlite';
 import sqlite3 from 'sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { TokenVault, type TokenContext } from '../src/git/token-vault.js';
-import { GitConnectionRepository } from '../src/storage/git-connection-repository.js';
-import { applyMigrations } from '../src/storage/migrations.js';
-import { openSqliteStore, type SqliteStore } from '../src/storage/sqlite-store.js';
-import { UserRepository } from '../src/storage/user-repository.js';
+import { TokenVault, type TokenContext } from '../src/core/token-vault.js';
+import { GitConnectionRepository } from '../src/git/storage/git-connection-repository.js';
+import { applyMigrations } from '../src/app/migrations.js';
+import { openSqliteStore, type SqliteStore } from '../src/app/sqlite-store.js';
+import { UserRepository } from '../src/auth/user-repository.js';
 
 const stores: SqliteStore[] = [];
 const roots: string[] = [];

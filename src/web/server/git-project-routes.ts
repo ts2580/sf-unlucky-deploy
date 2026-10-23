@@ -2,11 +2,11 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { Type } from '@sinclair/typebox';
 import { GitProjectRootsResponseSchema, GitImportListResponseSchema, GitImportRequestSchema, GitImportResponseSchema, GitResolveRefRequestSchema, GitResolveRefResponseSchema, type GitResolveRefRequest,
   GitRefsRequestSchema, GitRepositoryRequestSchema, GitRepositoryResponseSchema, GitRefsResponseSchema, type GitImportRequestBody, type GitRefsRequest,
-  type GitRepositoryRequest } from '../../api/git-project-contracts.js';
-import { GitError } from '../../git/git-errors.js';
-import type { GitImportRecord } from '../../storage/git-import-repository.js';
-import { requireAuthenticatedSession } from './auth-routes.js';
-import { GitAliasInputSchema } from '../../api/git-contracts.js';
+  type GitRepositoryRequest } from '../../contracts/git-project-contracts.js';
+import { GitError } from '../../git/composition.js';
+import type { GitImportRecord } from '../../git/composition.js';
+import { requireAuthenticatedSession } from './auth-http.js';
+import { GitAliasInputSchema } from '../../contracts/git-contracts.js';
 
 const mutation = { csrf: true, roles: ['OPERATOR', 'DEPLOYER', 'ADMIN'] as ('OPERATOR' | 'DEPLOYER' | 'ADMIN')[] };
 const params = Type.Object({ id: Type.String({ format: 'uuid' }) });

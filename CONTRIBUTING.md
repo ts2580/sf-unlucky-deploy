@@ -75,3 +75,7 @@ Windows 번들은 공개된 일반 Release tarball을 입력으로 사용한다.
 - Playwright Chromium 기반 데스크톱·모바일 HTML 렌더링
 
 실제 org 전체 범위 검증은 배포 대상과 manifest를 명시적으로 정한 뒤 수행한다. 저장소 검증에서는 작은 단일 컴포넌트 check-only만 실행한다.
+
+## 모듈 경계
+
+새 기능은 [모듈 소유권과 의존 방향](docs/module-architecture.md)에 맞춰 구현합니다. 다른 모듈의 내부 파일을 직접 import하지 않고 공개 진입점을 사용합니다. 앱 전용 `composition.ts`는 업무 모듈에서 사용할 수 없습니다. `npm run architecture:check`는 `quality`와 CI에 포함됩니다.

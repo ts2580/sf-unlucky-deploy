@@ -1,20 +1,17 @@
+import type { SourceDescriptor as WorkspaceSource } from '../sources/model.js';
+import type { GitRegistration } from '../contracts/git-source-binding.js';
+import type { GitImportRequest } from '../contracts/git-source-binding.js';
 import { randomUUID } from 'node:crypto';
 import type { DatabaseExecutor } from '../storage/database-executor.js';
-import type { GitImportRequest } from '../storage/git-import-repository.js';
+
 import type { GitImportService } from './git-import-service.js';
 import { GitError } from './git-errors.js';
 import { connectionRepositoryPath, normalizeRepository, validateGitRef } from './git-repository.js';
 import { safeGitPath } from './git-project-validator.js';
-import type { WorkspaceSource } from '../api/workspace-contracts.js';
+
 import { runGitOperation } from './git-diagnostics.js';
 import { normalizeGitAlias } from './git-alias.js';
 
-export interface GitRegistration {
-  requiresRepositoryUrl?: boolean;
-  alias?: string;
-  id: string; repositoryId: string; request: GitImportRequest; status: string; lastCommitSha?: string;
-  lastSyncedAt?: string; errorMessage?: string;
-}
 interface Row { id: string; alias: string | null; repository_url_verified: number; repository_id: string; request_json: string; status: string; last_commit_sha: string | null; last_synced_at: string | null; error_message: string | null }
 export class GitRegistrationService {
   private closed = false;

@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { open } from 'sqlite';
 import sqlite3 from 'sqlite3';
-import { applyMigrations } from '../src/storage/migrations.js';
+import { applyMigrations } from '../src/app/migrations.js';
 import { DatabaseExecutor } from '../src/storage/database-executor.js';
 import { GitRegistrationService } from '../src/git/git-registration-service.js';
 import type { GitImportService } from '../src/git/git-import-service.js';
-import { GitImportRepository } from '../src/storage/git-import-repository.js';
+import { GitImportRepository } from '../src/git/storage/git-import-repository.js';
 
 describe('기존 Git 주소 복구 migration', () => {
   it('소유자·provider·경로가 일치하는 연결로만 복구하고 불명확한 기록은 원격 접근 전에 차단한다', async () => {

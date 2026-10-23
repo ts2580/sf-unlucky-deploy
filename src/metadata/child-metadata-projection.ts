@@ -1,9 +1,10 @@
+import type { MetadataSnapshot } from '../sources/model.js';
 import { copyFile, link, mkdir, mkdtemp, open, rm, unlink, type FileHandle } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { SfudError } from '../core/errors.js';
 import { listFiles } from '../core/files.js';
-import type { MetadataSnapshot } from '../sources/snapshot.js';
+
 import { childMetadataTypes } from './child-metadata-types.js';
 import { readXmlStream } from './xml-stream.js';
 import { filterPackageChildren } from './package-child-filter.js';

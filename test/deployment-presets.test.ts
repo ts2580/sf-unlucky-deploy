@@ -3,9 +3,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createWebServer } from '../src/web/server/app.js';
-import { resolvePreset, captureSelection } from '../src/web/server/deployment-selection-resolver.js';
-import type { WebRuntime } from '../src/web/server/runtime.js';
-import type { DeploymentSelection } from '../src/api/deployment-preset-contracts.js';
+import { resolvePreset, captureSelection } from '../src/app/deployment-selection-resolver.js';
+import type { WebRuntime } from '../src/app/runtime.js';
+import type { DeploymentSelection } from '../src/contracts/deployment-preset-contracts.js';
 const selection: DeploymentSelection = { sourceId: 'org:source', targetId: 'org:target', compareCurrentType: true, showIdentical: false, metadataType: 'ApexClass', excludedPackageIds: [], testLevel: 'RunSpecifiedTests', tests: ['Saved_Test'], components: [{ type: 'ApexClass', fullName: 'SavedClass' }, { type: 'Flow', fullName: 'SavedFlow' }] };
 describe('deployment presets', () => {
   it('CRUD is owned, CSRF/role protected and survives restart; alias identity replacement cannot resolve', async () => {

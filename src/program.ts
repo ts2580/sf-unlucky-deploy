@@ -1,25 +1,25 @@
 import { Command } from 'commander';
 import path from 'node:path';
 
-import { runCompareCommand, type CommandDependencies } from './commands/compare.js';
+import { runCompareCommand, type CommandDependencies } from './app/cli-operations.js';
 import {
   runDeployCommand,
   type DeployCommandDependencies,
-} from './commands/deploy.js';
+} from './app/cli-operations.js';
 import { SfudError } from './core/errors.js';
-import type { RequestedTestLevel } from './deploy/test-plan.js';
+import type { RequestedTestLevel } from './deploy/composition.js';
 import {
   DEFAULT_UI_HOST,
   DEFAULT_UI_PORT,
   startWebUi,
 } from './web/server/start.js';
-import { gitHostPolicyFromAddresses, gitHostPolicyFromEnvironment } from './git/git-network.js';
-import { getHomeConfigPaths, initializeHomeConfiguration } from './config/user-config.js';
-import { runSetup } from './config/setup.js';
-import { formatDoctorReport, runDoctor } from './config/doctor.js';
+import { gitHostPolicyFromAddresses, gitHostPolicyFromEnvironment } from './git/composition.js';
+import { getHomeConfigPaths, initializeHomeConfiguration } from './config/composition.js';
+import { runSetup } from './config/composition.js';
+import { formatDoctorReport, runDoctor } from './config/composition.js';
 import { stopWebUi } from './web/server/ui-control.js';
 
-export const CLI_VERSION = '0.8.0';
+export const CLI_VERSION = '0.9.0';
 
 export interface ProgramDependencies extends CommandDependencies, DeployCommandDependencies {}
 

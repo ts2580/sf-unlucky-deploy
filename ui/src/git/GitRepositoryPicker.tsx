@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import type { GitConnection } from '../../../src/api/git-contracts';
-import type { GitCatalogPage } from '../../../src/api/git-project-contracts';
+import type { GitConnection } from '../../../src/contracts/git-contracts';
+import type { GitCatalogPage } from '../../../src/contracts/git-project-contracts';
 import { catalog, errorMessage } from './api';
 
 export function GitRepositoryPicker({ connection, disabled, onSelect }: {

@@ -1,13 +1,13 @@
 import { expect, it } from 'vitest';
 
-import { SingleJobQueue } from '../src/deploy/single-job-queue.js';
-import { TokenVault } from '../src/git/token-vault.js';
+import { SingleJobQueue } from '../src/jobs/single-job-queue.js';
+import { TokenVault } from '../src/core/token-vault.js';
 import type { SfClient } from '../src/salesforce/sf-client.js';
 import { runAsSalesforceUser } from '../src/salesforce/user-context.js';
 import { UserSfClient } from '../src/salesforce/user-sf-client.js';
-import { SalesforceConnectionRepository } from '../src/storage/salesforce-connection-repository.js';
-import { openSqliteStore } from '../src/storage/sqlite-store.js';
-import { UserRepository } from '../src/storage/user-repository.js';
+import { SalesforceConnectionRepository } from '../src/salesforce/connection-repository.js';
+import { openSqliteStore } from '../src/app/sqlite-store.js';
+import { UserRepository } from '../src/auth/user-repository.js';
 
 it.each([1, 2])('큐 슬롯 %i개에서 같은 별칭을 쓴 대기 작업에 소유자의 인증만 복원한다', async (concurrency) => {
   const store = await openSqliteStore({ databasePath: ':memory:' });

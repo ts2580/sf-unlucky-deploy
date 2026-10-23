@@ -5,8 +5,8 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { DeploymentAdmissionRepository } from '../src/deploy/deployment-admission-repository.js';
-import { openSqliteStore, type SqliteStore } from '../src/storage/sqlite-store.js';
-import { UserRepository } from '../src/storage/user-repository.js';
+import { openSqliteStore, type SqliteStore } from '../src/app/sqlite-store.js';
+import { UserRepository } from '../src/auth/user-repository.js';
 
 const stores: SqliteStore[] = [];
 const directories: string[] = [];

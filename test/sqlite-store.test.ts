@@ -12,10 +12,10 @@ import {
 } from '../src/deploy/deployment-coordinator.js';
 import { ComparisonJobRepository } from '../src/compare/comparison-job-repository.js';
 import { DeploymentJobRepository } from '../src/deploy/deployment-job-repository.js';
-import { SingleJobQueue } from '../src/deploy/single-job-queue.js';
-import { openSqliteStore, type SqliteStore } from '../src/storage/sqlite-store.js';
-import { applyMigrations } from '../src/storage/migrations.js';
-import { UserRepository } from '../src/storage/user-repository.js';
+import { SingleJobQueue } from '../src/jobs/single-job-queue.js';
+import { openSqliteStore, type SqliteStore } from '../src/app/sqlite-store.js';
+import { applyMigrations } from '../src/app/migrations.js';
+import { UserRepository } from '../src/auth/user-repository.js';
 import type { ComparisonResult } from '../src/metadata/comparator.js';
 
 const stores: SqliteStore[] = [];

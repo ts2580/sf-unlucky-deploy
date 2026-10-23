@@ -1,10 +1,10 @@
-import { resolveJobSelection } from './deployment-selection-resolver.js';
-import { ResolvedDeploymentPresetSchema } from '../../api/deployment-preset-contracts.js';
-import { orgIdentityFingerprint } from '../../deploy/org-identity.js';
-import { deploymentFailureCode } from '../../deploy/deployment-error.js';
-import { maskOrgId } from './workspace-service.js';
+import { resolveJobSelection } from '../../app/deployment-selection-resolver.js';
+import { ResolvedDeploymentPresetSchema } from '../../contracts/deployment-preset-contracts.js';
+import { orgIdentityFingerprint } from '../../salesforce/composition.js';
+import { deploymentFailureCode } from '../../deploy/composition.js';
+import { maskOrgId } from '../../sources/composition.js';
 import { Type } from '@sinclair/typebox';
-import { DeploymentSubmissionLookupSchema } from '../../api/deployment-contracts.js';
+import { DeploymentSubmissionLookupSchema } from '../../contracts/deployment-contracts.js';
 import type { FastifyInstance } from 'fastify';
 
 import {
@@ -18,11 +18,11 @@ import {
   type CreateDryRunRequest,
   type BindDeploymentAttemptRequest,
   type ExecuteDeploymentRequest,
-} from '../../api/deployment-contracts.js';
+} from '../../contracts/deployment-contracts.js';
 import { SfudError } from '../../core/errors.js';
-import type { DeploymentJob } from '../../deploy/deployment-job-repository.js';
-import { redactSensitiveText } from '../../salesforce/sf-client.js';
-import { requireAuthenticatedSession } from './auth-routes.js';
+import type { DeploymentJob } from '../../deploy/composition.js';
+import { redactSensitiveText } from '../../salesforce/composition.js';
+import { requireAuthenticatedSession } from './auth-http.js';
 
 export async function registerDeploymentRoutes(app: FastifyInstance): Promise<void> {
   for (const prepare of [false, true]) {

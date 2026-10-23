@@ -1,17 +1,17 @@
-import type { UserSettingsRepository } from '../storage/user-settings-repository.js';
+import type { UserSettingsReader } from '../settings/public.js';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { assertGitMetadataScope } from '../sources/git-metadata-scope.js';
+import { assertGitMetadataScope } from '../sources/public.js';
 
-import { runCompareCommand } from '../commands/compare.js';
+import { executeComparison } from './execute-comparison.js';
 import { SfudError } from '../core/errors.js';
-import { redactSensitiveText, type SfClient } from '../salesforce/sf-client.js';
-import { JobQueueCapacityError, JobQueueClosedError, type JobQueueReservation, SingleJobQueue } from '../deploy/single-job-queue.js';
+import { redactSensitiveText, type SfClient } from '../salesforce/public.js';
+import { JobQueueCapacityError, JobQueueClosedError, type JobQueueReservation, SingleJobQueue } from '../jobs/public.js';
 import { ComparisonJobRepository, type ComparisonJob } from './comparison-job-repository.js';
-import type { WorkspaceService } from '../web/server/workspace-service.js';
-import { immutableSourceSnapshot } from '../sources/source-provenance.js';
-import { validateExcludedPackageIds } from '../metadata/package-exclusion.js';
-import { normalizeSelectedComponents, writeSelectedManifest, type SelectedMetadataComponent } from '../deploy/selected-manifest.js';
+import type { PreparedSource, WorkspacePort } from '../sources/ports.js';
+import { immutableSourceSnapshot } from '../sources/public.js';
+import { validateExcludedPackageIds } from '../metadata/public.js';
+import { normalizeSelectedComponents, writeSelectedManifest, type SelectedMetadataComponent } from '../metadata/public.js';
 
 export interface CreateComparisonInput {
   excludedPackageIds?: string[];
@@ -34,31 +34,27 @@ export class ComparisonService {
   public constructor(
     private readonly repository: ComparisonJobRepository,
     private readonly queue: SingleJobQueue,
-    private readonly workspace: WorkspaceService,
+    private readonly workspace: WorkspacePort,
     private readonly sfClient: SfClient,
     private readonly runsDirectory: string,
-    private readonly settings?: UserSettingsRepository,
+    private readonly settings?: UserSettingsReader,
   ) {}
 
   public async create(input: CreateComparisonInput): Promise<ComparisonJob> {
     if (input.scope === 'selected') input = { ...input, components: normalizeSelectedComponents(input.components ?? []) };
     else if (input.components !== undefined) throw new Error('선택 항목은 selected 비교에서만 사용할 수 있습니다.');
     const jobId = randomUUID();
-    const prepared: string[] = [];
-    const releases: (() => void)[] = [];
+    const prepared: PreparedSource[] = [];
     const prepare = async (id: string, side: string) => {
-      if (!id.startsWith('git-registered:')) return id;
       const types = new Set(input.components?.map((component) => component.type));
       const metadataType = input.scope === 'selected' && types.size === 1 ? [...types][0] : input.metadataType;
-      if (this.workspace.gitRegistrations === undefined || !['all', 'selected'].includes(input.scope ?? '') || metadataType === undefined) {
-        throw new Error('등록 브랜치는 메타데이터 타입을 선택해 비교하세요.');
-      }
-      const record = await this.workspace.gitRegistrations.prepare(id.slice('git-registered:'.length), input.createdBy, metadataType,
-        { sessionId: input.sessionWorkspaceId ?? randomUUID(), jobId, side });
-      const sourceId = `git:${record.id}`;
-      prepared.push(record.id);
-      releases.push(this.workspace.pinSources([sourceId], input.createdBy));
-      return sourceId;
+      const source = await this.workspace.prepareSource(id, {
+        ownerUserId: input.createdBy, scope: input.scope ?? 'manifest',
+        ...(metadataType === undefined ? {} : { metadataType }),
+        sessionId: input.sessionWorkspaceId ?? randomUUID(), jobId, side,
+      });
+      prepared.push(source);
+      return source.id;
     };
     this.queue.assertAccepting();
     if (input.sourceOnly !== true && input.leftSourceId === input.rightSourceId) throw new Error('서로 다른 비교 소스를 선택하세요.');
@@ -69,15 +65,14 @@ export class ComparisonService {
       const leftSourceId = input.sourceOnly === true ? rightSourceId : await prepare(input.leftSourceId, 'left');
       return await this.createPrepared({ ...input, leftSourceId, rightSourceId }, jobId, reservation);
     } catch (error) {
-      for (const release of releases) release();
-      for (const id of prepared) await this.workspace.gitImports?.remove(id, input.createdBy).catch(() => undefined);
+      for (const source of prepared) await source.discard().catch(() => undefined);
       if (error instanceof JobQueueCapacityError) {
         throw new SfudError('REQUEST_CAPACITY_EXCEEDED', '비교 대기 수가 서버 수용량에 도달했습니다. 잠시 후 다시 시도하세요.');
       }
       throw error;
     } finally {
       reservation?.release();
-      for (const release of releases) release();
+      for (const source of prepared) source.release();
     }
   }
 
@@ -182,7 +177,7 @@ export class ComparisonService {
     const job = await this.repository.getRequired(jobId);
     try {
       const settings = await this.settings?.get(job.createdBy);
-      const result = await runCompareCommand({
+      const result = await executeComparison({
         excludedPackageIds: job.excludedPackageIds ?? [],
         excludePackageMetadata: job.excludePackageMetadata === true,
         maximumComparisonFiles: settings?.maximumComparisonFiles ?? 2000,
@@ -199,13 +194,11 @@ export class ComparisonService {
         strict: job.strict,
         showIdentical: job.showIdentical,
         sourceOnly: job.leftSource === job.rightSource,
-        color: false,
       }, {
         cwd: job.projectPath,
         sfClient: this.sfClient,
         packageComponentResolver: (entry, alias, cwd, requestSignal, required) =>
           this.workspace.resolvePackageComponents(entry, alias, cwd, requestSignal, required, job.createdBy),
-        stdout: () => undefined,
         signal,
         ...(job.sourceSnapshot === undefined ? {} : { sourceSnapshot: job.sourceSnapshot }),
       });

@@ -1,9 +1,9 @@
 import { Value } from '@sinclair/typebox/value';
 import { Type, type TSchema } from '@sinclair/typebox';
 import type { FastifyInstance } from 'fastify';
-import { SaveDeploymentPresetSchema, DeploymentPresetListSchema, DeploymentPresetSummarySchema, ResolvedDeploymentPresetSchema, type SaveDeploymentPreset } from '../../api/deployment-preset-contracts.js';
-import { requireAuthenticatedSession } from './auth-routes.js';
-import { captureSelection, resolvePreset } from './deployment-selection-resolver.js';
+import { SaveDeploymentPresetSchema, DeploymentPresetListSchema, DeploymentPresetSummarySchema, ResolvedDeploymentPresetSchema, type SaveDeploymentPreset } from '../../contracts/deployment-preset-contracts.js';
+import { requireAuthenticatedSession } from './auth-http.js';
+import { captureSelection, resolvePreset } from '../../app/deployment-selection-resolver.js';
 const params = Type.Object({ id: Type.String({ minLength: 1, maxLength: 200 }) }, { additionalProperties: false });
 const validatorCompiler = ({ schema }: { schema: unknown }) => (data: unknown) => Value.Check(schema as TSchema, data) ? { value: data } : { error: new Error('저장 설정 요청이 계약과 일치하지 않습니다.') };
 const mutation = { csrf: true, roles: ['OPERATOR', 'DEPLOYER', 'ADMIN'] as ('OPERATOR' | 'DEPLOYER' | 'ADMIN')[] };

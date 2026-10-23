@@ -1,5 +1,5 @@
 // Child metadata mapping derived from the same Salesforce registry snapshot as
-// src/api/git-metadata-types.ts. Apache-2.0; see THIRD_PARTY_NOTICES.md.
+// src/contracts/git-metadata-types.ts. Apache-2.0; see THIRD_PARTY_NOTICES.md.
 export const childMetadataTypes = [
   {"name": "AIScoringModelDefVersion", "parent": "AIScoringModelDefinition", "directory": "aiScoringModelDefinitions", "suffix": "aiScoringModelDefinition", "element": "aiScoringModelDefVersions", "identity": "fullName", "ignoreParentName": false},
   {"name": "AssignmentRule", "parent": "AssignmentRules", "directory": "assignmentRules", "suffix": "assignmentRules", "element": "assignmentRule", "identity": "fullName", "ignoreParentName": false},

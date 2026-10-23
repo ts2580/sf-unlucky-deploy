@@ -7,9 +7,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { DeploymentCoordinator } from '../src/deploy/deployment-coordinator.js';
 import { DeploymentExecutionLeaseRepository } from '../src/deploy/deployment-execution-lease-repository.js';
 import { DeploymentJobRepository } from '../src/deploy/deployment-job-repository.js';
-import { SingleJobQueue } from '../src/deploy/single-job-queue.js';
-import { openSqliteStore, type SqliteStore } from '../src/storage/sqlite-store.js';
-import { UserRepository } from '../src/storage/user-repository.js';
+import { SingleJobQueue } from '../src/jobs/single-job-queue.js';
+import { openSqliteStore, type SqliteStore } from '../src/app/sqlite-store.js';
+import { UserRepository } from '../src/auth/user-repository.js';
 
 const stores: SqliteStore[] = [];
 const directories: string[] = [];

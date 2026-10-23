@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { GitConnectionResponseSchema, GitRepositorySelectionSchema, type GitConnection } from '../../../src/api/git-contracts';
+import { GitConnectionResponseSchema, GitRepositorySelectionSchema, type GitConnection } from '../../../src/contracts/git-contracts';
 import { apiRequest } from '../api-client';
 import { ConnectionDialog } from '../components/ConnectionDialog';
 import { errorMessage } from './api';

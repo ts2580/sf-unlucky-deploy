@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { GitImport } from '../../../src/api/git-project-contracts';
+import type { GitImport } from '../../../src/contracts/git-project-contracts';
 import { apiRequest } from '../api-client';
 import { errorMessage, imports, providerNames } from './api';
 import { Icon } from '../components/Icon';

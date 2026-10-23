@@ -9,16 +9,16 @@ import {
   redactSensitiveText,
   sanitizeSfOutput,
   type SfClient,
-} from '../salesforce/sf-client.js';
-import type { WorkspaceService } from '../web/server/workspace-service.js';
-import type { OrgExecutionAccessRepository } from '../storage/org-execution-access-repository.js';
+} from '../salesforce/public.js';
+import type { WorkspacePort } from '../sources/ports.js';
+import type { OrgExecutionAccessRepository } from './org-execution-access-repository.js';
 import { DeploymentCoordinator, ReconciliationRequiredError } from './deployment-coordinator.js';
 import { DeploymentJobRepository, type DeploymentJob } from './deployment-job-repository.js';
 import { ExternalDeploymentStateUnknownError, reportSalesforceDeployment, runAsyncSalesforceDeployment } from './salesforce-deployment.js';
 import { assertDeploymentOrgIdentities } from './org-identity-verifier.js';
-import { sameOrgIdentity } from './org-identity.js';
+import { sameOrgIdentity } from '../salesforce/public.js';
 import { evaluateQuickDeployEligibility } from './quick-deploy-eligibility.js';
-import { JobQueueClosedError } from './single-job-queue.js';
+import { JobQueueClosedError } from '../jobs/public.js';
 
 export interface ApproveDeploymentRequest {
   dryRunJobId: string;
@@ -43,7 +43,7 @@ export class DeploymentService {
   public constructor(
     private readonly jobs: DeploymentJobRepository,
     private readonly coordinator: DeploymentCoordinator,
-    private readonly workspace: WorkspaceService,
+    private readonly workspace: WorkspacePort,
     private readonly sfClient: SfClient,
     private readonly options: DeploymentServiceOptions = {},
     private readonly orgExecutionAccess?: OrgExecutionAccessRepository,
