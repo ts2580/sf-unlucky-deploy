@@ -6,7 +6,7 @@ import {
   SfCommandNotStartedError,
   sanitizeSfOutput,
   type SfClient,
-} from '../salesforce/sf-client.js';
+} from '../salesforce/public.js';
 
 export type SalesforceDeploymentPhase = 'DRY_RUN' | 'DEPLOY';
 

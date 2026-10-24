@@ -1,3 +1,4 @@
+import type { MetadataSnapshot } from '../src/sources/model.js';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import * as fileSystem from 'node:fs/promises';
 import os from 'node:os';
@@ -8,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sha256Directory, sha256File } from '../src/core/files.js';
 import { projectChildMetadata } from '../src/metadata/child-metadata-projection.js';
 import { compareSnapshots } from '../src/metadata/comparator.js';
-import type { MetadataSnapshot } from '../src/sources/snapshot.js';
+
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();

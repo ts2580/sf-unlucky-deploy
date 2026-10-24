@@ -3,7 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createWebServer } from '../src/web/server/app.js';
-import { GitImportRepository, type GitImportRecord } from '../src/storage/git-import-repository.js';
+import { GitImportRepository, type GitImportRecord } from '../src/git/storage/git-import-repository.js';
 import { GitImportService } from '../src/git/git-import-service.js';
 import type { GitFetchOptions } from '../src/git/git-client.js';
 import type { GitObjectReader } from '../src/git/git-object-store.js';
@@ -87,7 +87,7 @@ async function fixture(options: { cache?: boolean; roots?: string[]; timeoutMs?:
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
   });
   server.sfudRuntime.gitImports = service;
-  server.sfudRuntime.workspace.gitImports = service;
+
   cleanups.push(async () => { await service.close(); await cache?.close(); await server.close(); await rm(root, { recursive: true, force: true }); });
   const ready = async (id: string, status: GitImportRecord['status'] = 'READY') => {
     await vi.waitFor(async () => { expect((await service.get(id, owner.user.id)).status).toBe(status); });

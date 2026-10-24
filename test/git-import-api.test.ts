@@ -12,7 +12,7 @@ import { GitRepositoryAccess } from '../src/git/git-repository-access.js';
 import type { ApiCredential } from '../src/git/git-credential-provider.js';
 import type { GitProvider, GitRepositoryInfo } from '../src/git/git-provider.js';
 import { normalizeRepository } from '../src/git/git-repository.js';
-import { GitImportRepository } from '../src/storage/git-import-repository.js';
+import { GitImportRepository } from '../src/git/storage/git-import-repository.js';
 import { createWebServer } from '../src/web/server/app.js';
 
 const origin = 'https://deploy.example.com';
@@ -208,7 +208,7 @@ async function createFixture(fetchOverride?: (options: GitFetchOptions) => Promi
     client: { fetch: fetchOverride ?? (async (options: GitFetchOptions) => { options.onDiskUsage(100); return objects(); }) },
   });
   server.sfudRuntime.gitImports = service;
-  server.sfudRuntime.workspace.gitImports = service;
+
   return {
     server, repository, providerCalls, importService: service,
     // Runtime shutdown owns its original service; this fixture replaced it.

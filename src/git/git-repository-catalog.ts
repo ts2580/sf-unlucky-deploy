@@ -1,12 +1,12 @@
 import { providerApiCredential, type ApiCredential } from './git-credential-provider.js';
-import type { GitConnectionRepository } from '../storage/git-connection-repository.js';
+import type { GitConnectionRepository } from './storage/git-connection-repository.js';
 import type { GitConnectionService } from './git-connection-service.js';
 import { GitError } from './git-errors.js';
 import { normalizeRepository } from './git-repository.js';
 import { validateProviderUrl } from './git-network.js';
 import { arrayBody, numberId, pageNumber, ProviderApi, record, stringField } from './providers/provider-api.js';
 import { repositoryIdentity } from './git-remote-provider.js';
-import type { GitCatalogPage, GitCatalogQuery } from '../api/git-project-contracts.js';
+import type { GitCatalogPage, GitCatalogQuery } from '../contracts/git-project-contracts.js';
 
 /** Lists only the connected user's resources; every fetch authorizes again. */
 export class GitRepositoryCatalog {

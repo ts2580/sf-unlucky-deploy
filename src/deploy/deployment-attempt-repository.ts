@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { SfudError } from '../core/errors.js';
 import type { DatabaseExecutor } from '../storage/database-executor.js';
-import type { OrgIdentitySnapshot } from './org-identity.js';
+import type { OrgIdentitySnapshot } from '../salesforce/public.js';
 import type { SalesforceDeploymentProgress } from './salesforce-deployment.js';
 
 export interface DeploymentAttempt {

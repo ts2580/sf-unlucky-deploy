@@ -1,12 +1,12 @@
 import { SfudError } from '../core/errors.js';
-import type { WorkspaceService } from '../web/server/workspace-service.js';
+import type { WorkspacePort } from '../sources/ports.js';
 import type { DeploymentJob, DeploymentJobRepository } from './deployment-job-repository.js';
-import { sameOrgIdentity, type OrgIdentitySnapshot } from './org-identity.js';
+import { sameOrgIdentity, type OrgIdentitySnapshot } from '../salesforce/public.js';
 
 export async function assertDeploymentOrgIdentities(
   job: DeploymentJob,
   jobs: DeploymentJobRepository,
-  workspace: WorkspaceService,
+  workspace: WorkspacePort,
 ): Promise<void> {
   const expectedIdentities: Array<{ role: 'source' | 'target'; identity: OrgIdentitySnapshot }> = [
     ...(job.sourceOrgIdentity === undefined

@@ -9,24 +9,25 @@ import fastifyStatic from '@fastify/static';
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import { CLI_VERSION } from '../../program.js';
-import { resolveDatabasePath } from '../../storage/sqlite-store.js';
-import type { DiagnosticsResponse, HealthResponse } from '../shared/api.js';
-import { createWebRuntime, type WebRuntime } from './runtime.js';
-import { registerAuthRoutes, requireAuthenticatedSession } from './auth-routes.js';
+import { resolveDatabasePath } from '../../app/sqlite-store.js';
+import type { DiagnosticsResponse, HealthResponse } from '../../contracts/web-api.js';
+import { createWebRuntime, type WebRuntime } from '../../app/runtime.js';
+import { registerAuthRoutes } from './auth-routes.js';
+import { requireAuthenticatedSession } from './auth-http.js';
 import { registerAdminRoutes } from './admin-routes.js';
 import { registerComparisonRoutes } from './comparison-routes.js';
 import { registerDeploymentRoutes } from './deployment-routes.js';
 import { registerProjectUploadRoutes } from './project-upload-routes.js';
-import { registerWorkflowEventRoutes } from './workflow-events.js';
+import { registerWorkflowEventRoutes } from '../../app/workflow-events.js';
 import { registerSettingsRoutes } from './settings-routes.js';
 import { registerGitConnectionRoutes } from './git-connection-routes.js';
 import { registerJobAccessRoutes } from './job-access-routes.js';
 import { registerOrgExecutionAccessRoutes } from './org-execution-access-routes.js';
 import { registerSalesforceConnectionRoutes } from './salesforce-connection-routes.js';
-import { redactSensitiveText, type SfClient } from '../../salesforce/sf-client.js';
-import { beginSalesforceRequestContext } from '../../salesforce/user-context.js';
+import { redactSensitiveText, type SfClient } from '../../salesforce/composition.js';
+import { beginSalesforceRequestContext } from '../../salesforce/composition.js';
 import type { SalesforceOAuthDependencies } from './salesforce-oauth.js';
-import type { GitHostPolicy } from '../../git/git-network.js';
+import type { GitHostPolicy } from '../../git/composition.js';
 
 declare module 'fastify' {
   interface FastifyInstance {

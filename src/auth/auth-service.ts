@@ -1,8 +1,9 @@
+import { SessionRepository, type SessionRow } from './session-repository.js';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 
 import type { DatabaseExecutor, DatabaseHandle } from '../storage/database-executor.js';
 import { runInImmediateTransaction } from '../storage/transaction.js';
-import type { SfudUser, UserRole } from '../storage/user-repository.js';
+import type { SfudUser, UserRole } from './user-repository.js';
 import { hashPassword, passwordNeedsRehash, verifyPassword } from './password.js';
 
 const SESSION_LIFETIME_MS = 12 * 60 * 60 * 1_000;
@@ -30,21 +31,9 @@ export interface UpdateManagedUserInput {
   disabled?: boolean;
 }
 
-interface SessionRow {
-  session_id: string;
-  user_id: string;
-  email: string;
-  display_name: string;
-  role: UserRole;
-  disabled_at: string | null;
-  created_at: string;
-  updated_at: string;
-  csrf_token_hash: string | null;
-  expires_at: string;
-  local_password_digest?: string | null;
-}
 
 export class AuthService {
+  private readonly sessions: SessionRepository;
   private bootstrapToken: string | undefined;
   private localAccessDigest: string | undefined;
 
@@ -56,6 +45,7 @@ export class AuthService {
     private readonly createSecret: () => string = () => randomBytes(32).toString('base64url'),
   ) {
     this.bootstrapToken = bootstrapToken;
+    this.sessions = new SessionRepository(database);
   }
 
   public async isSetupRequired(): Promise<boolean> {
@@ -97,7 +87,7 @@ export class AuthService {
     const timestamp = this.now().toISOString();
     await runInImmediateTransaction(this.database, async (transaction) => {
       // Auto-created loopback sessions must never unlock a newly protected server.
-      await transaction.run("UPDATE sessions SET revoked_at = ? WHERE user_id = 'local-operator' AND revoked_at IS NULL", timestamp);
+      await this.sessions.revokeUser(transaction, 'local-operator', timestamp);
       if (digest === undefined) {
         await transaction.run("DELETE FROM password_credentials WHERE user_id = 'local-operator'");
       } else {
@@ -197,9 +187,7 @@ export class AuthService {
 
   public async revoke(sessionToken: string): Promise<void> {
     const timestamp = this.now().toISOString();
-    await this.database.run(`
-      UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL
-    `, timestamp, hashSecret(sessionToken));
+    await this.sessions.revoke(hashSecret(sessionToken), timestamp);
   }
 
   public verifyCsrf(csrfToken: string | undefined, expectedHash: string): boolean {
@@ -301,9 +289,7 @@ export class AuthService {
         UPDATE users SET role = ?, disabled_at = ?, updated_at = ? WHERE id = ?
       `, nextRole, disabledAt, timestamp, input.userId);
       if (nextDisabled && current.disabled_at === null) {
-        await transaction.run(`
-          UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL
-        `, timestamp, input.userId);
+        await this.sessions.revokeUser(transaction, input.userId, timestamp);
       }
       if (nextRole !== current.role) {
         await this.writeUserAudit(transaction, input.actorUserId, 'USER_ROLE_CHANGED', input.userId, {
@@ -343,14 +329,10 @@ export class AuthService {
           throw new AuthError('INVALID_CREDENTIALS', '개인용 접속 설정이 변경되었습니다. 서버를 다시 시작하세요.');
         }
       }
-      await transaction.run(`
-        INSERT INTO sessions (
-          id, user_id, token_hash, csrf_token_hash, expires_at, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
-      `, sessionId, userId, hashSecret(sessionToken), hashSecret(csrfToken), expiresAt, createdAt.toISOString());
-      await transaction.run(`
-        DELETE FROM sessions WHERE expires_at <= ? OR revoked_at IS NOT NULL
-      `, createdAt.toISOString());
+      await this.sessions.create(transaction, {
+        id: sessionId, userId, tokenHash: hashSecret(sessionToken), csrfTokenHash: hashSecret(csrfToken),
+        expiresAt, createdAt: createdAt.toISOString(),
+      });
       await this.writeAudit(transaction, userId, 'SESSION_CREATED', sessionId, {}, createdAt.toISOString());
     });
     const user = await this.getUserRequired(userId);
@@ -358,15 +340,7 @@ export class AuthService {
   }
 
   private async getSessionRow(sessionToken: string): Promise<SessionRow | undefined> {
-    const row = await this.database.get<SessionRow>(`
-      SELECT s.id session_id, s.user_id, s.csrf_token_hash, s.expires_at,
-             u.email, u.display_name, u.role, u.disabled_at, u.created_at, u.updated_at,
-             pc.password_digest local_password_digest
-      FROM sessions s
-      JOIN users u ON u.id = s.user_id
-      LEFT JOIN password_credentials pc ON pc.user_id = u.id
-      WHERE s.token_hash = ? AND s.revoked_at IS NULL
-    `, hashSecret(sessionToken));
+    const row = await this.sessions.find(hashSecret(sessionToken));
     if (row?.user_id === 'local-operator'
       && (row.local_password_digest ?? undefined) !== this.localAccessDigest) return undefined;
     return row;

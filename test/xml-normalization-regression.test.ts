@@ -1,3 +1,5 @@
+import type { SourceSpec } from '../src/sources/model.js';
+import type { MetadataSnapshot } from '../src/sources/model.js';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,8 +9,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { compareXml } from '../src/metadata/xml-diff.js';
 import { compareSnapshots, MAX_DIFF_INPUT_BYTES } from '../src/metadata/comparator.js';
 import { normalizedTextHash } from '../src/metadata/normalized-text-hash.js';
-import type { SourceSpec } from '../src/sources/source-spec.js';
-import type { MetadataSnapshot } from '../src/sources/snapshot.js';
+
+
 import { removeDirectoriesAfterTest, writeFixtureFiles } from './support/files.js';
 
 describe('XML normalization regressions', () => {

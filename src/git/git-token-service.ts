@@ -4,8 +4,8 @@ import { credentialProviderFor, providerApiCredential, validApiUsername } from '
 import { GitClient } from './git-client.js';
 import { GitRemoteProvider } from './git-remote-provider.js';
 import { ProviderApi, numberId, record, stringField } from './providers/provider-api.js';
-import type { GitConnectionRepository, GitConnection, GitTokens } from '../storage/git-connection-repository.js';
-import type { GitTokenInput } from '../api/git-contracts.js';
+import type { GitConnectionRepository, GitConnection, GitTokens } from './storage/git-connection-repository.js';
+import type { GitTokenInput } from '../contracts/git-contracts.js';
 
 interface TokenUser { id: string; email: string; role: string }
 export interface EnvironmentTokenResult { provider: GitProviderId; connection?: GitConnection; errorCode?: string }

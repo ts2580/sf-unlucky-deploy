@@ -1,11 +1,11 @@
 import { deploymentFailureCode } from './deployment-error.js';
-import { redactSensitiveText } from '../salesforce/sf-client.js';
+import { redactSensitiveText } from '../salesforce/public.js';
 import { SfudError } from '../core/errors.js';
 import {
   DeploymentJobRepository,
   type DeploymentJob,
 } from './deployment-job-repository.js';
-import { JobQueueCapacityError, type JobQueueReservation, SingleJobQueue } from './single-job-queue.js';
+import { JobQueueCapacityError, type JobQueueReservation, SingleJobQueue } from '../jobs/public.js';
 import { DeploymentCompletion, type SalesforceJobResult } from './deployment-completion.js';
 import type { DeploymentExecutionLeaseRepository } from './deployment-execution-lease-repository.js';
 

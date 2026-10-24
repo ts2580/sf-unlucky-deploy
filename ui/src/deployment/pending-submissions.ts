@@ -1,7 +1,7 @@
-import { WorkspaceSourceSchema, type WorkspaceSource } from '../../../src/api/workspace-contracts';
+import { WorkspaceSourceSchema, type WorkspaceSource } from '../../../src/contracts/workspace-contracts';
 import { apiRequest } from '../api-client';
 import { Value } from '@sinclair/typebox/value';
-import { DeploymentSubmissionLookupSchema, type DeploymentJobResponse, CreateDirectDeploymentRequestSchema, CreateDryRunRequestSchema, type CreateDirectDeploymentRequest, type CreateDryRunRequest } from '../../../src/api/deployment-contracts';
+import { DeploymentSubmissionLookupSchema, type DeploymentJobResponse, CreateDirectDeploymentRequestSchema, CreateDryRunRequestSchema, type CreateDirectDeploymentRequest, type CreateDryRunRequest } from '../../../src/contracts/deployment-contracts';
 const prefix = 'sfud:pending:v1:';
 export interface PendingSubmission { owner: string; key: string; operation: 'dry-run' | 'direct'; body: CreateDryRunRequest | CreateDirectDeploymentRequest; wireFingerprint: string; createdAt: string; source?: WorkspaceSource; target?: WorkspaceSource; jobId?: string }
 const storageKey = (owner: string, key: string) => `${prefix}${encodeURIComponent(owner)}:${encodeURIComponent(key)}`;

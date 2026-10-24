@@ -1,8 +1,9 @@
+import type { SourceSpec } from '../sources/model.js';
 import { SfudError } from '../core/errors.js';
-import type { SfClient } from '../salesforce/sf-client.js';
-import type { SourceSpec } from '../sources/source-spec.js';
-import type { InstalledPackage } from '../api/package-contracts.js';
-import type { PackageComponent } from '../api/package-contracts.js';
+import type { SfClient } from '../salesforce/public.js';
+
+import type { InstalledPackage } from '../contracts/package-contracts.js';
+import type { PackageComponent } from '../contracts/package-contracts.js';
 import { retrievePackageComponents } from './package-components.js';
 
 export interface PackageExclusion {

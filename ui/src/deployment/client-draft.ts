@@ -1,5 +1,5 @@
 import { Value } from '@sinclair/typebox/value';
-import { DeploymentSelectionSchema, type DeploymentSelection } from '../../../src/api/deployment-preset-contracts';
+import { DeploymentSelectionSchema, type DeploymentSelection } from '../../../src/contracts/deployment-preset-contracts';
 const prefix = 'sfud:draft-fallback:v1:';
 interface ClientDraft { owner: string; tabId: string; expiresAt: string; selection: DeploymentSelection }
 const keyFor = (owner: string, tabId: string) => `${prefix}${encodeURIComponent(owner)}:${tabId}`;

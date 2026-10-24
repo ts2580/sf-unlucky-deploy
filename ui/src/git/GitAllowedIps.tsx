@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type { ApiUser } from '../auth/api';
-import { GitAllowedIpInputSchema, GitAllowedIpListResponseSchema, GitPrivateIpCheckInputSchema, type GitAllowedIp, type GitNetworkSettings } from '../../../src/api/git-contracts';
+import { GitAllowedIpInputSchema, GitAllowedIpListResponseSchema, GitPrivateIpCheckInputSchema, type GitAllowedIp, type GitNetworkSettings } from '../../../src/contracts/git-contracts';
 import { apiRequest } from '../api-client';
 import { errorMessage } from './api';
 import { ConnectionDialog } from '../components/ConnectionDialog';

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { InstalledPackage, LoadedPackage, PackageComponent } from '../../../src/api/package-contracts';
+import type { InstalledPackage, LoadedPackage, PackageComponent } from '../../../src/contracts/package-contracts';
 import { apiRequest } from '../api-client';
 import { Icon } from '../components/Icon';
 

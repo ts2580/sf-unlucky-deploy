@@ -1,9 +1,9 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
-import type { GitConnection, GitConnectionListResponse, GitProvidersResponse } from '../src/api/git-contracts.js';
+import type { GitConnection, GitConnectionListResponse, GitProvidersResponse } from '../src/contracts/git-contracts.js';
 import type {
   GitCatalogPage, GitImport, GitImportListResponse, GitImportResponse, GitRefsResponse, GitRepositoryResponse,
-} from '../src/api/git-project-contracts.js';
-import type { WorkspaceResponse } from '../src/api/workspace-contracts.js';
+} from '../src/contracts/git-project-contracts.js';
+import type { WorkspaceResponse } from '../src/contracts/workspace-contracts.js';
 
 test.describe.configure({ mode: 'serial' });
 test.beforeEach(async ({ page }) => {

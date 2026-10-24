@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DeploymentCompletion } from '../src/deploy/deployment-completion.js';
 import { DeploymentJobRepository } from '../src/deploy/deployment-job-repository.js';
-import { openSqliteStore } from '../src/storage/sqlite-store.js';
+import { openSqliteStore } from '../src/app/sqlite-store.js';
 
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 

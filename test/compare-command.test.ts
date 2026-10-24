@@ -1,10 +1,11 @@
+import { executeComparison } from '../src/compare/execute-comparison.js';
 import { access, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { runCompareCommand } from '../src/commands/compare.js';
+import { runCompareCommand } from '../src/app/cli-operations.js';
 import type { SfClient, SfRunOptions } from '../src/salesforce/sf-client.js';
 import { removeDirectoriesAfterTest, writeFixtureFiles } from './support/files.js';
 
@@ -12,6 +13,21 @@ describe('compare command', () => {
   const temporaryDirectories: string[] = [];
 
   afterEach(async () => removeDirectoriesAfterTest(temporaryDirectories));
+
+  it('실행 모듈은 CLI 출력 없이 비교 결과를 반환한다', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-compare-silent-'));
+    temporaryDirectories.push(root);
+    const manifest = path.join(root, 'package.xml');
+    await writeFile(manifest, '<Package/>\n');
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      const result = await executeComparison({ left: 'org:left', right: 'org:right', manifest,
+        reportDir: path.join(root, 'run') }, { cwd: process.cwd(), sfClient: new OrgCompareSfClient() });
+      expect(result.comparison.summary.modified).toBe(1);
+      expect(stdout).not.toHaveBeenCalled();
+      expect(result).not.toHaveProperty('exitCode');
+    } finally { stdout.mockRestore(); }
+  });
 
   it('두 org snapshot을 비교하고 모든 리포트를 생성한다', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'sfud-compare-command-'));

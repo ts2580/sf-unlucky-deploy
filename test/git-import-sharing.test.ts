@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createWebServer } from '../src/web/server/app.js';
-import { GitImportRepository } from '../src/storage/git-import-repository.js';
+import { GitImportRepository } from '../src/git/storage/git-import-repository.js';
 import { GitImportService } from '../src/git/git-import-service.js';
 import type { GitFetchOptions } from '../src/git/git-client.js';
 import type { GitObjectReader } from '../src/git/git-object-store.js';
@@ -91,7 +91,7 @@ async function fixture() {
     { providers: { github: provider, gitlab: provider, bitbucket: provider }, client: { fetch } },
   );
   server.sfudRuntime.gitImports = imports;
-  server.sfudRuntime.workspace.gitImports = imports;
+
   cleanups.push(async () => {
     await imports.close();
     await server.close();

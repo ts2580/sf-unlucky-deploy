@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { TokenVault } from '../src/git/token-vault.js';
+import { TokenVault } from '../src/core/token-vault.js';
 import { UserSfClient } from '../src/salesforce/user-sf-client.js';
 import { currentSalesforceConnectionPin, currentSalesforceUserId, pinSalesforceConnection, runAsSalesforceUser } from '../src/salesforce/user-context.js';
 import { SfCommandFailedError, type SfClient, type SfRunOptions } from '../src/salesforce/sf-client.js';
-import { SalesforceConnectionRepository } from '../src/storage/salesforce-connection-repository.js';
-import { openSqliteStore, type SqliteStore } from '../src/storage/sqlite-store.js';
-import { UserRepository } from '../src/storage/user-repository.js';
+import { SalesforceConnectionRepository } from '../src/salesforce/connection-repository.js';
+import { openSqliteStore, type SqliteStore } from '../src/app/sqlite-store.js';
+import { UserRepository } from '../src/auth/user-repository.js';
 import { createWebServer } from '../src/web/server/app.js';
-import { requireAuthenticatedSession } from '../src/web/server/auth-routes.js';
-import { WorkspaceService } from '../src/web/server/workspace-service.js';
+import { requireAuthenticatedSession } from '../src/web/server/auth-http.js';
+import { WorkspaceService } from '../src/sources/workspace-service.js';
 
 const stores: SqliteStore[] = [];
 afterEach(async () => { await Promise.all(stores.splice(0).map((store) => store.close())); });

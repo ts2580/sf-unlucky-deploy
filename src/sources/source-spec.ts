@@ -2,19 +2,7 @@ import path from 'node:path';
 
 import { SfudError } from '../core/errors.js';
 
-export type SourceSpec = OrgSourceSpec | LocalSourceSpec;
-
-export interface OrgSourceSpec {
-  kind: 'org';
-  alias: string;
-  displayName: string;
-}
-
-export interface LocalSourceSpec {
-  kind: 'local';
-  projectPath: string;
-  displayName: string;
-}
+import type { SourceSpec } from './model.js';
 
 export function parseSourceSpec(value: string, cwd = process.cwd()): SourceSpec {
   const separatorIndex = value.indexOf(':');

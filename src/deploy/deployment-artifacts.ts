@@ -1,4 +1,4 @@
-import type { ComparisonResult } from '../metadata/comparator.js';
+import type { ComparisonResult } from '../metadata/public.js';
 import { readCompressedJsonArtifact } from '../storage/json-artifact.js';
 import type { DeploymentJob } from './deployment-job-model.js';
 

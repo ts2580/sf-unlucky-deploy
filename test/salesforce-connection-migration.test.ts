@@ -2,10 +2,10 @@ import { open } from 'sqlite';
 import sqlite3 from 'sqlite3';
 import { expect, it } from 'vitest';
 
-import { TokenVault } from '../src/git/token-vault.js';
+import { TokenVault } from '../src/core/token-vault.js';
 import { DatabaseExecutor } from '../src/storage/database-executor.js';
-import { applyMigrations } from '../src/storage/migrations.js';
-import { SalesforceConnectionRepository } from '../src/storage/salesforce-connection-repository.js';
+import { applyMigrations } from '../src/app/migrations.js';
+import { SalesforceConnectionRepository } from '../src/salesforce/connection-repository.js';
 
 it('v45 연결의 ID와 암호문을 보존해 세대 이전 후에도 복호화하고 재등록을 구분한다', async () => {
   const raw = await open({ filename: ':memory:', driver: sqlite3.Database });

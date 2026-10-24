@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { orgIdentityFingerprint, type OrgIdentitySnapshot } from '../src/deploy/org-identity.js';
+import { orgIdentityFingerprint, type OrgIdentitySnapshot } from '../src/salesforce/org-identity.js';
 import { DryRunService, type CreateDirectDeploymentInput } from '../src/deploy/dry-run-service.js';
 import type { DeploymentJobRepository, DeploymentJob } from '../src/deploy/deployment-job-repository.js';
 import type { DeploymentCoordinator } from '../src/deploy/deployment-coordinator.js';
-import type { WorkspaceService } from '../src/web/server/workspace-service.js';
+import type { WorkspaceService } from '../src/sources/workspace-service.js';
 
 const sourceIdentity: OrgIdentitySnapshot = { alias: 'source', username: 'source@example.com', orgId: '00D000000000001' };
 const targetIdentity: OrgIdentitySnapshot = { alias: 'target', username: 'target@example.com', orgId: '00D000000000002', connectionId: 'target-connection', connectionGeneration: 1, instanceUrlHash: 'host-hash' };

@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { lstat, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { sfProcessCommand } from '../salesforce/sf-client.js';
+import { sfProcessCommand } from '../salesforce/public.js';
 import { inspectDataDirectory } from './data-inspection.js';
 import { configurationUrl, LOOPBACK_HOSTS, resolveRuntimeSettings } from './runtime-settings.js';
 import { safeOutput } from './setup.js';

@@ -6,7 +6,7 @@ import { SfudError } from '../core/errors.js';
 import { isOrgIdentifier, normalizeSalesforceOrgId } from './org-identifier.js';
 import { isDefiniteSalesforceAuthFailure, ProcessSfClient, type SfClient, type SfRunOptions } from './sf-client.js';
 import { currentSalesforceUserId, pinSalesforceConnection } from './user-context.js';
-import { SalesforceConnectionRepository, type SalesforceConnection } from '../storage/salesforce-connection-repository.js';
+import { SalesforceConnectionRepository, type SalesforceConnection } from './connection-repository.js';
 
 /** 사용자별 암호화 URL만 임시 CLI 상태로 복원하고 명령 종료 후 지운다. */
 export class UserSfClient implements SfClient {

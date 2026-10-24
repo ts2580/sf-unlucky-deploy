@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { settledSnapshots } from '../src/commands/settled-snapshots.js';
+import { settledSnapshots } from '../src/sources/settled-snapshots.js';
 
 it('첫 실패를 보존하되 형제 snapshot 완료까지 명령을 유지한다', async () => {
   const failure = new Error('conversion failed');

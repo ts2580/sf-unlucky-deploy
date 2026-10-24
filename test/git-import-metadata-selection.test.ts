@@ -8,7 +8,7 @@ import type { GitFetchOptions } from '../src/git/git-client.js';
 import type { GitObjectReader } from '../src/git/git-object-store.js';
 import type { GitProvider } from '../src/git/git-provider.js';
 import { normalizeRepository } from '../src/git/git-repository.js';
-import { GitImportRepository } from '../src/storage/git-import-repository.js';
+import { GitImportRepository } from '../src/git/storage/git-import-repository.js';
 
 const cleanups: (() => Promise<void>)[] = [];
 const sha = '1'.repeat(40);
@@ -72,7 +72,7 @@ describe('Git metadata selection persistence', { timeout: 30_000 }, () => {
       client: { fetch },
     });
     server.sfudRuntime.gitImports = service;
-    server.sfudRuntime.workspace.gitImports = service;
+
     cleanups.push(async () => {
       await service.close();
       await server.close();

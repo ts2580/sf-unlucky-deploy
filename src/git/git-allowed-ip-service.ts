@@ -1,5 +1,5 @@
 import { MutableGitHostPolicy, type GitHostPolicy } from './git-network.js';
-import type { GitAllowedIp, GitAllowedIpRepository } from '../storage/git-allowed-ip-repository.js';
+import type { GitAllowedIp, GitAllowedIpRepository } from './storage/git-allowed-ip-repository.js';
 
 /** Merges immutable startup entries with administrator-managed SQLite entries. */
 export class GitAllowedIpService {

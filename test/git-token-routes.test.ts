@@ -5,9 +5,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ProviderApi } from '../src/git/providers/provider-api.js';
 import { GitTokenService } from '../src/git/git-token-service.js';
-import { GitConnectionRepository } from '../src/storage/git-connection-repository.js';
-import { TokenVault } from '../src/git/token-vault.js';
-import { openSqliteStore } from '../src/storage/sqlite-store.js';
+import { GitConnectionRepository } from '../src/git/storage/git-connection-repository.js';
+import { TokenVault } from '../src/core/token-vault.js';
+import { openSqliteStore } from '../src/app/sqlite-store.js';
 import { createWebServer } from '../src/web/server/app.js';
 
 const origin = 'https://deploy.example.com';

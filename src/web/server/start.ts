@@ -4,7 +4,7 @@ import type { FastifyInstance } from 'fastify';
 
 import { SfudError } from '../../core/errors.js';
 import { createWebServer } from './app.js';
-import type { GitHostPolicy } from '../../git/git-network.js';
+import type { GitHostPolicy } from '../../git/composition.js';
 import { startUiControl } from './ui-control.js';
 
 export const DEFAULT_UI_HOST = '127.0.0.1';

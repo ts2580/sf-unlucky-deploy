@@ -1,6 +1,6 @@
-import type { WorkspaceSource } from '../../../src/api/workspace-contracts';
+import type { WorkspaceSource } from '../../../src/contracts/workspace-contracts';
 import { apiRequest } from '../api-client';
-import type { ComparisonFileDifference } from '../ComparisonFileDiff';
+import type { ComparisonFileDifference } from './ComparisonFileDiff';
 
 export interface ComparisonComponent {
   key: string;

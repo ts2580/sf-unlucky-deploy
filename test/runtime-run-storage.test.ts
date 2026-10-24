@@ -4,8 +4,8 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { RuntimeRunStorage } from '../src/storage/runtime-run-storage.js';
-import { openSqliteStore } from '../src/storage/sqlite-store.js';
+import { RuntimeRunStorage } from '../src/app/runtime-run-storage.js';
+import { openSqliteStore } from '../src/app/sqlite-store.js';
 import { DeploymentJobRepository } from '../src/deploy/deployment-job-repository.js';
 
 afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); });

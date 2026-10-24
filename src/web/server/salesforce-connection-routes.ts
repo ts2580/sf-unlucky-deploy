@@ -5,9 +5,9 @@ import { Type } from '@sinclair/typebox';
 import type { FastifyInstance } from 'fastify';
 
 import { SfudError } from '../../core/errors.js';
-import { redactSensitiveText } from '../../salesforce/sf-client.js';
-import { isOrgIdentifier } from '../../salesforce/org-identifier.js';
-import { isRequestSessionActive, requireAuthenticatedSession } from './auth-routes.js';
+import { redactSensitiveText } from '../../salesforce/composition.js';
+import { isOrgIdentifier } from '../../salesforce/composition.js';
+import { isRequestSessionActive, requireAuthenticatedSession } from './auth-http.js';
 import { SalesforceOAuthError, SalesforceOAuthFlowService, salesforceOAuthCookieName,
   type SalesforceOAuthDependencies } from './salesforce-oauth.js';
 

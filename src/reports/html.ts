@@ -1,6 +1,6 @@
-import type { ComparisonResult, FileDifference } from '../metadata/comparator.js';
-import type { XmlChange } from '../metadata/xml-diff.js';
-import { comparisonDisplayWarnings } from './comparison-display.js';
+import type { ComparisonResult, FileDifference } from '../metadata/public.js';
+import type { XmlChange } from '../metadata/public.js';
+import { comparisonDisplayWarnings } from '../contracts/comparison-display.js';
 
 export function renderHtmlReport(result: ComparisonResult): string {
   const skipped = result.comparisonLimit?.exceeded === true;

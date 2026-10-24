@@ -1,4 +1,4 @@
-import { redactSensitiveText } from '../salesforce/sf-client.js';
+import { redactSensitiveText } from '../salesforce/public.js';
 import type { DeploymentJob, DeploymentJobRepository, RemoteDeploymentStatus, TransitionDetails } from './deployment-job-repository.js';
 
 export interface SalesforceJobResult {

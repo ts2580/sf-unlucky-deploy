@@ -1,4 +1,5 @@
-import type { WorkspaceSource } from '../api/workspace-contracts.js';
+import type { SourceDescriptor as WorkspaceSource } from './model.js';
+
 
 export function assertGitMetadataScope(source: WorkspaceSource, requestedTypes: readonly string[] | undefined): void {
   const scope = source.provenance?.metadataType;
